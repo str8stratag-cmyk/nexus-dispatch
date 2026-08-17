@@ -5,6 +5,7 @@ export interface DispatchEvent {
   transcript: string;
   keywords: string;
   address: string | null;
+  crossStreet: string | null;
   lat: number | null;
   lng: number | null;
   signalType: string | null;
@@ -26,6 +27,7 @@ export const insertDispatchEventSchema = z.object({
   transcript: z.string(),
   keywords: z.string().default("[]"),
   address: z.string().nullable().optional(),
+  crossStreet: z.string().nullable().optional(),
   lat: z.number().nullable().optional(),
   lng: z.number().nullable().optional(),
   signalType: z.string().nullable().optional(),

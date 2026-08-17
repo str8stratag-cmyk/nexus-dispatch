@@ -17,6 +17,7 @@ interface DispatchEventRow {
   transcript: string;
   keywords: string;
   address: string | null;
+  crossStreet: string | null;
   lat: number | null;
   lng: number | null;
   signalType: string | null;
@@ -36,6 +37,7 @@ function eventsToCSV(events: DispatchEventRow[]): string {
     "District",
     "Source",
     "Address",
+    "Cross Street",
     "Latitude",
     "Longitude",
     "Status",
@@ -57,6 +59,7 @@ function eventsToCSV(events: DispatchEventRow[]): string {
       e.district || "",
       e.source || "",
       e.address || "",
+      e.crossStreet || "",
       e.lat ?? "",
       e.lng ?? "",
       e.status || "",
@@ -205,7 +208,7 @@ export default function EventLog() {
             {event.address && (
               <div className="flex items-center gap-1 text-xs font-mono text-foreground">
                 <MapPin className="h-3 w-3 text-primary shrink-0" />
-                {event.address}
+                {event.crossStreet ? `${event.address} & ${event.crossStreet}` : event.address}
               </div>
             )}
             {event.description && (

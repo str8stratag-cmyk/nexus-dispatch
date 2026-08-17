@@ -7,6 +7,7 @@ interface DispatchMarker {
   lat: number;
   lng: number;
   address: string;
+  crossStreet: string;
   signalType: string;
   description: string;
   district: string;
@@ -16,6 +17,53 @@ interface DispatchMarker {
 
 interface DispatchMapProps {
   markers: DispatchMarker[];
+}
+
+// v2: Build popup DOM safely to avoid XSS from DB values.
+function buildPopupContent(marker: DispatchMarker): HTMLElement {
+  const container = document.createElement("div");
+  container.style.minWidth = "220px";
+  container.style.fontFamily = "var(--font-sans, ui-sans-serif, system-ui, sans-serif)";
+
+  const signal = document.createElement("div");
+  signal.style.fontWeight = "700";
+  signal.style.color = "hsl(38 92% 55%)";
+  signal.style.marginBottom = "4px";
+  signal.textContent = marker.signalType || "Unknown Signal";
+  container.appendChild(signal);
+
+  const meta = document.createElement("div");
+  meta.style.fontSize = "12px";
+  meta.style.color = "hsl(220 6% 65%)";
+  meta.style.marginBottom = "8px";
+  meta.textContent = `${marker.district} • ${new Date(marker.createdAt).toLocaleTimeString()}`;
+  container.appendChild(meta);
+
+  const address = document.createElement("div");
+  address.style.fontWeight = "600";
+  address.style.marginBottom = "4px";
+  address.textContent = marker.crossStreet
+    ? `${marker.address} & ${marker.crossStreet}`
+    : marker.address || "Address unknown";
+  container.appendChild(address);
+
+  if (marker.description) {
+    const desc = document.createElement("div");
+    desc.style.marginBottom = "8px";
+    desc.textContent = marker.description;
+    container.appendChild(desc);
+  }
+
+  const transcript = document.createElement("div");
+  transcript.style.fontSize = "12px";
+  transcript.style.color = "hsl(220 6% 55%)";
+  transcript.style.borderTop = "1px solid hsl(220 9% 17%)";
+  transcript.style.paddingTop = "6px";
+  transcript.style.marginTop = "6px";
+  transcript.textContent = marker.transcript || "No transcript";
+  container.appendChild(transcript);
+
+  return container;
 }
 
 export default function DispatchMap({ markers }: DispatchMapProps) {
@@ -77,18 +125,8 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
         iconAnchor: [14, 14],
       });
 
-      const popupContent = `
-        <div style="min-width: 220px; font-family: var(--font-sans);">
-          <div style="font-weight: 700; color: hsl(38 92% 55%); margin-bottom: 4px;">${marker.signalType || "Unknown Signal"}</div>
-          <div style="font-size: 12px; color: hsl(220 6% 65%); margin-bottom: 8px;">${marker.district} • ${new Date(marker.createdAt).toLocaleTimeString()}</div>
-          <div style="font-weight: 600; margin-bottom: 4px;">${marker.address || "Address unknown"}</div>
-          ${marker.description ? `<div style="margin-bottom: 8px;">${marker.description}</div>` : ""}
-          <div style="font-size: 12px; color: hsl(220 6% 55%); border-top: 1px solid hsl(220 9% 17%); padding-top: 6px; margin-top: 6px;">${marker.transcript || "No transcript"}</div>
-        </div>
-      `;
-
       L.marker([marker.lat, marker.lng], { icon })
-        .bindPopup(popupContent)
+        .bindPopup(buildPopupContent(marker))
         .addTo(markerLayerRef.current!);
     });
   }, [markers]);

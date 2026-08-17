@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useAudioCapture } from "@/hooks/use-audio-capture";
-import { detectKeywords, extractAddress } from "@/lib/constants";
+import { useDispatchBuffer } from "@/hooks/use-dispatch-buffer";
 import { useKeywords } from "@/hooks/use-keywords";
 import RmsMeter from "./rms-meter";
 import TranscriptFeed from "./transcript-feed";
@@ -16,10 +16,11 @@ interface TranscriptEntry {
   timestamp: number;
 }
 
-interface DetectedEvent {
+export interface DetectedEvent {
   transcript: string;
   keywords: { keyword: string; signalType: string }[];
   address: string | null;
+  crossStreet: string | null;
   district: string;
   source: string;
 }
@@ -32,6 +33,8 @@ interface AudioPanelProps {
   districts: string[];
   onDispatchDetected: (event: DetectedEvent) => void;
 }
+
+const DISPATCH_COOLDOWN_MS = 15000;
 
 export default function AudioPanel({
   district,
@@ -48,15 +51,52 @@ export default function AudioPanel({
   const lastDispatchTimeRef = useRef(0);
   const { toast } = useToast();
   const { keywords: keywordList } = useKeywords();
-  const keywordListRef = useRef(keywordList);
-  useEffect(() => {
-    keywordListRef.current = keywordList;
-  }, [keywordList]);
+
+  const handleDispatch = useCallback(async (payload: {
+    transcript: string;
+    keywords: { keyword: string; signalType: string }[];
+    address: string | null;
+    crossStreet: string | null;
+  }) => {
+    const now = Date.now();
+    if (now - lastDispatchTimeRef.current < DISPATCH_COOLDOWN_MS) {
+      return;
+    }
+    lastDispatchTimeRef.current = now;
+
+    const event: DetectedEvent = {
+      transcript: payload.transcript,
+      keywords: payload.keywords,
+      address: payload.address,
+      crossStreet: payload.crossStreet,
+      district,
+      source: sourceName || district,
+    };
+
+    try {
+      await onDispatchDetected(event);
+      setLastDispatch(event);
+
+      toast({
+        title: "Dispatch Auto-Fired",
+        description: `${payload.keywords.map((k) => k.signalType).join(", ")} — ${payload.address || "Address pending geocode"}`,
+      });
+    } catch (error) {
+      console.error("Dispatch failed:", error);
+      lastDispatchTimeRef.current = 0; // allow retry
+    }
+  }, [district, sourceName, onDispatchDetected, toast]);
+
+  const { addFinalTranscript, flush, isPending } = useDispatchBuffer({
+    keywordList,
+    silenceMs: 5000,
+    maxChunks: 6,
+    onDispatch: handleDispatch,
+  });
 
   const handleTranscript = useCallback((text: string, isFinal: boolean) => {
     const id = `entry-${entryIdRef.current++}`;
     setTranscriptEntries((prev) => {
-      // If interim, update the last interim entry
       if (!isFinal && prev.length > 0 && !prev[prev.length - 1].isFinal) {
         const updated = [...prev];
         updated[updated.length - 1] = {
@@ -69,37 +109,10 @@ export default function AudioPanel({
       return [...prev, { id, text, isFinal, timestamp: Date.now() }];
     });
 
-    // Check for keywords on final transcripts — AUTO-DISPATCH
     if (isFinal) {
-      const keywords = detectKeywords(text, keywordListRef.current);
-      if (keywords.length > 0) {
-        // Cooldown: don't dispatch if we just dispatched within 15 seconds
-        const now = Date.now();
-        if (now - lastDispatchTimeRef.current < 15000) {
-          return;
-        }
-        lastDispatchTimeRef.current = now;
-
-        const address = extractAddress(text);
-        const event = {
-          transcript: text,
-          keywords,
-          address,
-          district,
-          source: sourceName || district,
-        };
-
-        // Auto-fire dispatch immediately
-        onDispatchDetected(event);
-        setLastDispatch(event);
-
-        toast({
-          title: "Dispatch Auto-Fired",
-          description: `${keywords.map((k) => k.signalType).join(", ")} — ${address || "Address pending geocode"}`,
-        });
-      }
+      addFinalTranscript(text);
     }
-  }, [district, sourceName, onDispatchDetected]);
+  }, [addFinalTranscript]);
 
   const isInIframe = typeof window !== "undefined" && window.self !== window.top;
 
@@ -120,6 +133,10 @@ export default function AudioPanel({
       }
     }
   };
+
+  const handleStop = useCallback(() => {
+    flush().finally(() => stop());
+  }, [flush, stop]);
 
   return (
     <div className="flex flex-col h-full gap-3" data-testid="audio-panel">
@@ -194,7 +211,7 @@ export default function AudioPanel({
 
       {/* Start/Stop Button */}
       <Button
-        onClick={isCapturing ? stop : handleStart}
+        onClick={isCapturing ? handleStop : handleStart}
         variant={isCapturing ? "destructive" : "default"}
         className="w-full"
         data-testid="capture-toggle"
@@ -211,6 +228,12 @@ export default function AudioPanel({
           </>
         )}
       </Button>
+
+      {isPending && (
+        <div className="text-xs text-yellow-600 animate-pulse p-2 rounded bg-yellow-950/30 border border-yellow-900/40" data-testid="dispatch-pending">
+          ⏳ Keyword detected. Waiting for address/details...
+        </div>
+      )}
 
       {error && (
         <div className="text-xs text-red-500 p-2 rounded bg-red-950/30 border border-red-900/40" data-testid="capture-error">
@@ -255,7 +278,9 @@ export default function AudioPanel({
           {lastDispatch.address && (
             <div className="flex items-center gap-1 text-xs font-mono text-muted-foreground">
               <MapPin className="h-3 w-3 shrink-0" />
-              {lastDispatch.address}
+              {lastDispatch.crossStreet
+                ? `${lastDispatch.address} & ${lastDispatch.crossStreet}`
+                : lastDispatch.address}
             </div>
           )}
           <div className="text-[10px] text-muted-foreground italic truncate">"{lastDispatch.transcript}"</div>

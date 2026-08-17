@@ -6,7 +6,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Sun, Moon, Radio, Send, Settings, ExternalLink } from "lucide-react";
-import AudioPanel from "@/components/audio-panel";
+import AudioPanel, { type DetectedEvent } from "@/components/audio-panel";
 import DispatchMap from "@/components/dispatch-map";
 import EventLog from "@/components/event-log";
 import ManualDispatch from "@/components/manual-dispatch";
@@ -17,6 +17,7 @@ interface DispatchEventRow {
   transcript: string;
   keywords: string;
   address: string | null;
+  crossStreet: string | null;
   lat: number | null;
   lng: number | null;
   signalType: string | null;
@@ -69,20 +70,18 @@ export default function DispatchPage() {
     },
   });
 
-  const handleDispatchDetected = useCallback(async (event: {
-    transcript: string;
-    keywords: { keyword: string; signalType: string }[];
-    address: string | null;
-    district: string;
-    source: string;
-  }) => {
+  const handleDispatchDetected = useCallback(async (event: DetectedEvent) => {
     let lat: number | null = null;
     let lng: number | null = null;
 
-    // Try to geocode the address
-    if (event.address) {
+    // Build the best geocode query from address + crossStreet
+    const geocodeQuery = event.crossStreet
+      ? `${event.address} and ${event.crossStreet}`
+      : event.address;
+
+    if (geocodeQuery) {
       try {
-        const geo = await geocodeMutation.mutateAsync(event.address);
+        const geo = await geocodeMutation.mutateAsync(geocodeQuery);
         lat = geo.lat;
         lng = geo.lng;
       } catch (err) {
@@ -94,6 +93,7 @@ export default function DispatchPage() {
       transcript: event.transcript,
       keywords: JSON.stringify(event.keywords),
       address: event.address || null,
+      crossStreet: event.crossStreet || null,
       lat,
       lng,
       signalType: event.keywords[0]?.signalType || null,
@@ -113,6 +113,7 @@ export default function DispatchPage() {
       lat: e.lat!,
       lng: e.lng!,
       address: e.address || "",
+      crossStreet: e.crossStreet || "",
       signalType: e.signalType || "",
       description: e.description || "",
       district: e.district,
