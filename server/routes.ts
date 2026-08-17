@@ -56,9 +56,13 @@ export async function registerRoutes(
               }),
             }
           );
-          const tgData = await tgRes.json();
-          if (!tgData.ok) {
-            console.error("Telegram error:", tgData.description);
+          if (!tgRes.ok) {
+            console.error("Telegram HTTP error:", tgRes.status, await tgRes.text().catch(() => ""));
+          } else {
+            const tgData = await tgRes.json();
+            if (!tgData.ok) {
+              console.error("Telegram error:", tgData.description);
+            }
           }
         } catch (err) {
           console.error("Telegram send failed:", err);
@@ -228,24 +232,45 @@ export async function registerRoutes(
   return httpServer;
 }
 
+// Escape HTML so user-controlled DB values can't inject tags into Telegram HTML messages.
+function escapeHtml(value: string | null | undefined): string {
+  if (!value) return "N/A";
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function formatTelegramMessage(event: any): string {
-  const keywords = JSON.parse(event.keywords || "[]");
-  const keywordStr = keywords.length > 0 ? keywords.join(", ") : "N/A";
+  let keywords: { keyword?: string; signalType?: string }[] = [];
+  try {
+    keywords = JSON.parse(event.keywords || "[]");
+  } catch {
+    keywords = [];
+  }
+  const keywordStr = keywords.length > 0
+    ? keywords.map((k) => k.signalType || k.keyword || "Unknown").join(", ")
+    : "N/A";
+
+  const address = event.crossStreet
+    ? `${event.address} & ${event.crossStreet}`
+    : event.address;
 
   let msg = `<b>🚨 DISPATCH EVENT</b>\n\n`;
-  msg += `<b>Signal Type:</b> ${event.signalType || "N/A"}\n`;
-  msg += `<b>District:</b> ${event.district || "N/A"}\n`;
-  msg += `<b>Source:</b> ${event.source || "N/A"}\n`;
-  msg += `<b>Address:</b> ${event.address || "N/A"}\n`;
-  msg += `<b>Description:</b> ${event.description || "N/A"}\n`;
-  msg += `<b>Keywords:</b> ${keywordStr}\n`;
+  msg += `<b>Signal Type:</b> ${escapeHtml(event.signalType)}\n`;
+  msg += `<b>District:</b> ${escapeHtml(event.district)}\n`;
+  msg += `<b>Source:</b> ${escapeHtml(event.source)}\n`;
+  msg += `<b>Address:</b> ${escapeHtml(address)}\n`;
+  msg += `<b>Description:</b> ${escapeHtml(event.description)}\n`;
+  msg += `<b>Keywords:</b> ${escapeHtml(keywordStr)}\n`;
 
   if (event.lat && event.lng) {
     msg += `<b>Location:</b> ${event.lat}, ${event.lng}\n`;
     msg += `<a href="https://www.openstreetmap.org/?mlat=${event.lat}&mlon=${event.lng}&zoom=17">View on Map</a>\n`;
   }
 
-  msg += `\n<b>Transcript:</b>\n<i>${event.transcript || "N/A"}</i>\n`;
+  msg += `\n<b>Transcript:</b>\n<i>${escapeHtml(event.transcript)}</i>\n`;
   msg += `\n<b>Time:</b> ${new Date(event.createdAt).toLocaleString()}`;
 
   if (event.isManual) {
