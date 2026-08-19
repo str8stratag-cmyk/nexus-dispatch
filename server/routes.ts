@@ -4,6 +4,7 @@ import { storage } from "./storage";
 import { insertDispatchEventSchema, insertSettingsSchema } from "@shared/schema";
 import { normalizeKeywordEntry } from "@shared/keywords";
 import { isSupabaseConfigured } from "./supabase";
+import { registerAudioUploadRoutes } from "./audio-upload";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -228,6 +229,9 @@ export async function registerRoutes(
       res.status(500).json({ message: "Telegram test failed: " + err.message });
     }
   });
+
+  // Audio upload: optimize with ffmpeg and store in Supabase
+  registerAudioUploadRoutes(app);
 
   return httpServer;
 }

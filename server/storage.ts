@@ -20,6 +20,7 @@ function mapEvent(row: any): DispatchEvent {
     source: row.source,
     status: row.status,
     isManual: row.is_manual,
+    audioUrl: row.audio_url ?? null,
     createdAt: row.created_at,
   };
 }
@@ -80,6 +81,7 @@ export class DatabaseStorage implements IStorage {
         source: event.source ?? "Unknown",
         status: event.status ?? "active",
         is_manual: event.isManual ?? false,
+        audio_url: event.audioUrl ?? null,
       })
       .select("*")
       .single();
