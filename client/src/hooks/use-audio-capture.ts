@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 
 interface UseAudioCaptureOptions {
   deviceId?: string;
+  keywords?: string[];
   onTranscript?: (text: string, isFinal: boolean) => void;
 }
 
@@ -16,8 +17,11 @@ interface UseAudioCaptureReturn {
   supported: boolean;
 }
 
+const CHUNK_DURATION_MS = 8_000;
+const WHISPER_SERVICE_URL = import.meta.env.VITE_WHISPER_SERVICE_URL || "http://127.0.0.1:8178";
+
 export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioCaptureReturn {
-  const { deviceId, onTranscript } = options;
+  const { deviceId, keywords = [], onTranscript } = options;
   const [isCapturing, setIsCapturing] = useState(false);
   const [rms, setRms] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -25,28 +29,27 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
   const [supported, setSupported] = useState(true);
 
   const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recorderTimerRef = useRef<number | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
   const rafRef = useRef<number | null>(null);
-  const recognitionRef = useRef<any>(null);
   const onTranscriptRef = useRef(onTranscript);
+  const isCapturingRef = useRef(false);
+  const startRecordingRef = useRef<() => void>(() => undefined);
 
   useEffect(() => {
     onTranscriptRef.current = onTranscript;
   }, [onTranscript]);
 
-  // Check for Web Speech API support
   useEffect(() => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setSupported(false);
-    }
+    setSupported(typeof window !== "undefined" && "MediaRecorder" in window);
   }, []);
 
   const refreshDevices = useCallback(async () => {
     try {
       const deviceList = await navigator.mediaDevices.enumerateDevices();
-      setDevices(deviceList.filter((d) => d.kind === "audioinput"));
+      setDevices(deviceList.filter((device) => device.kind === "audioinput"));
     } catch (err) {
       console.error("Failed to enumerate devices:", err);
     }
@@ -56,18 +59,71 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     refreshDevices();
   }, [refreshDevices]);
 
+  const transcribe = useCallback(async (audio: Blob) => {
+    if (audio.size === 0) return;
+
+    const form = new FormData();
+    form.set("audio", audio, "dispatch.webm");
+    form.set(
+      "prompt",
+      keywords.length ? `Dispatch radio terminology: ${keywords.join(", ")}.` : "Dispatch radio terminology."
+    );
+
+    try {
+      const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, { method: "POST", body: form });
+      const result = await response.json() as { text?: string; message?: string };
+      if (!response.ok) {
+        throw new Error(result.message || "Local Whisper transcription failed.");
+      }
+      if (result.text?.trim()) {
+        onTranscriptRef.current?.(result.text.trim(), true);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Local Whisper transcription failed.";
+      console.error(message);
+      setError(message);
+    }
+  }, [keywords]);
+
+  const startRecording = useCallback(() => {
+    const stream = streamRef.current;
+    if (!stream || !isCapturingRef.current) return;
+
+    const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+    const chunks: Blob[] = [];
+    recorderRef.current = recorder;
+
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) chunks.push(event.data);
+    };
+    recorder.onstop = () => {
+      recorderRef.current = null;
+      recorderTimerRef.current = null;
+      void transcribe(new Blob(chunks, { type: "audio/webm" }));
+      if (isCapturingRef.current) startRecordingRef.current();
+    };
+    recorder.start();
+    recorderTimerRef.current = window.setTimeout(() => {
+      if (recorder.state === "recording") recorder.stop();
+    }, CHUNK_DURATION_MS);
+  }, [transcribe]);
+  startRecordingRef.current = startRecording;
+
   const start = useCallback(async () => {
     setError(null);
+    if (!supported) {
+      const message = "Audio recording is not supported in this browser. Use Chrome or Edge.";
+      setError(message);
+      throw new Error(message);
+    }
 
     try {
       const constraints: MediaStreamConstraints = {
         audio: deviceId ? { deviceId: { exact: deviceId } } : true,
       };
-
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
 
-      // Set up audio analysis for RMS
       const audioContext = new AudioContext();
       audioContextRef.current = audioContext;
       const source = audioContext.createMediaStreamSource(stream);
@@ -77,113 +133,54 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       source.connect(analyser);
       analyserRef.current = analyser;
 
-      // RMS calculation loop
-      const bufferLength = analyser.fftSize;
-      const dataArray = new Uint8Array(bufferLength);
-
+      const data = new Uint8Array(analyser.fftSize);
       const updateRms = () => {
-        analyser.getByteTimeDomainData(dataArray);
-        let sumSquares = 0;
-        for (let i = 0; i < bufferLength; i++) {
-          const normalized = (dataArray[i] - 128) / 128;
-          sumSquares += normalized * normalized;
-        }
-        const rmsValue = Math.sqrt(sumSquares / bufferLength);
-        setRms(rmsValue);
+        analyser.getByteTimeDomainData(data);
+        const sumSquares = data.reduce((sum, value) => {
+          const normalized = (value - 128) / 128;
+          return sum + normalized * normalized;
+        }, 0);
+        setRms(Math.sqrt(sumSquares / data.length));
         rafRef.current = requestAnimationFrame(updateRms);
       };
       updateRms();
 
-      // Set up speech recognition
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      if (SpeechRecognition) {
-        const recognition = new SpeechRecognition();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.lang = "en-US";
-
-        recognition.onresult = (event: any) => {
-          for (let i = event.resultIndex; i < event.results.length; i++) {
-            const result = event.results[i];
-            const transcript = result[0].transcript;
-            const isFinal = result.isFinal;
-            onTranscriptRef.current?.(transcript, isFinal);
-          }
-        };
-
-        recognition.onerror = (event: any) => {
-          if (event.error !== "no-speech" && event.error !== "aborted") {
-            console.error("Speech recognition error:", event.error);
-          }
-        };
-
-        recognition.onend = () => {
-          // Auto-restart if still capturing
-          if (streamRef.current) {
-            try {
-              recognition.start();
-            } catch (e) {
-              // Already started
-            }
-          }
-        };
-
-        recognition.start();
-        recognitionRef.current = recognition;
-      } else {
-        setError("Speech recognition not supported. Use Chrome or Edge for transcription.");
-      }
-
-      // Refresh device list to get labels (requires permission)
-      refreshDevices();
+      isCapturingRef.current = true;
+      startRecording();
+      await refreshDevices();
       setIsCapturing(true);
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to access microphone.";
       const inIframe = typeof window !== "undefined" && window.self !== window.top;
-      if (err?.name === "NotAllowedError" || err?.name === "SecurityError" || err?.message?.includes("not allowed") || err?.message?.includes("permission")) {
-        if (inIframe) {
-          setError("Microphone access blocked in preview. Click \"Open in New Tab\" to enable audio capture.");
-        } else {
-          setError("Microphone access denied. Please allow microphone permissions in your browser settings.");
-        }
+      if (err instanceof DOMException && (err.name === "NotAllowedError" || err.name === "SecurityError")) {
+        setError(inIframe
+          ? "Microphone access is blocked in this preview. Open the app in a new tab."
+          : "Microphone access was denied. Allow it in the browser settings.");
       } else {
-        setError(err.message || "Failed to access microphone");
+        setError(message);
       }
       console.error("Audio capture error:", err);
+      throw err;
     }
-  }, [deviceId, refreshDevices]);
+  }, [deviceId, refreshDevices, startRecording, supported]);
 
   const stop = useCallback(() => {
-    if (rafRef.current) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
+    isCapturingRef.current = false;
+    if (recorderTimerRef.current) {
+      clearTimeout(recorderTimerRef.current);
+      recorderTimerRef.current = null;
     }
-    if (recognitionRef.current) {
-      recognitionRef.current.onend = null;
-      try {
-        recognitionRef.current.stop();
-      } catch (e) {
-        // Already stopped
-      }
-      recognitionRef.current = null;
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
+    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
     setRms(0);
     setIsCapturing(false);
   }, []);
 
-  useEffect(() => {
-    return () => {
-      stop();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(() => stop, [stop]);
 
   return { isCapturing, rms, error, devices, start, stop, refreshDevices, supported };
 }

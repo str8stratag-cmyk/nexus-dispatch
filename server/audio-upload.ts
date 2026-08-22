@@ -1,12 +1,13 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import multer from "multer";
-import { mkdir, unlink } from "node:fs/promises";
+import { mkdir, readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, extname, parse } from "node:path";
 import { randomUUID } from "node:crypto";
 import { optimizeAudio } from "./audio-optimizer";
 import { storage } from "./storage";
 import supabase from "./supabase";
+import { transcribeAudio } from "./whisper";
 
 const AUDIO_BUCKET = process.env.AUDIO_STORAGE_BUCKET || "dispatch-audio";
 
@@ -45,7 +46,43 @@ function tryParseKeywords(value: unknown): string {
   }
 }
 
+async function transcribeOptimizedAudio(path: string) {
+  const [audio, keywords] = await Promise.all([
+    readFile(path),
+    storage.getKeywords(),
+  ]);
+  return transcribeAudio(audio, "dispatch.wav", keywords.map((keyword) => keyword.pattern));
+}
+
 export function registerAudioUploadRoutes(app: Express): void {
+  app.post(
+    "/api/audio/transcribe",
+    (req, res, next) => {
+      ensureUploadDir().then(() => next()).catch(next);
+    },
+    upload.single("audio"),
+    async (req: Request, res: Response, _next: NextFunction) => {
+      const uploadedFile = req.file;
+      let optimizedPath: string | undefined;
+
+      try {
+        if (!uploadedFile) {
+          return res.status(400).json({ message: "No audio file provided (expected field: 'audio')" });
+        }
+
+        optimizedPath = join(tmpdir(), "dispatch-monitor-uploads", `${randomUUID()}_transcription.wav`);
+        await optimizeAudio({ inputPath: uploadedFile.path, outputPath: optimizedPath });
+        res.json(await transcribeOptimizedAudio(optimizedPath));
+      } catch (err: any) {
+        console.error("Audio transcription failed:", err);
+        res.status(503).json({ message: err.message || "Audio transcription failed" });
+      } finally {
+        await safeUnlink(uploadedFile?.path);
+        await safeUnlink(optimizedPath);
+      }
+    }
+  );
+
   app.post(
     "/api/audio/upload",
     (req, res, next) => {
@@ -66,9 +103,13 @@ export function registerAudioUploadRoutes(app: Express): void {
         optimizedPath = join(tmpdir(), "dispatch-monitor-uploads", outputName);
 
         await optimizeAudio({ inputPath, outputPath: optimizedPath });
+        const body = req.body || {};
+        const transcription = body.transcript?.trim()
+          ? null
+          : await transcribeOptimizedAudio(optimizedPath);
 
         // Upload optimized audio to Supabase Storage
-        const fileBuffer = await (await import("node:fs/promises")).readFile(optimizedPath);
+        const fileBuffer = await readFile(optimizedPath);
         const storagePath = `audio/${outputName}`;
 
         const { error: uploadError } = await supabase.storage
@@ -87,11 +128,10 @@ export function registerAudioUploadRoutes(app: Express): void {
           .getPublicUrl(storagePath);
 
         const audioUrl = publicUrlData?.publicUrl || null;
-
         // Create the dispatch event
-        const body = req.body || {};
+        // Create the dispatch event
         const event = await storage.createEvent({
-          transcript: body.transcript || "Audio upload",
+          transcript: body.transcript?.trim() || transcription?.text || "Audio upload",
           keywords: tryParseKeywords(body.keywords),
           address: body.address || null,
           crossStreet: body.crossStreet || null,

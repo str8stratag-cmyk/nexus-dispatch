@@ -8,7 +8,10 @@
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
-    "optimize-audio": "tsx scripts/optimize-audio.ts"
+    "optimize-audio": "tsx scripts/optimize-audio.ts",
+    "whisper:setup": "powershell -ExecutionPolicy Bypass -File scripts\\setup-whisper.ps1",
+    "whisper:start": "powershell -ExecutionPolicy Bypass -File scripts\\start-whisper.ps1",
+    "whisper:bundle": "powershell -ExecutionPolicy Bypass -File scripts\\create-whisper-bundle.ps1"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.4.0",

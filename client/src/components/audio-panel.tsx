@@ -118,6 +118,7 @@ export default function AudioPanel({
 
   const { isCapturing, rms, error, devices, start, stop, supported } = useAudioCapture({
     deviceId: selectedDevice || undefined,
+    keywords: keywordList.map((keyword) => keyword.pattern),
     onTranscript: handleTranscript,
   });
 
@@ -257,7 +258,7 @@ export default function AudioPanel({
 
       {!supported && (
         <div className="text-xs text-yellow-500 p-2 rounded bg-yellow-950/30 border border-yellow-900/40">
-          Speech recognition requires Chrome or Edge browser.
+          Local Whisper capture requires a browser with MediaRecorder support, such as Chrome or Edge.
         </div>
       )}
 

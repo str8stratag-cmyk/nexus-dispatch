@@ -1,4 +1,8 @@
 node_modules/
+.venv-whisper/
+models/
+whisper-wheelhouse/
+__pycache__/
 dist/
 .vite/
 .vercel/
