@@ -189,7 +189,7 @@ export default function EventLog() {
         {activeEvents.map((event) => (
           <div
             key={event.id}
-            className="rounded-md border border-orange-900/40 bg-orange-950/10 p-2 space-y-1"
+            className="group rounded-r-lg border border-l-[3px] border-orange-900/40 border-l-orange-500 bg-orange-950/10 p-3 space-y-2 transition-all hover:translate-x-1 hover:bg-orange-950/20 hover:shadow-md"
             data-testid={`event-${event.id}`}
           >
             <div className="flex items-center justify-between">
@@ -214,6 +214,11 @@ export default function EventLog() {
             {event.description && (
               <div className="text-xs text-muted-foreground">{event.description}</div>
             )}
+            {event.transcript && (
+              <div className="line-clamp-2 border-l border-border/70 pl-2 text-[11px] leading-relaxed text-muted-foreground">
+                {event.transcript}
+              </div>
+            )}
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-mono text-muted-foreground">
                 {event.district} • {event.source}
@@ -234,7 +239,7 @@ export default function EventLog() {
         {resolvedEvents.slice(0, 10).map((event) => (
           <div
             key={event.id}
-            className="rounded-md border border-border/40 bg-muted/20 p-2 space-y-1 opacity-60"
+            className="rounded-r-lg border border-l-[3px] border-border/40 border-l-muted-foreground/50 bg-muted/20 p-3 space-y-1 opacity-60"
           >
             <div className="flex items-center justify-between">
               <Badge variant="outline" className="text-[10px]">

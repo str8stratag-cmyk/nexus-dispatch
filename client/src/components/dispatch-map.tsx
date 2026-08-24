@@ -70,6 +70,7 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
   const mapRef = useRef<L.Map | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const markerLayerRef = useRef<L.LayerGroup | null>(null);
+  const hasFittedMarkersRef = useRef(false);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -81,9 +82,10 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
       attributionControl: true,
     });
 
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-      maxZoom: 19,
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+      subdomains: "abcd",
+      maxZoom: 20,
     }).addTo(map);
 
     markerLayerRef.current = L.layerGroup().addTo(map);
@@ -129,6 +131,14 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
         .bindPopup(buildPopupContent(marker))
         .addTo(markerLayerRef.current!);
     });
+
+    if (markers.length && !hasFittedMarkersRef.current) {
+      mapRef.current.fitBounds(
+        L.latLngBounds(markers.map((marker) => [marker.lat, marker.lng])),
+        { padding: [24, 24], maxZoom: 14 }
+      );
+      hasFittedMarkersRef.current = true;
+    }
   }, [markers]);
 
   // Invalidate size when tab becomes visible

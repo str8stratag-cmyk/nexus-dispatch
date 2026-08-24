@@ -5,7 +5,7 @@ import { useTheme } from "@/hooks/use-theme";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Sun, Moon, Radio, Send, Settings, ExternalLink } from "lucide-react";
+import { Sun, Moon, Radio, Send, Settings, ExternalLink, MapPinned } from "lucide-react";
 import AudioPanel, { type DetectedEvent } from "@/components/audio-panel";
 import DispatchMap from "@/components/dispatch-map";
 import EventLog from "@/components/event-log";
@@ -123,13 +123,33 @@ export default function DispatchPage() {
 
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
+      <Tabs defaultValue="monitor" className="flex-1 flex flex-col min-h-0">
       {/* Header */}
-      <header className="flex items-center justify-between border-b border-border px-4 py-2 shrink-0">
+      <header className="relative flex items-center justify-between border-b border-border bg-card/80 px-4 py-2.5 shrink-0">
         <div className="flex items-center gap-2">
           <Radio className="h-5 w-5 text-primary animate-pulse-live" />
-          <h1 className="text-base font-bold tracking-tight">DISPATCH MONITOR</h1>
-          <span className="text-xs text-muted-foreground hidden sm:inline">Traffic Accident Detection System</span>
+          <div>
+            <h1 className="text-base font-bold tracking-tight">DISPATCH MONITOR</h1>
+            <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground hidden sm:inline">
+              Traffic Accident Detection System
+            </span>
+          </div>
+          <span className="ml-2 hidden items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-emerald-500 sm:inline-flex">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse-live" />
+            Live
+          </span>
         </div>
+        <TabsList className="absolute left-1/2 hidden h-auto w-auto -translate-x-1/2 grid-cols-3 gap-1 rounded-lg bg-muted/50 p-1 lg:grid">
+          <TabsTrigger value="monitor" className="px-4 py-2 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground" data-testid="tab-monitor">
+            <Radio className="mr-1 h-3 w-3" /> Live Monitor
+          </TabsTrigger>
+          <TabsTrigger value="manual" className="px-4 py-2 text-xs" data-testid="tab-manual">
+            <Send className="mr-1 h-3 w-3" /> Manual Dispatch
+          </TabsTrigger>
+          <TabsTrigger value="settings" className="px-4 py-2 text-xs" data-testid="tab-settings">
+            <Settings className="mr-1 h-3 w-3" /> Settings
+          </TabsTrigger>
+        </TabsList>
         <div className="flex items-center gap-2">
           {typeof window !== "undefined" && window.self !== window.top && (
             <Button
@@ -159,9 +179,7 @@ export default function DispatchPage() {
         </div>
       </header>
 
-      {/* Tabs */}
-      <Tabs defaultValue="monitor" className="flex-1 flex flex-col min-h-0">
-        <TabsList className="grid w-full grid-cols-3 max-w-md mx-auto mt-2">
+        <TabsList className="mx-auto mt-2 grid w-full max-w-md grid-cols-3 lg:hidden">
           <TabsTrigger value="monitor" className="text-xs" data-testid="tab-monitor">
             <Radio className="h-3 w-3 mr-1" /> Live Monitor
           </TabsTrigger>
@@ -174,10 +192,10 @@ export default function DispatchPage() {
         </TabsList>
 
         {/* Live Monitor Tab */}
-        <TabsContent value="monitor" className="flex-1 min-h-0 mt-2">
-          <div className="h-full grid grid-cols-1 lg:grid-cols-[320px_1fr_280px] gap-2 p-2 overflow-y-auto lg:overflow-hidden">
-            {/* Left: Audio Panel */}
-            <div className="min-h-0 flex flex-col rounded-md border border-border bg-card overflow-hidden max-h-[500px] lg:max-h-none">
+        <TabsContent value="monitor" className="flex-1 min-h-0 mt-2 lg:mt-0">
+          <div className="h-full grid grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[320px_minmax(0,1fr)_380px] lg:gap-px lg:overflow-hidden lg:bg-border lg:p-0">
+            {/* Capture controls and a full-height transcript feed. */}
+            <div className="min-h-[520px] flex flex-col rounded-lg border border-border bg-card p-3 shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
               <AudioPanel
                 district={district}
                 sourceName={sourceName}
@@ -188,13 +206,22 @@ export default function DispatchPage() {
               />
             </div>
 
-            {/* Center: Map */}
-            <div className="min-h-[300px] lg:min-h-0 rounded-md border border-border overflow-hidden" data-testid="map-container">
+            {/* Center map uses the full-height reference layout. */}
+            <section className="relative min-h-[260px] overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none" data-testid="map-container">
               <DispatchMap markers={mapMarkers} />
-            </div>
+              <div className="pointer-events-none absolute left-3 top-3 rounded-md border border-border/80 bg-background/90 px-3 py-2 shadow-lg backdrop-blur">
+                <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider">
+                  <MapPinned className="h-3.5 w-3.5 text-primary" />
+                  Active incidents
+                </div>
+                <div className="mt-1 text-[10px] font-mono text-muted-foreground">
+                  {mapMarkers.length} mapped signal{mapMarkers.length === 1 ? "" : "s"}
+                </div>
+              </div>
+            </section>
 
-            {/* Right: Event Log */}
-            <div className="min-h-0 hidden lg:block">
+            {/* Current incidents remain in a dedicated right-hand queue. */}
+            <div className="min-h-[360px] lg:min-h-0">
               <EventLog />
             </div>
           </div>
