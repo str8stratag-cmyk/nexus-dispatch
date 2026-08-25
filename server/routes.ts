@@ -13,8 +13,8 @@ async function getTelegramCredentials(): Promise<{ botToken?: string; chatId?: s
   if (cachedBotToken && cachedChatId) {
     return { botToken: cachedBotToken, chatId: cachedChatId };
   }
-  cachedBotToken = (await storage.getSetting("telegram_bot_token"))?.value;
-  cachedChatId = (await storage.getSetting("telegram_chat_id"))?.value;
+  cachedBotToken = (await storage.getSetting("telegram_bot_token"))?.value || process.env.TELEGRAM_BOT_TOKEN;
+  cachedChatId = (await storage.getSetting("telegram_chat_id"))?.value || process.env.TELEGRAM_CHAT_ID;
   return { botToken: cachedBotToken, chatId: cachedChatId };
 }
 
