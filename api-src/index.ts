@@ -1,6 +1,6 @@
 import express, { Request, Response, NextFunction } from "express";
 import { createServer } from "node:http";
-import { registerRoutes } from "../server/routes";
+import { registerRoutes, setTelegramWebhook } from "../server/routes";
 
 const app = express();
 const httpServer = createServer(app);
@@ -31,6 +31,7 @@ function init() {
         if (res.headersSent) return;
         res.status(status).json({ message });
       });
+      setTelegramWebhook().catch((err) => console.error("Telegram webhook setup failed:", err));
     });
   }
   return ready;

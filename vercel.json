@@ -1,12 +1,7 @@
 {
   "version": 2,
-  "buildCommand": "vite build && node script/build-api.mjs",
+  "buildCommand": "vite build",
   "outputDirectory": "dist/public",
-  "functions": {
-    "api/index.js": {
-      "maxDuration": 30
-    }
-  },
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api" },
     { "source": "/(.*)", "destination": "/index.html" }
