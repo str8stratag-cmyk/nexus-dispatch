@@ -3,7 +3,7 @@
 #   .\scripts\sync-env-to-vercel.ps1
 # Requires Vercel CLI and a linked project (`vercel link`).
 
-$envPath = Join-Path $PSScriptRoot '..' '.env'
+$envPath = Join-Path (Join-Path $PSScriptRoot '..') '.env'
 
 if (-not (Test-Path $envPath)) {
     Write-Error ".env not found at $envPath"
