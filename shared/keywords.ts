@@ -43,13 +43,14 @@ export function detectKeywords(
   transcript: string,
   keywordList: KeywordEntry[] = DEFAULT_KEYWORDS
 ): { keyword: string; signalType: string }[] {
-  const lower = transcript.toLowerCase();
   const found: { keyword: string; signalType: string }[] = [];
   const seen = new Set<string>();
 
   for (const kw of keywordList) {
     if (!kw.pattern) continue;
-    if (lower.includes(kw.pattern.toLowerCase()) && !seen.has(kw.signalType)) {
+    const escapedPattern = kw.pattern.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const wholePattern = new RegExp(`(?:^|[^a-z0-9])${escapedPattern}(?=$|[^a-z0-9])`, "i");
+    if (wholePattern.test(transcript) && !seen.has(kw.signalType)) {
       seen.add(kw.signalType);
       found.push({ keyword: kw.label, signalType: kw.signalType });
     }

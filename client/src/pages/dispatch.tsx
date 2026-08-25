@@ -5,9 +5,8 @@ import { useTheme } from "@/hooks/use-theme";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Sun, Moon, Radio, Send, Settings, ExternalLink, MapPinned } from "lucide-react";
+import { Sun, Moon, Radio, Send, Settings, ExternalLink } from "lucide-react";
 import AudioPanel, { type DetectedEvent } from "@/components/audio-panel";
-import DispatchMap from "@/components/dispatch-map";
 import EventLog from "@/components/event-log";
 import ManualDispatch from "@/components/manual-dispatch";
 import SettingsPanel from "@/components/settings-panel";
@@ -63,39 +62,14 @@ export default function DispatchPage() {
     },
   });
 
-  const geocodeMutation = useMutation({
-    mutationFn: async (address: string) => {
-      const res = await apiRequest("GET", `/api/geocode?q=${encodeURIComponent(address)}`);
-      return res.json();
-    },
-  });
-
   const handleDispatchDetected = useCallback(async (event: DetectedEvent) => {
-    let lat: number | null = null;
-    let lng: number | null = null;
-
-    // Build the best geocode query from address + crossStreet
-    const geocodeQuery = event.crossStreet
-      ? `${event.address} and ${event.crossStreet}`
-      : event.address;
-
-    if (geocodeQuery) {
-      try {
-        const geo = await geocodeMutation.mutateAsync(geocodeQuery);
-        lat = geo.lat;
-        lng = geo.lng;
-      } catch (err) {
-        console.error("Geocoding failed:", err);
-      }
-    }
-
     dispatchMutation.mutate({
       transcript: event.transcript,
       keywords: JSON.stringify(event.keywords),
       address: event.address || null,
       crossStreet: event.crossStreet || null,
-      lat,
-      lng,
+      lat: null,
+      lng: null,
       signalType: event.keywords[0]?.signalType || null,
       description: event.keywords.map((k) => k.signalType).join(", "),
       district: event.district,
@@ -103,24 +77,7 @@ export default function DispatchPage() {
       status: "active",
       isManual: false,
     });
-  }, [dispatchMutation, geocodeMutation]);
-
-  // Map markers from events
-  const mapMarkers = events
-    .filter((e) => e.lat && e.lng)
-    .map((e) => ({
-      id: e.id,
-      lat: e.lat!,
-      lng: e.lng!,
-      address: e.address || "",
-      crossStreet: e.crossStreet || "",
-      signalType: e.signalType || "",
-      description: e.description || "",
-      district: e.district,
-      transcript: e.transcript,
-      createdAt: e.createdAt,
-      status: e.status,
-    }));
+  }, [dispatchMutation]);
 
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
@@ -194,8 +151,7 @@ export default function DispatchPage() {
 
         {/* Live Monitor Tab */}
         <TabsContent value="monitor" className="flex-1 min-h-0 mt-2 lg:mt-0">
-          <div className="h-full grid grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[320px_minmax(0,1fr)_380px] lg:gap-px lg:overflow-hidden lg:bg-border lg:p-0">
-            {/* Capture controls and a full-height transcript feed. */}
+          <div className="h-full grid grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[320px_minmax(0,1fr)] lg:gap-px lg:overflow-hidden lg:bg-border lg:p-0">
             <div className="min-h-[520px] flex flex-col rounded-lg border border-border bg-card p-3 shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
               <AudioPanel
                 district={district}
@@ -207,24 +163,9 @@ export default function DispatchPage() {
               />
             </div>
 
-            {/* Center map uses the full-height reference layout. */}
-            <section className="relative min-h-[260px] overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none" data-testid="map-container">
-              <DispatchMap markers={mapMarkers} />
-              <div className="pointer-events-none absolute left-3 top-3 rounded-md border border-border/80 bg-background/90 px-3 py-2 shadow-lg backdrop-blur">
-                <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider">
-                  <MapPinned className="h-3.5 w-3.5 text-primary" />
-                  Active incidents
-                </div>
-                <div className="mt-1 text-[10px] font-mono text-muted-foreground">
-                  {mapMarkers.length} mapped signal{mapMarkers.length === 1 ? "" : "s"}
-                </div>
-              </div>
-            </section>
-
-            {/* Current incidents remain in a dedicated right-hand queue. */}
-            <div className="min-h-[360px] lg:min-h-0">
+            <section className="min-h-[360px] rounded-lg border border-border bg-card p-3 shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
               <EventLog />
-            </div>
+            </section>
           </div>
         </TabsContent>
 

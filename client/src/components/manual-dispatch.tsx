@@ -129,7 +129,7 @@ export default function ManualDispatch({ districts }: ManualDispatchProps) {
                 data-testid="manual-address"
               />
               <p className="text-[10px] text-muted-foreground">
-                Address will be geocoded automatically via OpenStreetMap
+                Geocoded for the dispatch record; automatic map placement is disabled.
               </p>
             </div>
 
