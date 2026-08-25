@@ -3,7 +3,7 @@ import type { Server } from "node:http";
 import { storage } from "./storage";
 import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent } from "@shared/schema";
 import { normalizeKeywordEntry } from "@shared/keywords";
-import { isSupabaseConfigured } from "./supabase";
+import { isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
 
 let cachedBotToken: string | undefined;
@@ -49,13 +49,13 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   // Diagnostic route — confirms the process is alive and reports whether
-  // Supabase credentials made it into this environment, without leaking them.
+  // MongoDB credentials made it into this environment, without leaking them.
   app.get("/api/health", (_req, res) => {
     res.json({
       ok: true,
-      supabaseConfigured: isSupabaseConfigured,
-      hasSupabaseUrl: Boolean(process.env.SUPABASE_URL),
-      hasSupabaseAnonKey: Boolean(process.env.SUPABASE_ANON_KEY),
+      mongoConfigured: isMongoConfigured,
+      hasMongoUri: Boolean(process.env.MONGODB_URI),
+      hasMongoDbName: Boolean(process.env.MONGODB_DB_NAME),
       nodeEnv: process.env.NODE_ENV || null,
     });
   });
