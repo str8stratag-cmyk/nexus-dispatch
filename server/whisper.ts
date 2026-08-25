@@ -1,4 +1,5 @@
 const WHISPER_SERVICE_URL = process.env.WHISPER_SERVICE_URL || "http://127.0.0.1:8178";
+const WHISPER_API_KEY = process.env.WHISPER_API_KEY;
 
 interface WhisperResponse {
   text: string;
@@ -23,6 +24,7 @@ export async function transcribeAudio(
     response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, {
       method: "POST",
       body,
+      headers: WHISPER_API_KEY ? { "X-Whisper-Key": WHISPER_API_KEY } : undefined,
       signal: AbortSignal.timeout(60_000),
     });
   } catch (error) {
