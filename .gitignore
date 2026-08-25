@@ -28,3 +28,4 @@ api/index.js
 api/package-lock.json
 .vercel
 .env*
+supabase/.temp

@@ -74,14 +74,13 @@ export async function registerRoutes(
   app.post("/api/dispatch", async (req, res) => {
     try {
       const parsed = insertDispatchEventSchema.parse(req.body);
-      const event = await storage.createEvent(parsed);
+      let event = await storage.createEvent(parsed);
 
       // Send to Telegram if configured
       const { botToken, chatId } = await getTelegramCredentials();
 
       if (botToken && chatId) {
         try {
-          console.log("[telegram] Sending dispatch for event", event.id, "to chat", chatId);
           const message = formatTelegramMessage(event, { status: "active" });
           const tgData = await telegramApiCall(botToken, "sendMessage", {
             chat_id: chatId,
@@ -94,13 +93,13 @@ export async function registerRoutes(
           if (!tgData.ok) {
             console.error("Telegram error:", tgData.description);
           } else if (tgData.result?.message_id) {
-            console.log("[telegram] Message sent, id:", tgData.result.message_id);
-            await storage.updateEventTelegramMessageId(
+            const updated = await storage.updateEventTelegramMessageId(
               event.id,
               String(tgData.result.message_id)
             );
-          } else {
-            console.log("[telegram] No message_id in response:", JSON.stringify(tgData));
+            if (updated) {
+              event = updated;
+            }
           }
         } catch (err) {
           console.error("Telegram send failed:", err);
