@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "buildCommand": "vite build && node script/build-api.mjs",
+  "buildCommand": "npx vite build && node script/build-api.mjs",
   "outputDirectory": "dist/public",
   "functions": {
     "api/index.js": {
