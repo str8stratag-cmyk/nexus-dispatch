@@ -1,10 +1,48 @@
-import type { Express } from "express";
+import express, { type Express, type Request, type Response } from "express";
 import type { Server } from "node:http";
 import { storage } from "./storage";
-import { insertDispatchEventSchema, insertSettingsSchema } from "@shared/schema";
+import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent } from "@shared/schema";
 import { normalizeKeywordEntry } from "@shared/keywords";
 import { isSupabaseConfigured } from "./supabase";
 import { registerAudioUploadRoutes } from "./audio-upload";
+
+let cachedBotToken: string | undefined;
+let cachedChatId: string | undefined;
+
+async function getTelegramCredentials(): Promise<{ botToken?: string; chatId?: string }> {
+  if (cachedBotToken && cachedChatId) {
+    return { botToken: cachedBotToken, chatId: cachedChatId };
+  }
+  cachedBotToken = (await storage.getSetting("telegram_bot_token"))?.value;
+  cachedChatId = (await storage.getSetting("telegram_chat_id"))?.value;
+  return { botToken: cachedBotToken, chatId: cachedChatId };
+}
+
+export async function clearTelegramCredentialsCache(): Promise<void> {
+  cachedBotToken = undefined;
+  cachedChatId = undefined;
+}
+
+async function telegramApiCall(
+  botToken: string,
+  method: string,
+  payload: Record<string, any>
+): Promise<{ ok: boolean; result?: any; description?: string }> {
+  const res = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const text = await res.text().catch(() => "{}");
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { ok: false, description: text };
+  }
+  return data;
+}
 
 export async function registerRoutes(
   httpServer: Server,
@@ -39,31 +77,26 @@ export async function registerRoutes(
       const event = await storage.createEvent(parsed);
 
       // Send to Telegram if configured
-      const botToken = (await storage.getSetting("telegram_bot_token"))?.value;
-      const chatId = (await storage.getSetting("telegram_chat_id"))?.value;
+      const { botToken, chatId } = await getTelegramCredentials();
 
       if (botToken && chatId) {
         try {
-          const message = formatTelegramMessage(event);
-          const tgRes = await fetch(
-            `https://api.telegram.org/bot${botToken}/sendMessage`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                chat_id: chatId,
-                text: message,
-                parse_mode: "HTML",
-              }),
-            }
-          );
-          if (!tgRes.ok) {
-            console.error("Telegram HTTP error:", tgRes.status, await tgRes.text().catch(() => ""));
-          } else {
-            const tgData = await tgRes.json();
-            if (!tgData.ok) {
-              console.error("Telegram error:", tgData.description);
-            }
+          const message = formatTelegramMessage(event, { status: "active" });
+          const tgData = await telegramApiCall(botToken, "sendMessage", {
+            chat_id: chatId,
+            text: message,
+            parse_mode: "HTML",
+            reply_markup: buildAcceptKeyboard(event.id),
+            disable_web_page_preview: true,
+          });
+
+          if (!tgData.ok) {
+            console.error("Telegram error:", tgData.description);
+          } else if (tgData.result?.message_id) {
+            await storage.updateEventTelegramMessageId(
+              event.id,
+              String(tgData.result.message_id)
+            );
           }
         } catch (err) {
           console.error("Telegram send failed:", err);
@@ -147,6 +180,10 @@ export async function registerRoutes(
     try {
       const parsed = insertSettingsSchema.parse(req.body);
       const setting = await storage.upsertSetting(parsed);
+      // If Telegram credentials changed, invalidate the cache so the next dispatch picks them up.
+      if (setting.key === "telegram_bot_token" || setting.key === "telegram_chat_id") {
+        await clearTelegramCredentialsCache();
+      }
       res.json(setting);
     } catch (err: any) {
       res.status(400).json({ message: err.message });
@@ -200,26 +237,18 @@ export async function registerRoutes(
   // Test Telegram connection
   app.post("/api/telegram/test", async (_req, res) => {
     try {
-      const botToken = (await storage.getSetting("telegram_bot_token"))?.value;
-      const chatId = (await storage.getSetting("telegram_chat_id"))?.value;
+      const { botToken, chatId } = await getTelegramCredentials();
 
       if (!botToken || !chatId) {
         return res.status(400).json({ message: "Telegram bot token or chat ID not configured" });
       }
 
-      const tgRes = await fetch(
-        `https://api.telegram.org/bot${botToken}/sendMessage`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: chatId,
-            text: "✅ Dispatch Monitor test message — Telegram connection is working.",
-            parse_mode: "HTML",
-          }),
-        }
-      );
-      const tgData = await tgRes.json();
+      const tgData = await telegramApiCall(botToken, "sendMessage", {
+        chat_id: chatId,
+        text: "✅ Dispatch Monitor test message — Telegram connection is working.",
+        parse_mode: "HTML",
+      });
+
       if (tgData.ok) {
         res.json({ success: true, message: "Test message sent successfully" });
       } else {
@@ -227,6 +256,37 @@ export async function registerRoutes(
       }
     } catch (err: any) {
       res.status(500).json({ message: "Telegram test failed: " + err.message });
+    }
+  });
+
+  // Webhook endpoint for Telegram callbacks (accept button presses).
+  app.post("/api/telegram/webhook", express.json(), async (req: Request, res: Response) => {
+    await handleTelegramUpdate(req.body);
+    res.sendStatus(200);
+  });
+
+  // Register the webhook with Telegram. Body: { url?: string }
+  // If no body URL is provided, falls back to TELEGRAM_WEBHOOK_URL env var.
+  app.post("/api/telegram/webhook/set", async (req, res) => {
+    try {
+      const url = req.body?.url || process.env.TELEGRAM_WEBHOOK_URL;
+      if (!url) {
+        return res.status(400).json({ message: "No webhook URL provided. Set TELEGRAM_WEBHOOK_URL or pass url in body." });
+      }
+      const result = await setTelegramWebhook(url);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // Remove the webhook from Telegram (useful for local dev or switching transports).
+  app.post("/api/telegram/webhook/delete", async (_req, res) => {
+    try {
+      const result = await deleteTelegramWebhook();
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
     }
   });
 
@@ -246,40 +306,172 @@ function escapeHtml(value: string | null | undefined): string {
     .replace(/"/g, "&quot;");
 }
 
-function formatTelegramMessage(event: any): string {
-  let keywords: { keyword?: string; signalType?: string }[] = [];
-  try {
-    keywords = JSON.parse(event.keywords || "[]");
-  } catch {
-    keywords = [];
-  }
-  const keywordStr = keywords.length > 0
-    ? keywords.map((k) => k.signalType || k.keyword || "Unknown").join(", ")
-    : "N/A";
+function buildGpsLink(lat: number, lng: number): string {
+  // Universal link: opens in Apple Maps on iOS, Google Maps on Android/Windows if installed, browser otherwise.
+  return `https://maps.apple.com/?q=${lat},${lng}`;
+}
+
+function buildAcceptKeyboard(eventId: number): { inline_keyboard: any[] } {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "✅ Accept Call",
+          callback_data: `accept_${eventId}`,
+        },
+      ],
+    ],
+  };
+}
+
+interface FormatOptions {
+  status?: "active" | "accepted";
+  acceptedBy?: string;
+}
+
+function formatTelegramMessage(event: DispatchEvent, options: FormatOptions = {}): string {
+  const { status = "active", acceptedBy } = options;
+  const isTaken = status === "accepted";
 
   const address = event.crossStreet
     ? `${event.address} & ${event.crossStreet}`
-    : event.address;
+    : event.address || "Address unknown";
 
-  let msg = `<b>🚨 DISPATCH EVENT</b>\n\n`;
-  msg += `<b>Signal Type:</b> ${escapeHtml(event.signalType)}\n`;
-  msg += `<b>District:</b> ${escapeHtml(event.district)}\n`;
-  msg += `<b>Source:</b> ${escapeHtml(event.source)}\n`;
-  msg += `<b>Address:</b> ${escapeHtml(address)}\n`;
-  msg += `<b>Description:</b> ${escapeHtml(event.description)}\n`;
-  msg += `<b>Keywords:</b> ${escapeHtml(keywordStr)}\n`;
+  const header = isTaken
+    ? `<b>❌ TAKEN — DISPATCH #${event.id}</b>`
+    : `<b>🚨 DISPATCH #${event.id} — AVAILABLE</b>`;
+
+  let msg = `${header}\n\n`;
+  msg += `<b>📍 Location:</b> ${escapeHtml(address)}\n`;
 
   if (event.lat && event.lng) {
-    msg += `<b>Location:</b> ${event.lat}, ${event.lng}\n`;
-    msg += `<a href="https://www.openstreetmap.org/?mlat=${event.lat}&mlon=${event.lng}&zoom=17">View on Map</a>\n`;
+    msg += `<b>🗺️ GPS:</b> <a href="${buildGpsLink(event.lat, event.lng)}">Open in Maps</a>\n`;
+    msg += `<code>${event.lat.toFixed(6)}, ${event.lng.toFixed(6)}</code>\n`;
   }
 
-  msg += `\n<b>Transcript:</b>\n<i>${escapeHtml(event.transcript)}</i>\n`;
-  msg += `\n<b>Time:</b> ${new Date(event.createdAt).toLocaleString()}`;
+  msg += `\n<b>Signal:</b> ${escapeHtml(event.signalType)}\n`;
+  msg += `<b>District:</b> ${escapeHtml(event.district)}\n`;
+  msg += `<b>Source:</b> ${escapeHtml(event.source)}\n`;
+
+  if (event.description) {
+    msg += `<b>Details:</b> ${escapeHtml(event.description)}\n`;
+  }
+
+  if (isTaken && acceptedBy) {
+    msg += `\n<i>Accepted by ${escapeHtml(acceptedBy)}</i>\n`;
+  }
+
+  msg += `\n<b>📝 Transcript (for verification):</b>\n<i>${escapeHtml(event.transcript)}</i>\n`;
+  msg += `\n<i>Posted: ${new Date(event.createdAt).toLocaleString()}</i>`;
 
   if (event.isManual) {
     msg += `\n<b>Source:</b> Manual Dispatch`;
   }
 
   return msg;
+}
+
+async function handleTelegramUpdate(update: any): Promise<void> {
+  if (!update.callback_query) return;
+
+  const callback = update.callback_query;
+  const data = callback.data as string;
+  const chatId = callback.message?.chat?.id;
+  const messageId = callback.message?.message_id;
+
+  if (!data || !chatId || !messageId) return;
+  if (!data.startsWith("accept_")) return;
+
+  const eventId = parseInt(data.replace("accept_", ""), 10);
+  if (Number.isNaN(eventId)) return;
+
+  const { botToken, chatId: configuredChatId } = await getTelegramCredentials();
+  if (!botToken || !configuredChatId || String(chatId) !== configuredChatId) {
+    return;
+  }
+
+  const event = await storage.getEvent(eventId);
+  if (!event) {
+    await telegramApiCall(botToken, "answerCallbackQuery", {
+      callback_query_id: callback.id,
+      text: "This dispatch no longer exists.",
+      show_alert: true,
+    });
+    return;
+  }
+
+  if (event.status === "accepted") {
+    await telegramApiCall(botToken, "answerCallbackQuery", {
+      callback_query_id: callback.id,
+      text: "This call has already been accepted.",
+      show_alert: true,
+    });
+    return;
+  }
+
+  const accepter = callback.from
+    ? callback.from.username
+      ? `@${callback.from.username}`
+      : callback.from.first_name || `User ${callback.from.id}`
+    : "A driver";
+
+  const updated = await storage.updateEventStatus(eventId, "accepted");
+  if (!updated) return;
+
+  // Edit the original dispatch message to show it's taken and remove the accept button.
+  await telegramApiCall(botToken, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text: formatTelegramMessage(updated, { status: "accepted", acceptedBy: accepter }),
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: [] },
+    disable_web_page_preview: true,
+  });
+
+  await telegramApiCall(botToken, "answerCallbackQuery", {
+    callback_query_id: callback.id,
+    text: "Call accepted. Good luck out there.",
+  });
+}
+
+export async function setTelegramWebhook(url?: string): Promise<{ success: boolean; description?: string }> {
+  const { botToken } = await getTelegramCredentials();
+  if (!botToken) {
+    throw new Error("Telegram bot token not configured");
+  }
+
+  const webhookUrl = url || process.env.TELEGRAM_WEBHOOK_URL;
+  if (!webhookUrl) {
+    console.log("[telegram] No webhook URL configured; skipping setWebhook.");
+    return { success: false, description: "No webhook URL configured" };
+  }
+
+  console.log(`[telegram] Setting webhook to ${webhookUrl}`);
+  const data = await telegramApiCall(botToken, "setWebhook", {
+    url: webhookUrl,
+    allowed_updates: ["callback_query"],
+  });
+
+  if (data.ok) {
+    console.log("[telegram] Webhook set successfully");
+  } else {
+    console.error("[telegram] setWebhook failed:", data.description);
+  }
+  return { success: data.ok, description: data.description };
+}
+
+export async function deleteTelegramWebhook(): Promise<{ success: boolean; description?: string }> {
+  const { botToken } = await getTelegramCredentials();
+  if (!botToken) {
+    throw new Error("Telegram bot token not configured");
+  }
+
+  console.log("[telegram] Deleting webhook");
+  const data = await telegramApiCall(botToken, "deleteWebhook", {});
+  if (data.ok) {
+    console.log("[telegram] Webhook deleted");
+  } else {
+    console.error("[telegram] deleteWebhook failed:", data.description);
+  }
+  return { success: data.ok, description: data.description };
 }

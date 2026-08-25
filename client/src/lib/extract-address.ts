@@ -1,21 +1,267 @@
-// v2: safer address extraction with cross-street support for clipped radio calls.
-// Returns both the primary numbered address and an optional cross-street.
+// v3: token-based address extraction with cross-street support for clipped radio calls.
+// Returns the primary numbered address (or the first named street for pure intersections)
+// plus an optional cross-street when one is mentioned.
 
-const STREET_SUFFIX =
-  "(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln|court|ct|circle|cir|highway|hwy|parkway|pkwy|place|pl|terrace|ter|trail|trl|way|loop|cove|point|run)";
+const STREET_SUFFIXES = new Set([
+  "street", "st", "avenue", "ave", "road", "rd", "boulevard", "blvd", "drive", "dr",
+  "lane", "ln", "court", "ct", "circle", "cir", "highway", "hwy", "parkway", "pkwy",
+  "place", "pl", "terrace", "ter", "trail", "trl", "way", "loop", "cove", "point",
+  "run", "ridge", "rdg", "spur", "plaza", "sq", "square", "alley", "bridge", "bypass",
+  "causeway", "center", "centre", "commons", "curve", "divide", "estate", "expressway",
+  "freeway", "garden", "gardens", "gate", "green", "grove", "heights", "hill", "hills",
+  "hollow", "island", "isle", "junction", "knoll", "lake", "landings", "mall", "manor",
+  "meadow", "meadows", "mill", "mills", "mission", "mont", "mount", "mountain", "neck",
+  "oval", "overlook", "park", "pass", "path", "pike", "pine", "pines", "prairie", "ranch",
+  "river", "route", "row", "shoal", "shore", "spring", "springs", "station", "stravenue",
+  "stream", "summit", "throughway", "trace", "track", "trafficway", "trailer", "tunnel",
+  "turnpike", "union", "valley", "vista", "village", "vllg", "ville", "walk", "wall",
+  "waters", "wells",
+]);
 
-const DIRECT_ADDRESS_REGEX = new RegExp(
-  `\\b\\d{1,6}[a-z]?\\s+[A-Za-z0-9.'\\- ]{2,60}?\\b${STREET_SUFFIX}\\b\\.?`,
-  "i"
-);
+const DIRECTIONALS = new Set([
+  "n", "s", "e", "w", "ne", "nw", "se", "sw",
+  "north", "south", "east", "west",
+]);
 
-const CROSS_ADDRESS_REGEX = new RegExp(
-  `\\b(?:cross(?:ing)?\\s+(?:street|st\\.?)?|intersection(?:\\s+of)?|corner\\s+of|near|at|and)\\s+([A-Za-z0-9.'\\- ]{2,60}?\\b${STREET_SUFFIX}\\b\\.?)`,
-  "i"
-);
+// Words that should not appear inside a street name and stop backtracking.
+const STOP_WORDS = new Set([
+  "at", "and", "near", "by", "of", "on", "to", "the", "a", "an", "in", "with",
+  "from", "for", "is", "are", "was", "were", "be", "been", "being", "have", "has",
+  "had", "do", "does", "did", "will", "would", "could", "should", "may", "might",
+  "must", "can", "shall", "we", "you", "they", "he", "she", "it", "i", "me", "my",
+  "your", "their", "our", "his", "her", "its", "this", "that", "these", "those",
+  "there", "here", "where", "when", "what", "who", "why", "how", "all", "any",
+  "some", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+  "ten", "signal", "sig", "district", "dis", "zone", "channel", "ch", "dispatch",
+  "respond", "responding", "enroute", "en route", "unit", "units", "engine", "truck",
+  "squad", "medic", "rescue", "tow", "flatbed", "rotator", "wrecker",
+  "between", "intersection", "corner", "exit",
+]);
 
-function clean(value: string): string {
-  return value.replace(/\s+/g, " ").replace(/[.,;]+$/, "").trim();
+// Conjunctions/prepositions that often precede a cross street.
+const CROSS_LINKERS = new Set(["and", "at", "near", "by", "/", "between", "intersection", "corner"]);
+
+interface Token {
+  text: string;
+  index: number;
+  isSuffix: boolean;
+}
+
+interface StreetCandidate {
+  text: string;
+  startIndex: number;
+  endIndex: number;
+  hasNumber: boolean;
+  suffix: string;
+}
+
+function normalizeWhitespace(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function cleanWord(word: string): string {
+  return word.replace(/^[.,;:]+|[.,;:]+$/g, "").toLowerCase();
+}
+
+function cleanStreet(value: string): string {
+  return normalizeWhitespace(value).replace(/[.,;]+$/, "").trim();
+}
+
+function isStreetSuffix(word: string): boolean {
+  return STREET_SUFFIXES.has(cleanWord(word));
+}
+
+function tokenize(text: string): Token[] {
+  // Split on whitespace but keep slashes and ampersands as standalone tokens.
+  return text
+    .split(/\s+/)
+    .map((text, index) => ({
+      text,
+      index,
+      isSuffix: isStreetSuffix(text),
+    }));
+}
+
+function isNumberToken(word: string): boolean {
+  return /^\d{1,6}[a-z]?$/i.test(word.replace(/[.,;]+$/, ""));
+}
+
+function isStandaloneDispatchNumber(word: string): boolean {
+  // Single digits like "Signal 4" or "District 2" should not become part of an address.
+  const cleaned = word.replace(/[.,;]+$/, "");
+  return /^\d$/.test(cleaned);
+}
+
+function buildStreetCandidate(tokens: Token[], suffixIndex: number): StreetCandidate | null {
+  const suffixToken = tokens[suffixIndex];
+  if (!suffixToken || !suffixToken.isSuffix) return null;
+
+  const parts: string[] = [suffixToken.text];
+  let hasNumber = false;
+  let i = suffixIndex - 1;
+
+  // Walk backward up to 5 tokens to build the street name.
+  while (i >= 0 && parts.length < 6) {
+    const token = tokens[i];
+    const cleaned = cleanWord(token.text);
+
+    // Stop at obvious break words.
+    if (STOP_WORDS.has(cleaned)) break;
+
+    // Stop at punctuation-only tokens.
+    if (!/^\w/.test(token.text)) break;
+
+    // If we already have a street number, don't absorb a second standalone digit
+    // (likely a Signal/District/Zone number that leaked through).
+    if (hasNumber && isStandaloneDispatchNumber(token.text)) break;
+
+    // Allow numbers (street numbers or route numbers), directionals, and name words.
+    if (isNumberToken(token.text) || DIRECTIONALS.has(cleaned) || /^[a-z0-9.'\-]+$/i.test(token.text)) {
+      parts.unshift(token.text);
+      if (isNumberToken(token.text)) hasNumber = true;
+      i--;
+    } else {
+      break;
+    }
+  }
+
+  const text = cleanStreet(parts.join(" "));
+  if (!text) return null;
+
+  return {
+    text,
+    startIndex: i + 1,
+    endIndex: suffixIndex,
+    hasNumber,
+    suffix: cleanWord(suffixToken.text),
+  };
+}
+
+function findTokenRange(tokens: Token[], text: string): [number, number] | null {
+  const words = text.split(/\s+/).map((w) => w.replace(/[.,;]+$/, ""));
+  for (let i = 0; i <= tokens.length - words.length; i++) {
+    const slice = tokens
+      .slice(i, i + words.length)
+      .map((t) => t.text.replace(/[.,;]+$/, ""))
+      .join(" ");
+    if (slice.toLowerCase() === words.join(" ").toLowerCase()) {
+      return [i, i + words.length - 1];
+    }
+  }
+  return null;
+}
+
+function findRouteCandidates(text: string, tokens: Token[]): StreetCandidate[] {
+  const routeRe = /\b(I-\d{1,3}|US\s*\d{1,4}|SR\s*\d{1,4}|State Road\s*\d{1,4}|Route\s*\d{1,4})\b/gi;
+  const candidates: StreetCandidate[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = routeRe.exec(text)) !== null) {
+    const range = findTokenRange(tokens, match[1]);
+    candidates.push({
+      text: cleanStreet(match[1]),
+      startIndex: range ? range[0] : -1,
+      endIndex: range ? range[1] : -1,
+      hasNumber: /\d/.test(match[1]),
+      suffix: "hwy",
+    });
+  }
+  return candidates;
+}
+
+function findMlkCandidate(text: string, tokens: Token[]): StreetCandidate | null {
+  const mlkRe = /\b((?:\d{1,6}[a-z]?\s+(?:[nsew]\s+)?)?Dr\s+Martin\s+Luther\s+King(?:\s+Jr)?\s+(?:Blvd|Boulevard))\b/i;
+  const match = text.match(mlkRe);
+  if (!match) return null;
+  const range = findTokenRange(tokens, match[1]);
+  return {
+    text: cleanStreet(match[1]),
+    startIndex: range ? range[0] : -1,
+    endIndex: range ? range[1] : -1,
+    hasNumber: /^\d/.test(match[1]),
+    suffix: "blvd",
+  };
+}
+
+function findStreetCandidates(text: string): StreetCandidate[] {
+  const tokens = tokenize(text);
+  const candidates: StreetCandidate[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i].isSuffix) {
+      const candidate = buildStreetCandidate(tokens, i);
+      if (candidate) candidates.push(candidate);
+    }
+  }
+
+  // Add special highway/interstate candidates (I-4, US-19, SR-60, etc.).
+  candidates.push(...findRouteCandidates(text, tokens));
+
+  // Add special Dr. Martin Luther King Jr. Blvd candidate.
+  const mlk = findMlkCandidate(text, tokens);
+  if (mlk) candidates.push(mlk);
+
+  return candidates;
+}
+
+function streetNameStem(candidate: StreetCandidate): string {
+  // Drop the suffix, directionals, and numbers to compare whether two street names are the same.
+  const lower = candidate.text.toLowerCase();
+  const withoutSuffix = lower.replace(new RegExp(`\\b${candidate.suffix}\\b\\.?`), "").trim();
+  return withoutSuffix
+    .split(/\s+/)
+    .filter((w) => w && !DIRECTIONALS.has(w) && !/^\d+[a-z]?$/i.test(w))
+    .join(" ");
+}
+
+function normalizeForCompare(text: string): string {
+  return text.toLowerCase().replace(/\d+/g, "").replace(/\s+/g, " ").trim();
+}
+
+function isSameStreet(a: StreetCandidate, b: StreetCandidate): boolean {
+  if (streetNameStem(a) === streetNameStem(b)) return true;
+
+  // One candidate may be a prefix/substring of the other (e.g. "200 E Dr" vs
+  // "200 E Dr Martin Luther King Jr Blvd"). Treat them as the same street.
+  const na = normalizeForCompare(a.text);
+  const nb = normalizeForCompare(b.text);
+  if (na.includes(nb) || nb.includes(na)) return true;
+
+  return false;
+}
+
+function findCrossStreet(
+  text: string,
+  primary: StreetCandidate | null,
+  candidates: StreetCandidate[]
+): StreetCandidate | null {
+  const tokens = tokenize(text);
+  const primaryEnd = primary ? primary.endIndex : -1;
+
+  // Look for linker tokens (and, at, near, /) near candidate streets.
+  for (let i = 0; i < tokens.length; i++) {
+    const cleaned = cleanWord(tokens[i].text);
+    if (!CROSS_LINKERS.has(cleaned)) continue;
+
+    // Find the nearest street candidate before and after the linker.
+    const before = candidates
+      .filter((c) => c.endIndex < i && (!primary || !isSameStreet(c, primary)))
+      .pop();
+    const after = candidates
+      .filter((c) => c.startIndex > i && (!primary || !isSameStreet(c, primary)))
+      .shift();
+
+    if (after) return after;
+    if (before && primaryEnd >= 0 && before.endIndex > primaryEnd) return before;
+  }
+
+  // Fallback: pick the first candidate after the primary that is different.
+  if (primary) {
+    const afterPrimary = candidates.find(
+      (c) => c.startIndex > primary.endIndex && !isSameStreet(c, primary)
+    );
+    if (afterPrimary) return afterPrimary;
+  }
+
+  return null;
 }
 
 export interface ExtractedAddress {
@@ -26,12 +272,20 @@ export interface ExtractedAddress {
 export function extractAddress(transcript: string): ExtractedAddress {
   if (!transcript) return { address: null, crossStreet: null };
 
-  const text = transcript.replace(/\s+/g, " ");
-  const direct = text.match(DIRECT_ADDRESS_REGEX)?.[0];
-  const cross = text.match(CROSS_ADDRESS_REGEX)?.[1];
+  const text = normalizeWhitespace(transcript);
+  const candidates = findStreetCandidates(text);
+  if (candidates.length === 0) return { address: null, crossStreet: null };
+
+  // Prefer numbered addresses. If multiple numbered candidates exist, prefer the
+  // longest/most specific one (handles "200 E Dr" vs "200 E Dr Martin Luther King Jr Blvd").
+  const numbered = candidates.filter((c) => c.hasNumber);
+  const primary = numbered.length > 0
+    ? numbered.sort((a, b) => b.text.length - a.text.length)[0]
+    : candidates[0];
+  const cross = findCrossStreet(text, primary, candidates);
 
   return {
-    address: direct ? clean(direct) : null,
-    crossStreet: cross ? clean(cross) : null,
+    address: primary.text,
+    crossStreet: cross ? cross.text : null,
   };
 }

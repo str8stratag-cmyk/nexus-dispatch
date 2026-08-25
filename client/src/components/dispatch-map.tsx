@@ -13,6 +13,7 @@ interface DispatchMarker {
   district: string;
   transcript: string;
   createdAt: string;
+  status?: string;
 }
 
 interface DispatchMapProps {
@@ -108,6 +109,13 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
     markers.forEach((marker) => {
       if (!marker.lat || !marker.lng) return;
 
+      // Accepted calls are dimmed; active calls stay red/alert.
+      const isAccepted = marker.status === "accepted";
+      const hue = isAccepted ? 220 : 0;
+      const bg = isAccepted ? "hsl(220 20% 35%)" : "hsl(0 72% 48%)";
+      const shadow = isAccepted ? "hsl(220 20% 35% / 0.4)" : "hsl(0 72% 48% / 0.6)";
+      const emoji = isAccepted ? "🔒" : "🚨";
+
       // Custom alert icon
       const icon = L.divIcon({
         className: "dispatch-marker",
@@ -115,14 +123,14 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
           width: 28px;
           height: 28px;
           border-radius: 50%;
-          background: hsl(0 72% 48%);
+          background: ${bg};
           border: 3px solid hsl(0 0% 100%);
-          box-shadow: 0 0 12px hsl(0 72% 48% / 0.6);
+          box-shadow: 0 0 12px ${shadow};
           display: flex;
           align-items: center;
           justify-content: center;
           font-size: 14px;
-        ">🚨</div>`,
+        ">${emoji}</div>`,
         iconSize: [28, 28],
         iconAnchor: [14, 14],
       });

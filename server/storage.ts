@@ -21,6 +21,7 @@ function mapEvent(row: any): DispatchEvent {
     status: row.status,
     isManual: row.is_manual,
     audioUrl: row.audio_url ?? null,
+    telegramMessageId: row.telegram_message_id ?? null,
     createdAt: row.created_at,
   };
 }
@@ -35,6 +36,7 @@ export interface IStorage {
   getEvent(id: number): Promise<DispatchEvent | undefined>;
   createEvent(event: InsertDispatchEvent): Promise<DispatchEvent>;
   updateEventStatus(id: number, status: string): Promise<DispatchEvent | undefined>;
+  updateEventTelegramMessageId(id: number, telegramMessageId: string): Promise<DispatchEvent | undefined>;
   // Settings
   getSetting(key: string): Promise<Setting | undefined>;
   upsertSetting(setting: InsertSettings): Promise<Setting>;
@@ -82,6 +84,7 @@ export class DatabaseStorage implements IStorage {
         status: event.status ?? "active",
         is_manual: event.isManual ?? false,
         audio_url: event.audioUrl ?? null,
+        telegram_message_id: event.telegramMessageId ?? null,
       })
       .select("*")
       .single();
@@ -93,6 +96,17 @@ export class DatabaseStorage implements IStorage {
     const { data, error } = await supabase
       .from("dispatch_events")
       .update({ status })
+      .eq("id", id)
+      .select("*")
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data ? mapEvent(data) : undefined;
+  }
+
+  async updateEventTelegramMessageId(id: number, telegramMessageId: string): Promise<DispatchEvent | undefined> {
+    const { data, error } = await supabase
+      .from("dispatch_events")
+      .update({ telegram_message_id: telegramMessageId })
       .eq("id", id)
       .select("*")
       .maybeSingle();

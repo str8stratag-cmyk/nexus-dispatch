@@ -9,7 +9,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { CheckCircle2, Radio, MapPin, Clock, Download } from "lucide-react";
+import { CheckCircle2, Radio, MapPin, Clock, Download, ShieldAlert } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 interface DispatchEventRow {
@@ -106,6 +106,15 @@ export default function EventLog() {
     refetchInterval: 5000,
   });
 
+  const acceptMutation = useMutation({
+    mutationFn: async (id: number) => {
+      return apiRequest("PATCH", `/api/events/${id}/status`, { status: "accepted" });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/events"] });
+    },
+  });
+
   const resolveMutation = useMutation({
     mutationFn: async (id: number) => {
       return apiRequest("PATCH", `/api/events/${id}/status`, { status: "resolved" });
@@ -116,6 +125,7 @@ export default function EventLog() {
   });
 
   const activeEvents = events.filter((e) => e.status === "active");
+  const acceptedEvents = events.filter((e) => e.status === "accepted");
   const resolvedEvents = events.filter((e) => e.status === "resolved");
 
   const handleExportCSV = () => {
@@ -149,9 +159,16 @@ export default function EventLog() {
             Dispatch Events
           </span>
           <div className="flex items-center gap-2">
-            <Badge variant="outline" className="text-xs">
-              {activeEvents.length} active
-            </Badge>
+            <div className="flex items-center gap-1.5">
+              <Badge variant="outline" className="text-xs text-emerald-600 border-emerald-600/30 bg-emerald-600/10">
+                {activeEvents.length} active
+              </Badge>
+              {acceptedEvents.length > 0 && (
+                <Badge variant="outline" className="text-xs text-red-600 border-red-600/30 bg-red-600/10">
+                  {acceptedEvents.length} accepted
+                </Badge>
+              )}
+            </div>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -189,11 +206,11 @@ export default function EventLog() {
         {activeEvents.map((event) => (
           <div
             key={event.id}
-            className="group rounded-r-lg border border-l-[3px] border-orange-900/40 border-l-orange-500 bg-orange-950/10 p-3 space-y-2 transition-all hover:translate-x-1 hover:bg-orange-950/20 hover:shadow-md"
+            className="group rounded-r-lg border border-l-[3px] border-emerald-900/30 border-l-emerald-500 bg-emerald-950/10 p-3 space-y-2 transition-all hover:translate-x-1 hover:bg-emerald-950/20 hover:shadow-md"
             data-testid={`event-${event.id}`}
           >
             <div className="flex items-center justify-between">
-              <Badge variant="default" className="text-[10px] bg-orange-600/80">
+              <Badge variant="default" className="text-[10px] bg-emerald-600/90 hover:bg-emerald-600">
                 {event.signalType || "Unknown"}
               </Badge>
               <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
@@ -224,12 +241,64 @@ export default function EventLog() {
                 {event.district} • {event.source}
                 {event.isManual && " • Manual"}
               </span>
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 px-2 text-[10px] text-emerald-600 hover:text-emerald-500 hover:bg-emerald-950/20"
+                  onClick={() => acceptMutation.mutate(event.id)}
+                  data-testid={`accept-event-${event.id}`}
+                >
+                  <ShieldAlert className="h-3 w-3 mr-1" /> Accept
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 px-2 text-[10px]"
+                  onClick={() => resolveMutation.mutate(event.id)}
+                  data-testid={`resolve-event-${event.id}`}
+                >
+                  <CheckCircle2 className="h-3 w-3 mr-1" /> Resolve
+                </Button>
+              </div>
+            </div>
+          </div>
+        ))}
+        {acceptedEvents.map((event) => (
+          <div
+            key={event.id}
+            className="rounded-r-lg border border-l-[3px] border-red-900/40 border-l-red-500 bg-red-950/10 p-3 space-y-2 opacity-90"
+            data-testid={`accepted-event-${event.id}`}
+          >
+            <div className="flex items-center justify-between">
+              <Badge variant="default" className="text-[10px] bg-red-600/90 hover:bg-red-600">
+                {event.signalType || "Unknown"}
+              </Badge>
+              <div className="flex items-center gap-1 text-[10px] text-red-400 font-semibold uppercase tracking-wider">
+                <ShieldAlert className="h-3 w-3" />
+                Accepted
+              </div>
+            </div>
+            {event.address && (
+              <div className="flex items-center gap-1 text-xs font-mono text-foreground">
+                <MapPin className="h-3 w-3 text-red-400 shrink-0" />
+                {event.crossStreet ? `${event.address} & ${event.crossStreet}` : event.address}
+              </div>
+            )}
+            {event.description && (
+              <div className="text-xs text-muted-foreground">{event.description}</div>
+            )}
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-mono text-muted-foreground">
+                {event.district} • {event.source}
+                {event.isManual && " • Manual"}
+              </span>
               <Button
                 size="sm"
                 variant="ghost"
                 className="h-6 px-2 text-[10px]"
                 onClick={() => resolveMutation.mutate(event.id)}
-                data-testid={`resolve-event-${event.id}`}
+                data-testid={`resolve-accepted-event-${event.id}`}
               >
                 <CheckCircle2 className="h-3 w-3 mr-1" /> Resolve
               </Button>

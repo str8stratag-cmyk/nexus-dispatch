@@ -1,7 +1,7 @@
 import "dotenv/config";
 import express, { Response, NextFunction } from 'express';
 import type { Request } from 'express';
-import { registerRoutes } from "./routes";
+import { registerRoutes, setTelegramWebhook } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "node:http";
 
@@ -100,6 +100,10 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+      // If TELEGRAM_WEBHOOK_URL is configured, register it with Telegram automatically.
+      // For local dev without a public tunnel, leave it unset and use the
+      // /api/telegram/webhook/set endpoint once you have a public URL (e.g. ngrok).
+      setTelegramWebhook().catch((err) => log(`Telegram webhook setup failed: ${err.message}`, "telegram"));
     },
   );
 })();

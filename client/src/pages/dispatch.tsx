@@ -119,6 +119,7 @@ export default function DispatchPage() {
       district: e.district,
       transcript: e.transcript,
       createdAt: e.createdAt,
+      status: e.status,
     }));
 
   return (
