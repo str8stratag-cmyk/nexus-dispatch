@@ -18,7 +18,6 @@ interface UseAudioCaptureReturn {
 }
 
 const CHUNK_DURATION_MS = 8_000;
-const WHISPER_SERVICE_URL = import.meta.env.VITE_WHISPER_SERVICE_URL || "http://127.0.0.1:8178";
 
 export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioCaptureReturn {
   const { deviceId, keywords = [], onTranscript } = options;
@@ -70,7 +69,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     );
 
     try {
-      const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, { method: "POST", body: form });
+      const response = await fetch("/api/audio/transcribe", { method: "POST", body: form });
       const result = await response.json() as { text?: string; message?: string };
       if (!response.ok) {
         throw new Error(result.message || "Local Whisper transcription failed.");

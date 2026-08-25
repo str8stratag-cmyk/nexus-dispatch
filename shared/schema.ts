@@ -14,6 +14,8 @@ export interface DispatchEvent {
   source: string;
   status: string;
   isManual: boolean;
+  audioUrl: string | null;
+  telegramMessageId: string | null;
   createdAt: string;
 }
 
@@ -36,6 +38,8 @@ export const insertDispatchEventSchema = z.object({
   source: z.string().default("Unknown"),
   status: z.string().default("active"),
   isManual: z.boolean().default(false),
+  audioUrl: z.string().nullable().optional(),
+  telegramMessageId: z.string().nullable().optional(),
 });
 
 export const insertSettingsSchema = z.object({
