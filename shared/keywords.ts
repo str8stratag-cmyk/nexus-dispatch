@@ -6,9 +6,8 @@ export interface KeywordEntry {
 
 // Traffic accident keywords for radio transcription filtering. This is the
 // seed list used the first time the app runs — after that, the effective
-// list lives in the `keyword_list` setting (Supabase `settings` table) and
-// users can add/remove entries (including homophones) from the Settings
-// panel without redeploying.
+// list lives in the `keyword_list` setting and users can add/remove entries
+// (including homophones) from the Settings panel without redeploying.
 export const DEFAULT_KEYWORDS: KeywordEntry[] = [
   { pattern: "signal 3", label: "Signal 3", signalType: "Signal 3" },
   { pattern: "signal three", label: "Signal 3", signalType: "Signal 3" },
