@@ -127,12 +127,75 @@ export async function registerRoutes(
     }
   });
 
-  // Geocode an address via OpenStreetMap Nominatim
+  // Geocode an address. Use Geoapify when configured, otherwise fall back to
+  // OpenStreetMap Nominatim.
   app.get("/api/geocode", async (req, res) => {
     const address = req.query.q as string;
     if (!address) {
       return res.status(400).json({ message: "Address query parameter 'q' is required" });
     }
+
+    const geoapifyKey = process.env.GEOAPIFY_API_KEY?.trim();
+    const boundingBox = process.env.GEOAPIFY_BOUNDING_BOX?.trim();
+
+    if (geoapifyKey) {
+      const bounds = boundingBox?.split(",").map(Number);
+      if (
+        bounds &&
+        (bounds.length !== 4 ||
+          bounds.some((coordinate) => !Number.isFinite(coordinate)) ||
+          bounds[0] >= bounds[2] ||
+          bounds[1] >= bounds[3])
+      ) {
+        return res.status(500).json({
+          message: "GEOAPIFY_BOUNDING_BOX must use west,south,east,north coordinates",
+        });
+      }
+
+      try {
+        const params = new URLSearchParams({
+          text: address,
+          limit: "1",
+          apiKey: geoapifyKey,
+        });
+        if (boundingBox) {
+          params.set("filter", `rect:${boundingBox}`);
+        }
+
+        const geoapifyRes = await fetch(
+          `https://api.geoapify.com/v1/geocode/search?${params.toString()}`,
+        );
+        if (geoapifyRes.ok) {
+          const data = await geoapifyRes.json();
+          const result = data.features?.[0];
+          const [lng, lat] = result?.geometry?.coordinates ?? [];
+          if (Number.isFinite(lat) && Number.isFinite(lng)) {
+            if (
+              bounds &&
+              (lng < bounds[0] || lng > bounds[2] || lat < bounds[1] || lat > bounds[3])
+            ) {
+              return res.status(404).json({
+                message: "Address resolved outside the configured service area",
+              });
+            }
+            return res.json({
+              lat,
+              lng,
+              display_name: result.properties?.formatted ?? address,
+              provider: "geoapify",
+            });
+          }
+          return res.status(404).json({ message: "Address not found in the configured service area" });
+        } else {
+          console.error("Geoapify geocoding failed:", geoapifyRes.status, await geoapifyRes.text());
+          return res.status(502).json({ message: "Geoapify geocoding service is unavailable" });
+        }
+      } catch (err) {
+        console.error("Geoapify geocoding failed:", err);
+        return res.status(502).json({ message: "Geoapify geocoding service is unavailable" });
+      }
+    }
+
     try {
       const nomRes = await fetch(
         `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`,
@@ -148,6 +211,7 @@ export async function registerRoutes(
           lat: parseFloat(data[0].lat),
           lng: parseFloat(data[0].lon),
           display_name: data[0].display_name,
+          provider: "nominatim",
         });
       } else {
         res.status(404).json({ message: "Address not found" });
