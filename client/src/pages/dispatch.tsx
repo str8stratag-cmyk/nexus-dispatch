@@ -26,6 +26,7 @@ interface DispatchEventRow {
   source: string;
   status: string;
   isManual: boolean;
+  geocodedRoad: string | null;
   createdAt: string;
 }
 

@@ -26,6 +26,7 @@ interface DispatchEventRow {
   source: string;
   status: string;
   isManual: boolean;
+  geocodedRoad: string | null;
   createdAt: string;
 }
 
@@ -38,6 +39,7 @@ function eventsToCSV(events: DispatchEventRow[]): string {
     "Source",
     "Address",
     "Cross Street",
+    "Road X-Ref",
     "Latitude",
     "Longitude",
     "Status",
@@ -60,6 +62,7 @@ function eventsToCSV(events: DispatchEventRow[]): string {
       e.source || "",
       e.address || "",
       e.crossStreet || "",
+      e.geocodedRoad || "",
       e.lat ?? "",
       e.lng ?? "",
       e.status || "",
@@ -228,6 +231,11 @@ export default function EventLog() {
                 {event.crossStreet ? `${event.address} & ${event.crossStreet}` : event.address}
               </div>
             )}
+            {event.geocodedRoad && (
+              <div className="text-[11px] text-amber-500">
+                🛣️ Road x-ref: {event.geocodedRoad}
+              </div>
+            )}
             {event.description && (
               <div className="text-xs text-muted-foreground">{event.description}</div>
             )}
@@ -283,6 +291,11 @@ export default function EventLog() {
               <div className="flex items-center gap-1 text-xs font-mono text-foreground">
                 <MapPin className="h-3 w-3 text-red-400 shrink-0" />
                 {event.crossStreet ? `${event.address} & ${event.crossStreet}` : event.address}
+              </div>
+            )}
+            {event.geocodedRoad && (
+              <div className="text-[11px] text-amber-500">
+                🛣️ Road x-ref: {event.geocodedRoad}
               </div>
             )}
             {event.description && (

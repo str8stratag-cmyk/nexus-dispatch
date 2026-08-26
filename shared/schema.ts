@@ -16,6 +16,7 @@ export interface DispatchEvent {
   isManual: boolean;
   audioUrl: string | null;
   telegramMessageId: string | null;
+  geocodedRoad: string | null;
   createdAt: string;
 }
 
@@ -40,6 +41,7 @@ export const insertDispatchEventSchema = z.object({
   isManual: z.boolean().default(false),
   audioUrl: z.string().nullable().optional(),
   telegramMessageId: z.string().nullable().optional(),
+  geocodedRoad: z.string().nullable().optional(),
 });
 
 export const insertSettingsSchema = z.object({

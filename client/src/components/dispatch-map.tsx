@@ -4,12 +4,13 @@ import "leaflet/dist/leaflet.css";
 
 interface DispatchMarker {
   id: number;
-  lat: number;
-  lng: number;
-  address: string;
-  crossStreet: string;
-  signalType: string;
-  description: string;
+  lat: number | null;
+  lng: number | null;
+  address: string | null;
+  crossStreet: string | null;
+  geocodedRoad: string | null;
+  signalType: string | null;
+  description: string | null;
   district: string;
   transcript: string;
   createdAt: string;
@@ -48,6 +49,15 @@ function buildPopupContent(marker: DispatchMarker): HTMLElement {
     : marker.address || "Address unknown";
   container.appendChild(address);
 
+  if (marker.geocodedRoad) {
+    const roadRef = document.createElement("div");
+    roadRef.style.fontSize = "11px";
+    roadRef.style.color = "hsl(38 92% 55%)";
+    roadRef.style.marginBottom = "8px";
+    roadRef.textContent = `🛣️ Road x-ref: ${marker.geocodedRoad}`;
+    container.appendChild(roadRef);
+  }
+
   if (marker.description) {
     const desc = document.createElement("div");
     desc.style.marginBottom = "8px";
@@ -83,11 +93,25 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
       attributionControl: true,
     });
 
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+    const baseLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
       subdomains: "abcd",
       maxZoom: 20,
     }).addTo(map);
+
+    // Roads overlay for cross-referencing dispatch locations against real road names.
+    const roadsOverlay = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      subdomains: "abc",
+      maxZoom: 20,
+      opacity: 0.35,
+    });
+
+    L.control.layers(
+      { "Dark": baseLayer },
+      { "Roads": roadsOverlay },
+      { collapsed: false, position: "topright" }
+    ).addTo(map);
 
     // Hillsborough County, FL boundary for cross-reference context.
     const countyBounds: L.LatLngExpression[] = [
@@ -157,9 +181,12 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
         .addTo(markerLayerRef.current!);
     });
 
-    if (markers.length && !hasFittedMarkersRef.current) {
+    const validMarkers = markers.filter((m): m is typeof m & { lat: number; lng: number } =>
+      Number.isFinite(m.lat) && Number.isFinite(m.lng)
+    );
+    if (validMarkers.length && !hasFittedMarkersRef.current) {
       mapRef.current.fitBounds(
-        L.latLngBounds(markers.map((marker) => [marker.lat, marker.lng])),
+        L.latLngBounds(validMarkers.map((marker) => [marker.lat, marker.lng])),
         { padding: [24, 24], maxZoom: 14 }
       );
       hasFittedMarkersRef.current = true;

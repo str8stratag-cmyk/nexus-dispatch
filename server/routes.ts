@@ -131,6 +131,43 @@ async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
   return null;
 }
 
+async function reverseGeocodeRoad(lat: number, lng: number): Promise<string | null> {
+  const geoapifyKey = process.env.GEOAPIFY_API_KEY?.trim();
+
+  if (geoapifyKey) {
+    try {
+      const res = await fetch(
+        `https://api.geoapify.com/v1/geocode/reverse?lat=${lat}&lon=${lng}&apiKey=${geoapifyKey}`
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const props = data.features?.[0]?.properties;
+        const road = props?.street || props?.road || props?.name;
+        if (road) return road;
+      } else {
+        console.error("Geoapify reverse geocoding failed:", res.status, await res.text());
+      }
+    } catch (err) {
+      console.error("Geoapify reverse geocoding failed:", err);
+    }
+  }
+
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`,
+      { headers: { "User-Agent": "DispatchMonitor/1.0" } }
+    );
+    if (res.ok) {
+      const data = await res.json();
+      return data.address?.road || data.address?.street || data.address?.name || null;
+    }
+  } catch (err) {
+    console.error("Nominatim reverse geocoding failed:", err);
+  }
+
+  return null;
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -174,6 +211,7 @@ export async function registerRoutes(
       // Geocode the address if coordinates were not provided.
       let lat = parsed.lat;
       let lng = parsed.lng;
+      let geocodedRoad: string | null = null;
       if ((!lat || !lng) && parsed.address) {
         const geo = await geocodeAddress(parsed.address);
         if (geo) {
@@ -182,7 +220,12 @@ export async function registerRoutes(
         }
       }
 
-      let event = await storage.createEvent({ ...parsed, lat, lng });
+      // Cross-reference the resolved coordinates against the actual road name.
+      if (lat && lng) {
+        geocodedRoad = await reverseGeocodeRoad(lat, lng);
+      }
+
+      let event = await storage.createEvent({ ...parsed, lat, lng, geocodedRoad });
 
       // Send to Telegram if configured
       const { botToken, chatId } = await getTelegramCredentials();
@@ -453,6 +496,10 @@ function formatTelegramMessage(event: DispatchEvent, options: FormatOptions = {}
   msg += `\n<b>Signal:</b> ${escapeHtml(event.signalType)}\n`;
   msg += `<b>District:</b> ${escapeHtml(event.district)}\n`;
   msg += `<b>Source:</b> ${escapeHtml(event.source)}\n`;
+
+  if (event.geocodedRoad) {
+    msg += `<b>Road X-Ref:</b> ${escapeHtml(event.geocodedRoad)}\n`;
+  }
 
   if (event.description) {
     msg += `<b>Details:</b> ${escapeHtml(event.description)}\n`;

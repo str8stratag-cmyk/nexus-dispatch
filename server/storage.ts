@@ -19,6 +19,8 @@ interface DispatchEventDocument {
   status: string;
   isManual: boolean;
   audioUrl: string | null;
+  telegramMessageId: string | null;
+  geocodedRoad: string | null;
   createdAt: Date;
 }
 
@@ -44,6 +46,8 @@ function mapEvent(row: DispatchEventDocument): DispatchEvent {
     status: row.status,
     isManual: row.isManual,
     audioUrl: row.audioUrl ?? null,
+    telegramMessageId: row.telegramMessageId ?? null,
+    geocodedRoad: row.geocodedRoad ?? null,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -57,6 +61,7 @@ export interface IStorage {
   getEvent(id: number): Promise<DispatchEvent | undefined>;
   createEvent(event: InsertDispatchEvent): Promise<DispatchEvent>;
   updateEventStatus(id: number, status: string): Promise<DispatchEvent | undefined>;
+  updateEventTelegramMessageId(id: number, telegramMessageId: string): Promise<DispatchEvent | undefined>;
   getSetting(key: string): Promise<Setting | undefined>;
   upsertSetting(setting: InsertSettings): Promise<Setting>;
   getAllSettings(): Promise<Setting[]>;
@@ -109,6 +114,8 @@ export class DatabaseStorage implements IStorage {
       status: event.status ?? "active",
       isManual: event.isManual ?? false,
       audioUrl: event.audioUrl ?? null,
+      telegramMessageId: event.telegramMessageId ?? null,
+      geocodedRoad: event.geocodedRoad ?? null,
       createdAt: new Date(),
     };
     await database.collection<DispatchEventDocument>("dispatchEvents").insertOne(document);
@@ -120,6 +127,16 @@ export class DatabaseStorage implements IStorage {
     const event = await database.collection<DispatchEventDocument>("dispatchEvents").findOneAndUpdate(
       { id },
       { $set: { status } },
+      { returnDocument: "after" },
+    );
+    return event ? mapEvent(event) : undefined;
+  }
+
+  async updateEventTelegramMessageId(id: number, telegramMessageId: string): Promise<DispatchEvent | undefined> {
+    const database = await getDatabase();
+    const event = await database.collection<DispatchEventDocument>("dispatchEvents").findOneAndUpdate(
+      { id },
+      { $set: { telegramMessageId } },
       { returnDocument: "after" },
     );
     return event ? mapEvent(event) : undefined;
