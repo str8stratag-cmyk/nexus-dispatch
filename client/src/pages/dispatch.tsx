@@ -5,8 +5,9 @@ import { useTheme } from "@/hooks/use-theme";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Sun, Moon, Radio, Send, Settings, ExternalLink } from "lucide-react";
+import { Sun, Moon, Radio, Send, Settings, ExternalLink, Map } from "lucide-react";
 import AudioPanel, { type DetectedEvent } from "@/components/audio-panel";
+import DispatchMap from "@/components/dispatch-map";
 import EventLog from "@/components/event-log";
 import ManualDispatch from "@/components/manual-dispatch";
 import SettingsPanel from "@/components/settings-panel";
@@ -97,12 +98,15 @@ export default function DispatchPage() {
             Live
           </span>
         </div>
-        <TabsList className="absolute left-1/2 hidden h-auto w-auto -translate-x-1/2 grid-cols-3 gap-1 rounded-lg bg-muted/50 p-1 lg:grid">
+        <TabsList className="absolute left-1/2 hidden h-auto w-auto -translate-x-1/2 grid-cols-4 gap-1 rounded-lg bg-muted/50 p-1 lg:grid">
           <TabsTrigger value="monitor" className="px-4 py-2 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground" data-testid="tab-monitor">
             <Radio className="mr-1 h-3 w-3" /> Live Monitor
           </TabsTrigger>
           <TabsTrigger value="manual" className="px-4 py-2 text-xs" data-testid="tab-manual">
             <Send className="mr-1 h-3 w-3" /> Manual Dispatch
+          </TabsTrigger>
+          <TabsTrigger value="map" className="px-4 py-2 text-xs" data-testid="tab-map">
+            <Map className="mr-1 h-3 w-3" /> Map
           </TabsTrigger>
           <TabsTrigger value="settings" className="px-4 py-2 text-xs" data-testid="tab-settings">
             <Settings className="mr-1 h-3 w-3" /> Settings
@@ -137,12 +141,15 @@ export default function DispatchPage() {
         </div>
       </header>
 
-        <TabsList className="mx-auto mt-2 grid w-full max-w-md grid-cols-3 lg:hidden">
+        <TabsList className="mx-auto mt-2 grid w-full max-w-md grid-cols-4 lg:hidden">
           <TabsTrigger value="monitor" className="text-xs" data-testid="tab-monitor">
             <Radio className="h-3 w-3 mr-1" /> Live Monitor
           </TabsTrigger>
           <TabsTrigger value="manual" className="text-xs" data-testid="tab-manual">
-            <Send className="h-3 w-3 mr-1" /> Manual Dispatch
+            <Send className="h-3 w-3 mr-1" /> Manual
+          </TabsTrigger>
+          <TabsTrigger value="map" className="text-xs" data-testid="tab-map">
+            <Map className="h-3 w-3 mr-1" /> Map
           </TabsTrigger>
           <TabsTrigger value="settings" className="text-xs" data-testid="tab-settings">
             <Settings className="h-3 w-3 mr-1" /> Settings
@@ -166,6 +173,13 @@ export default function DispatchPage() {
             <section className="min-h-[360px] rounded-lg border border-border bg-card p-3 shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
               <EventLog />
             </section>
+          </div>
+        </TabsContent>
+
+        {/* Map Tab */}
+        <TabsContent value="map" className="flex-1 min-h-0 mt-2 lg:mt-0">
+          <div className="h-full p-3">
+            <DispatchMap markers={events} />
           </div>
         </TabsContent>
 

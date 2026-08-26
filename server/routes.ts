@@ -44,6 +44,93 @@ async function telegramApiCall(
   return data;
 }
 
+interface GeocodeResult {
+  lat: number;
+  lng: number;
+  display_name: string;
+  provider: string;
+}
+
+async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
+  const geoapifyKey = process.env.GEOAPIFY_API_KEY?.trim();
+  const boundingBox = process.env.GEOAPIFY_BOUNDING_BOX?.trim();
+
+  if (geoapifyKey) {
+    const bounds = boundingBox?.split(",").map(Number);
+    if (
+      bounds &&
+      (bounds.length !== 4 ||
+        bounds.some((coordinate) => !Number.isFinite(coordinate)) ||
+        bounds[0] >= bounds[2] ||
+        bounds[1] >= bounds[3])
+    ) {
+      throw new Error("GEOAPIFY_BOUNDING_BOX must use west,south,east,north coordinates");
+    }
+
+    try {
+      const params = new URLSearchParams({
+        text: address,
+        limit: "1",
+        apiKey: geoapifyKey,
+      });
+      if (boundingBox) {
+        params.set("filter", `rect:${boundingBox}`);
+      }
+
+      const geoapifyRes = await fetch(
+        `https://api.geoapify.com/v1/geocode/search?${params.toString()}`,
+      );
+      if (geoapifyRes.ok) {
+        const data = await geoapifyRes.json();
+        const result = data.features?.[0];
+        const [lng, lat] = result?.geometry?.coordinates ?? [];
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+          if (
+            bounds &&
+            (lng < bounds[0] || lng > bounds[2] || lat < bounds[1] || lat > bounds[3])
+          ) {
+            return null;
+          }
+          return {
+            lat,
+            lng,
+            display_name: result.properties?.formatted ?? address,
+            provider: "geoapify",
+          };
+        }
+      } else {
+        console.error("Geoapify geocoding failed:", geoapifyRes.status, await geoapifyRes.text());
+      }
+    } catch (err) {
+      console.error("Geoapify geocoding failed:", err);
+    }
+  }
+
+  try {
+    const nomRes = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`,
+      {
+        headers: {
+          "User-Agent": "DispatchMonitor/1.0",
+        },
+      }
+    );
+    const data = await nomRes.json();
+    if (Array.isArray(data) && data.length > 0) {
+      return {
+        lat: parseFloat(data[0].lat),
+        lng: parseFloat(data[0].lon),
+        display_name: data[0].display_name,
+        provider: "nominatim",
+      };
+    }
+  } catch (err: any) {
+    console.error("Nominatim geocoding failed:", err);
+  }
+
+  return null;
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -84,7 +171,18 @@ export async function registerRoutes(
         }
       }
 
-      let event = await storage.createEvent(parsed);
+      // Geocode the address if coordinates were not provided.
+      let lat = parsed.lat;
+      let lng = parsed.lng;
+      if ((!lat || !lng) && parsed.address) {
+        const geo = await geocodeAddress(parsed.address);
+        if (geo) {
+          lat = geo.lat;
+          lng = geo.lng;
+        }
+      }
+
+      let event = await storage.createEvent({ ...parsed, lat, lng });
 
       // Send to Telegram if configured
       const { botToken, chatId } = await getTelegramCredentials();
@@ -145,86 +243,12 @@ export async function registerRoutes(
       return res.status(400).json({ message: "Address query parameter 'q' is required" });
     }
 
-    const geoapifyKey = process.env.GEOAPIFY_API_KEY?.trim();
-    const boundingBox = process.env.GEOAPIFY_BOUNDING_BOX?.trim();
-
-    if (geoapifyKey) {
-      const bounds = boundingBox?.split(",").map(Number);
-      if (
-        bounds &&
-        (bounds.length !== 4 ||
-          bounds.some((coordinate) => !Number.isFinite(coordinate)) ||
-          bounds[0] >= bounds[2] ||
-          bounds[1] >= bounds[3])
-      ) {
-        return res.status(500).json({
-          message: "GEOAPIFY_BOUNDING_BOX must use west,south,east,north coordinates",
-        });
-      }
-
-      try {
-        const params = new URLSearchParams({
-          text: address,
-          limit: "1",
-          apiKey: geoapifyKey,
-        });
-        if (boundingBox) {
-          params.set("filter", `rect:${boundingBox}`);
-        }
-
-        const geoapifyRes = await fetch(
-          `https://api.geoapify.com/v1/geocode/search?${params.toString()}`,
-        );
-        if (geoapifyRes.ok) {
-          const data = await geoapifyRes.json();
-          const result = data.features?.[0];
-          const [lng, lat] = result?.geometry?.coordinates ?? [];
-          if (Number.isFinite(lat) && Number.isFinite(lng)) {
-            if (
-              bounds &&
-              (lng < bounds[0] || lng > bounds[2] || lat < bounds[1] || lat > bounds[3])
-            ) {
-              return res.status(404).json({
-                message: "Address resolved outside the configured service area",
-              });
-            }
-            return res.json({
-              lat,
-              lng,
-              display_name: result.properties?.formatted ?? address,
-              provider: "geoapify",
-            });
-          }
-          return res.status(404).json({ message: "Address not found in the configured service area" });
-        } else {
-          console.error("Geoapify geocoding failed:", geoapifyRes.status, await geoapifyRes.text());
-          return res.status(502).json({ message: "Geoapify geocoding service is unavailable" });
-        }
-      } catch (err) {
-        console.error("Geoapify geocoding failed:", err);
-        return res.status(502).json({ message: "Geoapify geocoding service is unavailable" });
-      }
-    }
-
     try {
-      const nomRes = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`,
-        {
-          headers: {
-            "User-Agent": "DispatchMonitor/1.0",
-          },
-        }
-      );
-      const data = await nomRes.json();
-      if (Array.isArray(data) && data.length > 0) {
-        res.json({
-          lat: parseFloat(data[0].lat),
-          lng: parseFloat(data[0].lon),
-          display_name: data[0].display_name,
-          provider: "nominatim",
-        });
+      const result = await geocodeAddress(address);
+      if (result) {
+        res.json(result);
       } else {
-        res.status(404).json({ message: "Address not found" });
+        res.status(404).json({ message: "Address not found or outside service area" });
       }
     } catch (err: any) {
       res.status(500).json({ message: "Geocoding failed: " + err.message });
