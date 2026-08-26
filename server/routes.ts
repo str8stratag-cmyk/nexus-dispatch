@@ -74,6 +74,16 @@ export async function registerRoutes(
   app.post("/api/dispatch", async (req, res) => {
     try {
       const parsed = insertDispatchEventSchema.parse(req.body);
+
+      // Auto-dispatches without a real address are usually TV/noise false positives.
+      // Manual dispatches can still be created without an address.
+      if (!parsed.isManual) {
+        const addr = (parsed.address || "").trim().toLowerCase();
+        if (!addr || addr === "" || addr.includes("unknown")) {
+          return res.status(400).json({ message: "Auto-dispatch requires a resolved address" });
+        }
+      }
+
       let event = await storage.createEvent(parsed);
 
       // Send to Telegram if configured

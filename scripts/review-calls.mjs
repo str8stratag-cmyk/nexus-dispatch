@@ -23,6 +23,19 @@ const videoPhrases = [
   "watch your feet",
   "check mark",
   "what were you waiting",
+  "we interrupt coursework",
+  "your daughter",
+  "no answer",
+];
+
+const conversationPhrases = [
+  "i apologize",
+  "pushing back to you",
+  "i'd be happy to",
+  "have you back on",
+  "please make sure you copy",
+  "awesome",
+  "what are you reading",
 ];
 
 const nonsensePatterns = [
@@ -65,6 +78,11 @@ function isConversational(transcript) {
   return conversationalStarters.filter((p) => t.includes(p));
 }
 
+function containsConversationPhrase(transcript) {
+  const t = normalize(transcript);
+  return conversationPhrases.filter((p) => t.includes(p));
+}
+
 function containsNonsensePattern(transcript) {
   const t = normalize(transcript);
   return nonsensePatterns.filter((p) => t.includes(p));
@@ -102,6 +120,12 @@ function scoreEvent(event) {
   if (convHits.length > 0) {
     score += 2;
     reasons.push(`conversational phrase: "${convHits[0]}"`);
+  }
+
+  const conversationHits = containsConversationPhrase(event.transcript);
+  if (conversationHits.length > 0) {
+    score += 2;
+    reasons.push(`phone/TV conversation: "${conversationHits[0]}"`);
   }
 
   const nonsenseHits = containsNonsensePattern(event.transcript);
