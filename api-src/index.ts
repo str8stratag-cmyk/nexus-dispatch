@@ -21,6 +21,8 @@ app.use(
 app.use(express.urlencoded({ extended: false }));
 
 let ready: Promise<void> | null = null;
+let webhookRegistered = false;
+
 function init() {
   if (!ready) {
     ready = registerRoutes(httpServer, app).then(() => {
@@ -31,7 +33,18 @@ function init() {
         if (res.headersSent) return;
         res.status(status).json({ message });
       });
-      setTelegramWebhook().catch((err) => console.error("Telegram webhook setup failed:", err));
+
+      // Fire-and-forget Telegram webhook registration. Do not block requests on it,
+      // and cap it at 5 seconds so a slow Telegram API can't delay serverless invocations.
+      if (!webhookRegistered) {
+        webhookRegistered = true;
+        const timeout = new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error("Telegram webhook registration timed out")), 5000)
+        );
+        Promise.race([setTelegramWebhook(), timeout]).catch((err) =>
+          console.error("Telegram webhook setup failed:", err)
+        );
+      }
     });
   }
   return ready;

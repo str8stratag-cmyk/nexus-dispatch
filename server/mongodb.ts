@@ -13,7 +13,15 @@ export function getDatabase(): Promise<Db> {
   }
 
   if (!databasePromise) {
-    databasePromise = MongoClient.connect(uri).then(async (client) => {
+    databasePromise = MongoClient.connect(uri, {
+      serverSelectionTimeoutMS: 8000,
+      connectTimeoutMS: 10000,
+      socketTimeoutMS: 30000,
+      maxPoolSize: 1,
+      minPoolSize: 0,
+      retryWrites: true,
+      w: "majority",
+    }).then(async (client) => {
       const database = client.db(databaseName);
       await Promise.all([
         database.collection("dispatchEvents").createIndex({ id: 1 }, { unique: true }),
