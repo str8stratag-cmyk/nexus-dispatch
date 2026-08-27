@@ -6,6 +6,65 @@ import { normalizeKeywordEntry } from "@shared/keywords";
 import { isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
 
+// Phrases that almost always mean the audio captured a TV/video instead of dispatch.
+const TV_VIDEO_PHRASES = [
+  "thank you for watching",
+  "thanks for watching",
+  "that's the end of the video",
+  "that is the end of the video",
+  "end of the video",
+  "like and subscribe",
+  "hello hello hello",
+  "we interrupt coursework",
+  "today's video",
+  "this is just a test",
+  "thank you and goodbye",
+  "subscribe to our channel",
+  "visit www.",
+  "for more information",
+  "check mark",
+  "what were you waiting",
+  "your daughter",
+  "no answer",
+];
+
+const STREET_SUFFIX_ONLY = new Set([
+  "street", "st", "avenue", "ave", "road", "rd", "boulevard", "blvd", "drive", "dr",
+  "lane", "ln", "court", "ct", "circle", "cir", "highway", "hwy", "parkway", "pkwy",
+  "place", "pl", "terrace", "ter", "trail", "trl", "way", "loop", "cove", "point",
+  "run", "ridge", "rdg", "spur", "plaza", "sq", "square", "alley", "bridge", "bypass",
+  "causeway", "center", "centre", "commons", "curve", "divide", "estate", "expressway",
+  "freeway", "garden", "gardens", "gate", "green", "grove", "heights", "hill", "hills",
+  "hollow", "island", "isle", "junction", "knoll", "lake", "landings", "mall", "manor",
+  "meadow", "meadows", "mill", "mills", "mission", "mont", "mount", "mountain", "neck",
+  "oval", "overlook", "park", "pass", "path", "pike", "pine", "pines", "prairie", "ranch",
+  "river", "route", "row", "shoal", "shore", "spring", "springs", "station", "stravenue",
+  "stream", "summit", "throughway", "trace", "track", "trafficway", "trailer", "tunnel",
+  "turnpike", "union", "valley", "vista", "village", "vllg", "ville", "walk", "wall",
+  "waters", "wells", "track", "court", "point", "drive", "way",
+]);
+
+function normalizeText(value: string): string {
+  return (value || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function containsTvVideoPhrase(transcript: string): boolean {
+  const t = normalizeText(transcript);
+  return TV_VIDEO_PHRASES.some((p) => t.includes(p));
+}
+
+function isInvalidAutoAddress(address: string | null | undefined): boolean {
+  const a = (address || "").trim().toLowerCase();
+  if (!a || a === "" || a.includes("unknown") || a === "n/a" || a === "null") return true;
+  if (STREET_SUFFIX_ONLY.has(a)) return true;
+  return false;
+}
+
+function hasKeywordSpam(transcript: string): boolean {
+  const t = normalizeText(transcript);
+  return /\b(\w+)\s+\1\s+\1\s+\1\b/.test(t);
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -34,6 +93,21 @@ export async function registerRoutes(
   app.post("/api/dispatch", async (req, res) => {
     try {
       const parsed = insertDispatchEventSchema.parse(req.body);
+
+      // Auto-dispatches without a real address are usually TV/noise false positives.
+      // Manual dispatches can still be created without an address.
+      if (!parsed.isManual) {
+        if (containsTvVideoPhrase(parsed.transcript)) {
+          return res.status(400).json({ message: "Auto-dispatch rejected: detected TV/video audio" });
+        }
+        if (hasKeywordSpam(parsed.transcript)) {
+          return res.status(400).json({ message: "Auto-dispatch rejected: keyword spam detected" });
+        }
+        if (isInvalidAutoAddress(parsed.address)) {
+          return res.status(400).json({ message: "Auto-dispatch requires a resolved address" });
+        }
+      }
+
       const event = await storage.createEvent(parsed);
 
       // Send to Telegram if configured
