@@ -30,6 +30,7 @@ const videoPhrases = [
   "visit www",
   "for more information",
   "the end",
+  "please return to your seat",
 ];
 
 const conversationPhrases = [
@@ -40,6 +41,10 @@ const conversationPhrases = [
   "please make sure you copy",
   "awesome",
   "what are you reading",
+  "what's your name",
+  "what would you say",
+  "i'll be there for you",
+  "why come they need me",
 ];
 
 const nonsensePatterns = [
