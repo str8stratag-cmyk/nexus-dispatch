@@ -89,7 +89,8 @@ function hasRepetitiveWords(transcript) {
 function isJunkAddress(address, crossStreet) {
   const a = normalize(address);
   const c = normalize(crossStreet);
-  if (junkAddresses.some((j) => a === j || c === j)) return true;
+  if (a && junkAddresses.some((j) => a === j)) return true;
+  if (c && junkAddresses.some((j) => c === j)) return true;
   if (!a && !c) return true;
   if (streetSuffixOnly.has(a)) return true;
   return false;
