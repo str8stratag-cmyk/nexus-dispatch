@@ -26,6 +26,11 @@ const TV_VIDEO_PHRASES = [
   "what were you waiting",
   "your daughter",
   "no answer",
+  "please return to your seat",
+  "what's your name",
+  "what would you say",
+  "i'll be there for you",
+  "why come they need me",
 ];
 
 const STREET_SUFFIX_ONLY = new Set([
