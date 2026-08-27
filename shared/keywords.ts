@@ -18,10 +18,19 @@ export const DEFAULT_KEYWORDS: KeywordEntry[] = [
   // so "signal four" and "signal for" are treated the same as "signal 4".
   { pattern: "signal four", label: "Signal 4", signalType: "Signal 4" },
   { pattern: "signal for", label: "Signal 4", signalType: "Signal 4" },
+  { pattern: "single four", label: "Signal 4", signalType: "Signal 4" },
+  { pattern: "single for", label: "Signal 4", signalType: "Signal 4" },
+  { pattern: "symbol four", label: "Signal 4", signalType: "Signal 4" },
+  { pattern: "symbol for", label: "Signal 4", signalType: "Signal 4" },
+  { pattern: "signal before", label: "Signal 4", signalType: "Signal 4" },
   { pattern: "signal 16", label: "Signal 16", signalType: "Signal 16" },
   { pattern: "signal sixteen", label: "Signal 16", signalType: "Signal 16" },
   { pattern: "mva", label: "MVA", signalType: "MVA" },
+  // "nba" is a common Whisper mishearing of "mva" in noisy audio.
+  { pattern: "nba", label: "MVA", signalType: "MVA" },
   { pattern: "mvc", label: "MVC", signalType: "MVC" },
+  // "nbc" is a common Whisper mishearing of "mvc" in noisy audio.
+  { pattern: "nbc", label: "MVC", signalType: "MVC" },
   { pattern: "crash", label: "Crash", signalType: "Crash" },
   { pattern: "wreck", label: "Wreck", signalType: "Wreck" },
   { pattern: "accident", label: "Accident", signalType: "Accident" },
