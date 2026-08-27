@@ -128,6 +128,25 @@ function isStandaloneJunk(transcript) {
   return standaloneJunkWords.find((w) => joined === w) || null;
 }
 
+const dispatchSignals = [
+  "signal 4", "signal four",
+  "signal 3", "signal three",
+  "signal 16",
+  "mva",
+  "wreck",
+  "tow",
+  "airbags deployed",
+  "rollover",
+  "accident",
+];
+
+function isLikelyRealDispatch(event) {
+  const t = normalize(event.transcript);
+  const hasSignal = dispatchSignals.some((s) => t.includes(s));
+  const hasRealAddress = !isJunkAddress(event.address, event.crossStreet);
+  return hasSignal && hasRealAddress;
+}
+
 function scoreEvent(event) {
   let score = 0;
   const reasons = [];
@@ -182,6 +201,12 @@ function scoreEvent(event) {
   if (wordCount > 0 && wordCount < 5 && !event.address) {
     score += 1;
     reasons.push("very short transcript with no address");
+  }
+
+  // Strong dispatch signal + real address overrides noise phrases.
+  if (isLikelyRealDispatch(event)) {
+    score = Math.max(0, score - 3);
+    reasons.push("overridden: strong dispatch signal with real address");
   }
 
   return { score, reasons };
