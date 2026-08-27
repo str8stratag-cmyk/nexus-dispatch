@@ -11,7 +11,7 @@ C:\Users\str8s\
 └── (this setup folder is inside dispatch-monitor)
 ```
 
-Both apps share the same MongoDB database. The default `MONGODB_DB_NAME` is `dispatch_monitor` in both `.env` files.
+Both apps share the same MongoDB database. The default `MONGODB_DB_NAME` is `str8stratag_db_user` in both `.env` files.
 
 ## Prerequisites
 
