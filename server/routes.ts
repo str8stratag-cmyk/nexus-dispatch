@@ -70,6 +70,25 @@ function hasKeywordSpam(transcript: string): boolean {
   return /\b(\w+)\s+\1\s+\1\s+\1\b/.test(t);
 }
 
+const DISPATCH_SIGNALS = [
+  "signal 4", "signal four",
+  "signal 3", "signal three",
+  "signal 16",
+  "mva",
+  "wreck",
+  "tow",
+  "airbags deployed",
+  "rollover",
+  "accident",
+];
+
+function isLikelyRealDispatch(transcript: string, address: string | null | undefined): boolean {
+  const t = normalizeText(transcript);
+  const hasSignal = DISPATCH_SIGNALS.some((s) => t.includes(s));
+  const hasRealAddress = !isInvalidAutoAddress(address);
+  return hasSignal && hasRealAddress;
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -102,10 +121,13 @@ export async function registerRoutes(
       // Auto-dispatches without a real address are usually TV/noise false positives.
       // Manual dispatches can still be created without an address.
       if (!parsed.isManual) {
-        if (containsTvVideoPhrase(parsed.transcript)) {
+        // A strong dispatch signal + real address overrides noise phrases
+        // (e.g. TV audio before the actual call).
+        const likelyReal = isLikelyRealDispatch(parsed.transcript, parsed.address);
+        if (containsTvVideoPhrase(parsed.transcript) && !likelyReal) {
           return res.status(400).json({ message: "Auto-dispatch rejected: detected TV/video audio" });
         }
-        if (hasKeywordSpam(parsed.transcript)) {
+        if (hasKeywordSpam(parsed.transcript) && !likelyReal) {
           return res.status(400).json({ message: "Auto-dispatch rejected: keyword spam detected" });
         }
         if (isInvalidAutoAddress(parsed.address)) {
