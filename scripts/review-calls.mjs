@@ -26,6 +26,10 @@ const videoPhrases = [
   "we interrupt coursework",
   "your daughter",
   "no answer",
+  "subscribe to our channel",
+  "visit www",
+  "for more information",
+  "the end",
 ];
 
 const conversationPhrases = [
@@ -46,6 +50,22 @@ const nonsensePatterns = [
 const standaloneJunkWords = ["yeah", "ready", "ok", "okay", "hello"];
 
 const junkAddresses = ["wall", "address unknown", "unknown", "null", "n/a", ""];
+
+const streetSuffixOnly = new Set([
+  "street", "st", "avenue", "ave", "road", "rd", "boulevard", "blvd", "drive", "dr",
+  "lane", "ln", "court", "ct", "circle", "cir", "highway", "hwy", "parkway", "pkwy",
+  "place", "pl", "terrace", "ter", "trail", "trl", "way", "loop", "cove", "point",
+  "run", "ridge", "rdg", "spur", "plaza", "sq", "square", "alley", "bridge", "bypass",
+  "causeway", "center", "centre", "commons", "curve", "divide", "estate", "expressway",
+  "freeway", "garden", "gardens", "gate", "green", "grove", "heights", "hill", "hills",
+  "hollow", "island", "isle", "junction", "knoll", "lake", "landings", "mall", "manor",
+  "meadow", "meadows", "mill", "mills", "mission", "mont", "mount", "mountain", "neck",
+  "oval", "overlook", "park", "pass", "path", "pike", "pine", "pines", "prairie", "ranch",
+  "river", "route", "row", "shoal", "shore", "spring", "springs", "station", "stravenue",
+  "stream", "summit", "throughway", "trace", "track", "trafficway", "trailer", "tunnel",
+  "turnpike", "union", "valley", "vista", "village", "vllg", "ville", "walk", "wall",
+  "waters", "wells",
+]);
 
 function normalize(text) {
   return (text || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
@@ -69,7 +89,14 @@ function hasRepetitiveWords(transcript) {
 function isJunkAddress(address, crossStreet) {
   const a = normalize(address);
   const c = normalize(crossStreet);
-  return junkAddresses.some((j) => a === j || c === j) || (!a && !c);
+  if (junkAddresses.some((j) => a === j || c === j)) return true;
+  if (!a && !c) return true;
+  if (streetSuffixOnly.has(a)) return true;
+  return false;
+}
+
+function hasKeywordSpam(transcript) {
+  return /\b(\w+)\s+\1\s+\1\s+\1\b/.test(normalize(transcript));
 }
 
 function isConversational(transcript) {
@@ -103,6 +130,11 @@ function scoreEvent(event) {
   if (videoHits.length > 0) {
     score += 3;
     reasons.push(`video/TV phrase: "${videoHits[0]}"`);
+  }
+
+  if (hasKeywordSpam(event.transcript)) {
+    score += 2;
+    reasons.push("keyword spam (same word repeated 4+ times)");
   }
 
   const repetitive = hasRepetitiveWords(event.transcript);
