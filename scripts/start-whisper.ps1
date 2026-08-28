@@ -19,4 +19,4 @@ $env:WHISPER_MODEL = $Model
 $env:WHISPER_DEVICE = "cpu"
 $env:WHISPER_COMPUTE_TYPE = "int8"
 $env:HF_HOME = Join-Path $repoRoot "models"
-& $python -m uvicorn whisper_service:app --app-dir (Join-Path $repoRoot "whisper") --host 127.0.0.1 --port 8178
+& $python -m uvicorn whisper_service:app --app-dir (Join-Path $repoRoot "whisper") --host 0.0.0.0 --port 8178
