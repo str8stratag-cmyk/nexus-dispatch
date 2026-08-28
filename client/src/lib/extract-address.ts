@@ -41,6 +41,43 @@ const STOP_WORDS = new Set([
 // Conjunctions/prepositions that often precede a cross street.
 const CROSS_LINKERS = new Set(["and", "at", "near", "by", "/", "between", "intersection", "corner"]);
 
+// Common Whisper mishearings for Hillsborough County street/neighborhood names.
+// These are corrected BEFORE street extraction so "mcdull and mlk" becomes
+// "mcdill and mlk" and the address parser can find the real street names.
+const ADDRESS_HOMOPHONES: [RegExp, string][] = [
+  [/\bmcdull\b/gi, "McDill"],
+  [/\bmcdonald\b/gi, "McDill"],
+  [/\bhigh park\b/gi, "Hyde Park"],
+  [/\bmemorial partway\b/gi, "Memorial Parkway"],
+  [/\bmemorial parkway\b/gi, "Memorial Parkway"],
+  [/\bmemorial highway\b/gi, "Memorial Highway"],
+  [/\bmemorial hwy\b/gi, "Memorial Highway"],
+  [/\bline\s*ball\b/gi, "Linebaugh"],
+  [/\blimbo\b/gi, "Linebaugh"],
+  [/\blinebaugh\b/gi, "Linebaugh"],
+  [/\bferris city court\b/gi, "Ferris City Court"],
+  [/\bcandy\s+blvd\b/gi, "Gandy Blvd"],
+  [/\bgandy\s+blvd\b/gi, "Gandy Blvd"],
+  [/\bsan\s+mcgull\b/gi, "San Miguel"],
+  [/\bdell\s+mavery\b/gi, "Dale Mabry"],
+  [/\bdull\s+mabery\b/gi, "Dale Mabry"],
+  [/\bdale\s+mabry\b/gi, "Dale Mabry"],
+  [/\bloess\s+avenue\b/gi, "Lois Avenue"],
+  [/\blowest\b/gi, "Lois"],
+  [/\btimes\s+ave\b/gi, "Himes Ave"],
+  [/\bhigh\s+ave\b/gi, "Himes Ave"],
+  [/\bhimes\s+ave\b/gi, "Himes Ave"],
+  [/\bcyber\s+street\b/gi, "Cypress Street"],
+  [/\bcyber\s+ave\b/gi, "Cypress Ave"],
+  [/\bcolumbos\s+ave\b/gi, "Columbus Ave"],
+  [/\bbowler\s+ave\b/gi, "Fowler Ave"],
+  [/\bmlk\s+blvd\b/gi, "Martin Luther King Jr Blvd"],
+  [/\bmlk\s+boulevard\b/gi, "Martin Luther King Jr Blvd"],
+  [/\bmlk\b/gi, "Martin Luther King Jr Blvd"],
+  [/\bplatt\s+st\b/gi, "Platt Street"],
+  [/\bplatt\s+street\b/gi, "Platt Street"],
+];
+
 interface Token {
   text: string;
   index: number;
@@ -269,10 +306,18 @@ export interface ExtractedAddress {
   crossStreet: string | null;
 }
 
+function applyAddressHomophones(text: string): string {
+  let corrected = text;
+  for (const [pattern, replacement] of ADDRESS_HOMOPHONES) {
+    corrected = corrected.replace(pattern, replacement);
+  }
+  return corrected;
+}
+
 export function extractAddress(transcript: string): ExtractedAddress {
   if (!transcript) return { address: null, crossStreet: null };
 
-  const text = normalizeWhitespace(transcript);
+  const text = normalizeWhitespace(applyAddressHomophones(transcript));
   const candidates = findStreetCandidates(text);
   if (candidates.length === 0) return { address: null, crossStreet: null };
 

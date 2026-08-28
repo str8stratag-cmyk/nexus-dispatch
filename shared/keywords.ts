@@ -44,6 +44,29 @@ export const DEFAULT_KEYWORDS: KeywordEntry[] = [
   { pattern: "flatbed", label: "Flatbed", signalType: "Flatbed Needed" },
 ];
 
+// Allowed dispatch signal types. Prevents road names, car models, neighborhoods,
+// or random words from becoming the signal type when users add homophones.
+export const VALID_SIGNAL_TYPES = new Set([
+  "Signal 3",
+  "Signal 4",
+  "Signal 9",
+  "Signal 16",
+  "MVA",
+  "MVC",
+  "Crash",
+  "Wreck",
+  "Accident",
+  "Rollover",
+  "Airbags Deployed",
+  "Airbag Deployed",
+  "Front End Damage",
+  "Rear End Damage",
+  "Rotator Needed",
+  "Tow",
+  "Flatbed Needed",
+  "Flatbed",
+]);
+
 // Detects which keywords (from the given list, defaulting to the built-in
 // seed list) appear in a transcript. Only one match per signalType is
 // reported even if multiple homophones for it are present.
@@ -56,8 +79,14 @@ export function detectKeywords(
 
   for (const kw of keywordList) {
     if (!kw.pattern) continue;
+    // Skip entries whose signalType is not a real dispatch signal
+    // (legacy road-name homophones that should only affect address extraction).
+    if (!VALID_SIGNAL_TYPES.has(kw.signalType)) continue;
+
     const escapedPattern = kw.pattern.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const wholePattern = new RegExp(`(?:^|[^a-z0-9])${escapedPattern}(?=$|[^a-z0-9])`, "i");
+    // Negative lookahead prevents "tow" from matching "tower".
+    const boundary = kw.pattern === "tow" ? "(?![er])" : "";
+    const wholePattern = new RegExp(`(?:^|[^a-z0-9])${escapedPattern}${boundary}(?=$|[^a-z0-9])`, "i");
     if (wholePattern.test(transcript) && !seen.has(kw.signalType)) {
       seen.add(kw.signalType);
       found.push({ keyword: kw.label, signalType: kw.signalType });
@@ -72,5 +101,9 @@ export function normalizeKeywordEntry(entry: Partial<KeywordEntry>): KeywordEntr
   if (!pattern) return null;
   const label = entry.label?.trim() || pattern;
   const signalType = entry.signalType?.trim() || label;
+  // Reject entries that would use a road name / model as the signal type.
+  if (!VALID_SIGNAL_TYPES.has(signalType)) {
+    throw new Error(`"${signalType}" is not a valid signal type. Use one of: ${Array.from(VALID_SIGNAL_TYPES).join(", ")}`);
+  }
   return { pattern, label, signalType };
 }
