@@ -59,12 +59,20 @@ function Pull-Repo($path) {
 function Restart-App($title, $directory, $port, $command) {
     Write-Host "$(Get-Date) Restarting $title..." -ForegroundColor Cyan
     Stop-ProcessOnPort $port
-    Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command" -WindowStyle Minimized
+    Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command && pause" -WindowStyle Minimized
+}
+
+function Start-App($title, $directory, $port, $command) {
+    Write-Host "$(Get-Date) Starting $title..." -ForegroundColor Cyan
+    Stop-ProcessOnPort $port
+    Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command && pause" -WindowStyle Minimized
 }
 
 # Initial start
 Start-Whisper
 $lastWhisperRestart = Get-Date
+Start-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev"
+Start-App "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev"
 
 Write-Host "Watchdog running. Whisper restart every $($whisperRestartInterval.TotalHours)h, git pull every $($gitPullInterval.TotalHours)h." -ForegroundColor Green
 
@@ -87,7 +95,7 @@ while ($true) {
             Restart-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev"
         }
         if ($ndUpdated) {
-            Restart-App "Nexus Dispatch" $nexusDispatch 5001 "$env:PORT=5001; npm run dev"
+            Restart-App "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev"
         }
 
         $lastGitPull = $now
