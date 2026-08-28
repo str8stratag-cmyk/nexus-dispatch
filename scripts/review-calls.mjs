@@ -30,6 +30,7 @@ const videoPhrases = [
   "visit www",
   "for more information",
   "the end",
+  "please return to your seat",
 ];
 
 const conversationPhrases = [
@@ -40,6 +41,10 @@ const conversationPhrases = [
   "please make sure you copy",
   "awesome",
   "what are you reading",
+  "what's your name",
+  "what would you say",
+  "i'll be there for you",
+  "why come they need me",
 ];
 
 const nonsensePatterns = [
@@ -89,7 +94,8 @@ function hasRepetitiveWords(transcript) {
 function isJunkAddress(address, crossStreet) {
   const a = normalize(address);
   const c = normalize(crossStreet);
-  if (junkAddresses.some((j) => a === j || c === j)) return true;
+  if (a && junkAddresses.some((j) => a === j)) return true;
+  if (c && junkAddresses.some((j) => c === j)) return true;
   if (!a && !c) return true;
   if (streetSuffixOnly.has(a)) return true;
   return false;
@@ -120,6 +126,25 @@ function isStandaloneJunk(transcript) {
   if (words.length > 2) return null;
   const joined = words.join(" ");
   return standaloneJunkWords.find((w) => joined === w) || null;
+}
+
+const dispatchSignals = [
+  "signal 4", "signal four",
+  "signal 3", "signal three",
+  "signal 16",
+  "mva",
+  "wreck",
+  "tow",
+  "airbags deployed",
+  "rollover",
+  "accident",
+];
+
+function isLikelyRealDispatch(event) {
+  const t = normalize(event.transcript);
+  const hasSignal = dispatchSignals.some((s) => t.includes(s));
+  const hasRealAddress = !isJunkAddress(event.address, event.crossStreet);
+  return hasSignal && hasRealAddress;
 }
 
 function scoreEvent(event) {
@@ -176,6 +201,12 @@ function scoreEvent(event) {
   if (wordCount > 0 && wordCount < 5 && !event.address) {
     score += 1;
     reasons.push("very short transcript with no address");
+  }
+
+  // Strong dispatch signal + real address overrides noise phrases.
+  if (isLikelyRealDispatch(event)) {
+    score = Math.max(0, score - 3);
+    reasons.push("overridden: strong dispatch signal with real address");
   }
 
   return { score, reasons };
