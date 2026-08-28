@@ -29,3 +29,6 @@ api/package-lock.json
 .vercel
 .env*
 supabase/.temp
+
+# Device-local Whisper model selection
+whisper-model.local

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [string]$Model = "turbo",
+  [string]$Model = "",
   [string]$Port = "8178"
 )
 
@@ -10,6 +10,21 @@ $python = Join-Path $repoRoot ".venv-whisper\Scripts\python.exe"
 
 if (-not (Test-Path $python)) {
   throw "Whisper is not installed. Run npm run whisper:setup first."
+}
+
+# Load device-local model config if present
+$configPath = Join-Path $repoRoot "whisper-model.local"
+if (-not $Model -and (Test-Path $configPath)) {
+  foreach ($line in Get-Content $configPath) {
+    if ($line -match '^\s*WHISPER_MODEL\s*=\s*(.+?)\s*$') {
+      $Model = $Matches[1]
+      break
+    }
+  }
+}
+
+if (-not $Model) {
+  $Model = "medium.en"
 }
 
 $env:WHISPER_MODEL = $Model

@@ -12,8 +12,8 @@ for /f "tokens=2,5" %%a in ('netstat -ano ^| findstr /R /C:"127\.0\.0\.1:8178.*L
 
 timeout /t 2 /nobreak >nul
 
-echo Starting Whisper v3 Turbo service...
-powershell.exe -ExecutionPolicy Bypass -File "%repoRoot%\scripts\start-whisper-detached.ps1" -Model turbo
+echo Starting Whisper service...
+powershell.exe -ExecutionPolicy Bypass -File "%repoRoot%\scripts\start-whisper-detached.ps1"
 
 echo Starting app dev server...
 powershell.exe -ExecutionPolicy Bypass -File "%repoRoot%\scripts\start-app-detached.ps1"
