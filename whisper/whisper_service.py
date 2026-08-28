@@ -1,3 +1,5 @@
+import asyncio
+import functools
 import os
 import tempfile
 from pathlib import Path
@@ -44,8 +46,8 @@ async def transcribe(
             while chunk := await audio.read(1024 * 1024):
                 temp_file.write(chunk)
 
-        segments, info = model.transcribe(
-            temp_path,
+        transcribe_call = functools.partial(
+            model.transcribe,
             language="en",
             beam_size=1,
             best_of=1,
@@ -54,6 +56,8 @@ async def transcribe(
             initial_prompt=prompt or None,
             condition_on_previous_text=False,
         )
+        loop = asyncio.get_running_loop()
+        segments, info = await loop.run_in_executor(None, transcribe_call, temp_path)
         result_segments = [
             {"start": segment.start, "end": segment.end, "text": segment.text.strip()}
             for segment in segments

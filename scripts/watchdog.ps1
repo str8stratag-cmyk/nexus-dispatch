@@ -2,8 +2,15 @@
 # Run from PowerShell: .\scripts\watchdog.ps1
 # Runs indefinitely until you close the window.
 
-$dispatchMonitor = "C:\Users\str8s\dispatch-monitor"
-$nexusDispatch = "C:\Users\str8s\nexus-dispatch"
+$ErrorActionPreference = "SilentlyContinue"
+
+$dispatchMonitor = Join-Path $env:USERPROFILE "dispatch-monitor"
+$nexusDispatch = Join-Path $env:USERPROFILE "nexus-dispatch"
+
+if (-not (Test-Path $dispatchMonitor)) {
+    Write-Host "dispatch-monitor repo not found at $dispatchMonitor" -ForegroundColor Red
+    exit 1
+}
 
 $whisperRestartInterval = [TimeSpan]::FromHours(4)
 $gitPullInterval = [TimeSpan]::FromHours(6)
@@ -45,6 +52,7 @@ function Restart-Whisper() {
 }
 
 function Pull-Repo($path) {
+    if (-not (Test-Path $path)) { return $false }
     Write-Host "$(Get-Date) Pulling updates for $path..." -ForegroundColor Cyan
     $before = git -C $path rev-parse HEAD
     git -C $path pull origin main | Out-Null
