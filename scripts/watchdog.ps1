@@ -13,12 +13,12 @@ $lastWhisperRestart = [DateTime]::MinValue
 $lastGitPull = [DateTime]::MinValue
 
 function Stop-ProcessOnPort($port) {
-    $pids = netstat -ano | Select-String ":$port\s+.*LISTENING" | ForEach-Object {
+    $procIds = netstat -ano | Select-String ":$port\s+.*LISTENING" | ForEach-Object {
         ($_ -split '\s+')[-1]
     } | Select-Object -Unique
-    foreach ($pid in $pids) {
-        if ($pid -and $pid -ne '0') {
-            taskkill /PID $pid /F | Out-Null
+    foreach ($procId in $procIds) {
+        if ($procId -and $procId -ne '0') {
+            taskkill /PID $procId /F | Out-Null
         }
     }
 }
@@ -35,7 +35,7 @@ function Test-WhisperAlive() {
 function Start-Whisper() {
     Write-Host "$(Get-Date) Starting Whisper..." -ForegroundColor Cyan
     Stop-ProcessOnPort 8178
-    Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$dispatchMonitor'; npm run whisper:start" -WindowStyle Minimized
+    Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-NoExit", "-File", "$dispatchMonitor\scripts\start-whisper.ps1" -WindowStyle Minimized
 }
 
 function Restart-Whisper() {
@@ -59,7 +59,7 @@ function Pull-Repo($path) {
 function Restart-App($title, $directory, $port, $command) {
     Write-Host "$(Get-Date) Restarting $title..." -ForegroundColor Cyan
     Stop-ProcessOnPort $port
-    Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$directory'; $command" -WindowStyle Minimized
+    Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command" -WindowStyle Minimized
 }
 
 # Initial start
