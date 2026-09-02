@@ -51,9 +51,35 @@ interface GeocodeResult {
   provider: string;
 }
 
+// Local context appended to every geocode query so generic names like
+// "Westshore", "Hyde Park", or "University Center" resolve to Tampa instead
+// of other states/countries. Override with GEOCODE_SUFFIX in .env.
+const DEFAULT_GEOCODE_SUFFIX = "Tampa, FL";
+
+// Rough Florida bounding box. Coordinates outside this box are treated as
+// bad geocodes and rejected. west,south,east,north
+const FLORIDA_BOUNDS: [number, number, number, number] = [-87.6, 24.5, -80.0, 31.0];
+
+function getGeocodeQuery(address: string): string {
+  const suffix = process.env.GEOCODE_SUFFIX?.trim() || DEFAULT_GEOCODE_SUFFIX;
+  const normalized = address.trim();
+  // Don't double-append if the address already includes Tampa/FL context.
+  const lower = normalized.toLowerCase();
+  if (lower.includes("tampa") || lower.includes("florida") || lower.includes(", fl")) {
+    return normalized;
+  }
+  return `${normalized}, ${suffix}`;
+}
+
+function isInServiceArea(lat: number, lng: number): boolean {
+  const [west, south, east, north] = FLORIDA_BOUNDS;
+  return lng >= west && lng <= east && lat >= south && lat <= north;
+}
+
 async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
   const geoapifyKey = process.env.GEOAPIFY_API_KEY?.trim();
   const boundingBox = process.env.GEOAPIFY_BOUNDING_BOX?.trim();
+  const query = getGeocodeQuery(address);
 
   if (geoapifyKey) {
     const bounds = boundingBox?.split(",").map(Number);
@@ -69,7 +95,7 @@ async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
 
     try {
       const params = new URLSearchParams({
-        text: address,
+        text: query,
         limit: "1",
         apiKey: geoapifyKey,
       });
@@ -89,6 +115,11 @@ async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
             bounds &&
             (lng < bounds[0] || lng > bounds[2] || lat < bounds[1] || lat > bounds[3])
           ) {
+            console.warn(`Geocoded "${address}" outside configured bounding box: ${lat},${lng}`);
+            return null;
+          }
+          if (!isInServiceArea(lat, lng)) {
+            console.warn(`Geocoded "${address}" outside Florida: ${lat},${lng}`);
             return null;
           }
           return {
@@ -108,7 +139,7 @@ async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
 
   try {
     const nomRes = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`,
+      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`,
       {
         headers: {
           "User-Agent": "DispatchMonitor/1.0",
@@ -117,9 +148,15 @@ async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
     );
     const data = await nomRes.json();
     if (Array.isArray(data) && data.length > 0) {
+      const lat = parseFloat(data[0].lat);
+      const lng = parseFloat(data[0].lon);
+      if (!isInServiceArea(lat, lng)) {
+        console.warn(`Geocoded "${address}" outside Florida: ${lat},${lng}`);
+        return null;
+      }
       return {
-        lat: parseFloat(data[0].lat),
-        lng: parseFloat(data[0].lon),
+        lat,
+        lng,
         display_name: data[0].display_name,
         provider: "nominatim",
       };
@@ -606,7 +643,9 @@ function formatTelegramMessage(event: DispatchEvent, options: FormatOptions = {}
   msg += `\n<i>Posted: ${new Date(event.createdAt).toLocaleString()}</i>`;
 
   if (event.isManual) {
-    msg += `\n<b>Source:</b> Manual Dispatch`;
+    msg += event.source === "Manual Dispatch"
+      ? `\n<b>Source:</b> Manual Dispatch`
+      : `\n<b>Source:</b> TERMINAL`;
   }
 
   return msg;
