@@ -18,6 +18,8 @@ interface DispatchEventDocument {
   source: string;
   status: string;
   isManual: boolean;
+  audioUrl: string | null;
+  telegramMessageId: string | null;
   createdAt: Date;
 }
 
@@ -42,6 +44,8 @@ function mapEvent(row: DispatchEventDocument): DispatchEvent {
     source: row.source,
     status: row.status,
     isManual: row.isManual,
+    audioUrl: row.audioUrl,
+    telegramMessageId: row.telegramMessageId,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -109,6 +113,8 @@ export class DatabaseStorage implements IStorage {
       source: event.source ?? "Unknown",
       status: event.status ?? "active",
       isManual: event.isManual ?? false,
+      audioUrl: event.audioUrl ?? null,
+      telegramMessageId: event.telegramMessageId ?? null,
       createdAt: new Date(),
     };
     await database.collection<DispatchEventDocument>("dispatchEvents").insertOne(document);

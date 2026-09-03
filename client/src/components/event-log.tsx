@@ -217,7 +217,7 @@ export default function EventLog() {
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-mono text-muted-foreground">
                 {event.district} • {event.source}
-                {event.isManual && " • Manual"}
+                {event.isManual && (event.source === "Manual Dispatch" ? " • Manual" : " • TERMINAL")}
               </span>
               <Button
                 size="sm"
