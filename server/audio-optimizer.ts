@@ -69,6 +69,8 @@ export async function optimizeAudio(options: OptimizeAudioOptions): Promise<void
       "-af", `highpass=f=${highPass},lowpass=f=${lowPass},volume=${volume}`,
       "-ar", String(sampleRate),
       "-ac", "1",
+      "-c:a", "pcm_s16le",
+      "-f", "wav",
       "-y",
       outputPath,
     ];

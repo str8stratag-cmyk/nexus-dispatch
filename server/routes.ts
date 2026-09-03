@@ -1,13 +1,57 @@
-import express, { type Express, type Request, type Response } from "express";
+import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import type { Server } from "node:http";
+import rateLimit from "express-rate-limit";
 import { storage } from "./storage";
 import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent } from "@shared/schema";
 import { normalizeKeywordEntry } from "@shared/keywords";
 import { isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
 
+const sseClients = new Set<Response>();
+
+function broadcastEvent(event: DispatchEvent): void {
+  const data = JSON.stringify(event);
+  const clients = Array.from(sseClients);
+  for (const client of clients) {
+    client.write(`event: dispatch\ndata: ${data}\n\n`);
+  }
+}
+
 let cachedBotToken: string | undefined;
 let cachedChatId: string | undefined;
+
+const dispatchLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many dispatch requests, please try again later." },
+});
+
+const settingsLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many settings requests, please try again later." },
+});
+
+const writeLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many requests, please try again later." },
+});
+
+const ADMIN_SECRET = process.env.ADMIN_SECRET;
+
+function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  if (!ADMIN_SECRET) return next();
+  const token = req.headers["x-admin-secret"] || req.query.secret;
+  if (token === ADMIN_SECRET) return next();
+  res.status(401).json({ message: "Unauthorized. Set x-admin-secret header." });
+}
 
 async function getTelegramCredentials(): Promise<{ botToken?: string; chatId?: string }> {
   if (cachedBotToken && cachedChatId) {
@@ -77,10 +121,53 @@ function isInServiceArea(lat: number, lng: number): boolean {
 }
 
 async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
+  const azureKey = process.env.AZURE_MAPS_KEY?.trim();
   const geoapifyKey = process.env.GEOAPIFY_API_KEY?.trim();
   const boundingBox = process.env.GEOAPIFY_BOUNDING_BOX?.trim();
   const query = getGeocodeQuery(address);
 
+  // 1. Try Azure Maps (primary)
+  if (azureKey) {
+    try {
+      const params = new URLSearchParams({
+        "api-version": "2026-01-01",
+        query,
+        top: "1",
+      });
+      if (boundingBox) {
+        params.set("bbox", boundingBox);
+      }
+      params.set("countrySet", "US");
+
+      const azureRes = await fetch(
+        `https://atlas.microsoft.com/geocode?${params.toString()}`,
+        { headers: { "subscription-key": azureKey } },
+      );
+      if (azureRes.ok) {
+        const data = await azureRes.json();
+        const result = data.features?.[0];
+        const [lng, lat] = result?.geometry?.coordinates ?? [];
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+          if (!isInServiceArea(lat, lng)) {
+            console.warn(`Geocoded "${address}" outside Florida: ${lat},${lng}`);
+            return null;
+          }
+          return {
+            lat,
+            lng,
+            display_name: result.properties?.address?.formattedAddress ?? address,
+            provider: "azure-maps",
+          };
+        }
+      } else {
+        console.error("Azure Maps geocoding failed:", azureRes.status, await azureRes.text());
+      }
+    } catch (err) {
+      console.error("Azure Maps geocoding failed:", err);
+    }
+  }
+
+  // 2. Fallback to Geoapify
   if (geoapifyKey) {
     const bounds = boundingBox?.split(",").map(Number);
     if (
@@ -137,6 +224,7 @@ async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
     }
   }
 
+  // 3. Fallback to Nominatim
   try {
     const nomRes = await fetch(
       `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`,
@@ -169,8 +257,34 @@ async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
 }
 
 async function reverseGeocodeRoad(lat: number, lng: number): Promise<string | null> {
+  const azureKey = process.env.AZURE_MAPS_KEY?.trim();
   const geoapifyKey = process.env.GEOAPIFY_API_KEY?.trim();
 
+  // 1. Try Azure Maps reverse geocoding
+  if (azureKey) {
+    try {
+      const params = new URLSearchParams({
+        "api-version": "2026-01-01",
+        coordinates: `${lng},${lat}`,
+      });
+      const res = await fetch(
+        `https://atlas.microsoft.com/reverseGeocode?${params.toString()}`,
+        { headers: { "subscription-key": azureKey } },
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const result = data.features?.[0]?.properties?.address;
+        const road = result?.streetName || result?.street || null;
+        if (road) return road;
+      } else {
+        console.error("Azure Maps reverse geocoding failed:", res.status, await res.text());
+      }
+    } catch (err) {
+      console.error("Azure Maps reverse geocoding failed:", err);
+    }
+  }
+
+  // 2. Fallback to Geoapify
   if (geoapifyKey) {
     try {
       const res = await fetch(
@@ -189,6 +303,7 @@ async function reverseGeocodeRoad(lat: number, lng: number): Promise<string | nu
     }
   }
 
+  // 3. Fallback to Nominatim
   try {
     const res = await fetch(
       `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`,
@@ -307,17 +422,34 @@ export async function registerRoutes(
   });
 
   // Get all dispatch events
-  app.get("/api/events", async (_req, res) => {
+  app.get("/api/events", async (req, res) => {
     try {
-      const events = await storage.getEvents();
+      const limit = Math.min(parseInt(req.query.limit as string) || 500, 1000);
+      const events = await storage.getEvents(limit);
       res.json(events);
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }
   });
 
+  // SSE stream for real-time event updates
+  app.get("/api/events/stream", (req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
+    res.write(`event: connected\ndata: {}\n\n`);
+    sseClients.add(res);
+
+    req.on("close", () => {
+      sseClients.delete(res);
+    });
+  });
+
   // Create a dispatch event (auto or manual)
-  app.post("/api/dispatch", async (req, res) => {
+  app.post("/api/dispatch", dispatchLimiter, async (req, res) => {
     try {
       const parsed = insertDispatchEventSchema.parse(req.body);
 
@@ -356,6 +488,7 @@ export async function registerRoutes(
       }
 
       let event = await storage.createEvent({ ...parsed, lat, lng, geocodedRoad });
+      broadcastEvent(event);
 
       // Send to Telegram if configured
       const { botToken, chatId } = await getTelegramCredentials();
@@ -402,6 +535,7 @@ export async function registerRoutes(
       if (!event) {
         return res.status(404).json({ message: "Event not found" });
       }
+      broadcastEvent(event);
       res.json(event);
     } catch (err: any) {
       res.status(500).json({ message: err.message });
@@ -450,7 +584,7 @@ export async function registerRoutes(
   });
 
   // Upsert a setting
-  app.post("/api/settings", async (req, res) => {
+  app.post("/api/settings", requireAuth, settingsLimiter, async (req, res) => {
     try {
       const parsed = insertSettingsSchema.parse(req.body);
       const setting = await storage.upsertSetting(parsed);
@@ -478,7 +612,7 @@ export async function registerRoutes(
   // `label` and `signalType` default to `pattern` when omitted, which is the
   // common case for adding a homophone of an existing signal type (pass the
   // same signalType as the term it should be treated the same as).
-  app.post("/api/keywords", async (req, res) => {
+  app.post("/api/keywords", requireAuth, writeLimiter, async (req, res) => {
     try {
       const entry = normalizeKeywordEntry(req.body || {});
       if (!entry) {
@@ -494,7 +628,7 @@ export async function registerRoutes(
 
   // Remove a keyword or homophone by its exact pattern (case-insensitive,
   // matched against the normalized lowercase pattern it was stored with).
-  app.delete("/api/keywords", async (req, res) => {
+  app.delete("/api/keywords", requireAuth, writeLimiter, async (req, res) => {
     try {
       const pattern = String(req.body?.pattern || req.query.pattern || "").trim().toLowerCase();
       if (!pattern) {
@@ -509,7 +643,7 @@ export async function registerRoutes(
   });
 
   // Test Telegram connection
-  app.post("/api/telegram/test", async (_req, res) => {
+  app.post("/api/telegram/test", requireAuth, writeLimiter, async (_req, res) => {
     try {
       const { botToken, chatId } = await getTelegramCredentials();
 
@@ -541,7 +675,7 @@ export async function registerRoutes(
 
   // Register the webhook with Telegram. Body: { url?: string }
   // If no body URL is provided, falls back to TELEGRAM_WEBHOOK_URL env var.
-  app.post("/api/telegram/webhook/set", async (req, res) => {
+  app.post("/api/telegram/webhook/set", requireAuth, settingsLimiter, async (req, res) => {
     try {
       const url = req.body?.url || process.env.TELEGRAM_WEBHOOK_URL;
       if (!url) {
@@ -555,7 +689,7 @@ export async function registerRoutes(
   });
 
   // Remove the webhook from Telegram (useful for local dev or switching transports).
-  app.post("/api/telegram/webhook/delete", async (_req, res) => {
+  app.post("/api/telegram/webhook/delete", requireAuth, settingsLimiter, async (_req, res) => {
     try {
       const result = await deleteTelegramWebhook();
       res.json(result);
@@ -697,6 +831,7 @@ async function handleTelegramUpdate(update: any): Promise<void> {
 
   const updated = await storage.updateEventStatus(eventId, "accepted");
   if (!updated) return;
+  broadcastEvent(updated);
 
   // Edit the original dispatch message to show it's taken and remove the accept button.
   await telegramApiCall(botToken, "editMessageText", {

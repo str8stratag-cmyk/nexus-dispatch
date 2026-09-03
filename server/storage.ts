@@ -57,7 +57,7 @@ function mapSetting(row: SettingDocument): Setting {
 }
 
 export interface IStorage {
-  getEvents(): Promise<DispatchEvent[]>;
+  getEvents(limit?: number): Promise<DispatchEvent[]>;
   getEvent(id: number): Promise<DispatchEvent | undefined>;
   createEvent(event: InsertDispatchEvent): Promise<DispatchEvent>;
   updateEventStatus(id: number, status: string): Promise<DispatchEvent | undefined>;
@@ -82,11 +82,12 @@ export class DatabaseStorage implements IStorage {
     return counter.sequence;
   }
 
-  async getEvents(): Promise<DispatchEvent[]> {
+  async getEvents(limit = 500): Promise<DispatchEvent[]> {
     const database = await getDatabase();
     const events = await database.collection<DispatchEventDocument>("dispatchEvents")
       .find()
       .sort({ createdAt: -1 })
+      .limit(limit)
       .toArray();
     return events.map(mapEvent);
   }

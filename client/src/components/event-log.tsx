@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { CheckCircle2, Radio, MapPin, Clock, Download, ShieldAlert } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useEventsStream } from "@/hooks/use-events-stream";
 
 interface DispatchEventRow {
   id: number;
@@ -106,8 +107,10 @@ export default function EventLog() {
       const res = await apiRequest("GET", "/api/events");
       return res.json() as Promise<DispatchEventRow[]>;
     },
-    refetchInterval: 5000,
+    refetchInterval: 30_000,
   });
+
+  useEventsStream();
 
   const acceptMutation = useMutation({
     mutationFn: async (id: number) => {
