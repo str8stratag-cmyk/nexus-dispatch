@@ -8,7 +8,7 @@ if (-not (Test-Path $repoRoot)) {
 }
 
 Set-Location $repoRoot
-npx tsx scripts\review-calls.mjs
+node scripts\review-calls.mjs
 
 Write-Host "Press any key to close..." -ForegroundColor Cyan
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")

@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { CheckCircle2, Radio, MapPin, Clock, Download, ShieldAlert } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useEventsStream } from "@/hooks/use-events-stream";
 
 interface DispatchEventRow {
   id: number;
@@ -106,8 +107,10 @@ export default function EventLog() {
       const res = await apiRequest("GET", "/api/events");
       return res.json() as Promise<DispatchEventRow[]>;
     },
-    refetchInterval: 5000,
+    refetchInterval: 30_000,
   });
+
+  useEventsStream();
 
   const acceptMutation = useMutation({
     mutationFn: async (id: number) => {
@@ -247,7 +250,7 @@ export default function EventLog() {
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-mono text-muted-foreground">
                 {event.district} • {event.source}
-                {event.isManual && " • Manual"}
+                {event.isManual && (event.source === "Manual Dispatch" ? " • Manual" : " • TERMINAL")}
               </span>
               <div className="flex items-center gap-1">
                 <Button
@@ -304,7 +307,7 @@ export default function EventLog() {
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-mono text-muted-foreground">
                 {event.district} • {event.source}
-                {event.isManual && " • Manual"}
+                {event.isManual && (event.source === "Manual Dispatch" ? " • Manual" : " • TERMINAL")}
               </span>
               <Button
                 size="sm"

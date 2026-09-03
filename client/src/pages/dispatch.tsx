@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useTheme } from "@/hooks/use-theme";
@@ -11,6 +11,7 @@ import DispatchMap from "@/components/dispatch-map";
 import EventLog from "@/components/event-log";
 import ManualDispatch from "@/components/manual-dispatch";
 import SettingsPanel from "@/components/settings-panel";
+import { useEventsStream } from "@/hooks/use-events-stream";
 
 interface DispatchEventRow {
   id: number;
@@ -37,7 +38,26 @@ export default function DispatchPage() {
 
   const [district, setDistrict] = useState("District 1");
   const [sourceName, setSourceName] = useState("");
-  const [districts] = useState<string[]>(["District 1", "District 2", "District 3", "District 4", "District 5", "District 6", "District 7"]);
+  const [districts, setDistricts] = useState<string[]>(["District 1", "District 2", "District 3", "District 4", "District 5", "District 6", "District 7"]);
+
+  const { data: districtSettings } = useQuery({
+    queryKey: ["/api/settings"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/settings");
+      return res.json();
+    },
+  });
+
+  useEffect(() => {
+    if (!Array.isArray(districtSettings)) return;
+    const stored = districtSettings.find((s: any) => s.key === "districts");
+    if (stored && stored.value) {
+      try {
+        const parsed = JSON.parse(stored.value);
+        if (Array.isArray(parsed) && parsed.length > 0) setDistricts(parsed);
+      } catch {}
+    }
+  }, [districtSettings]);
 
   const { data: events = [] } = useQuery<DispatchEventRow[]>({
     queryKey: ["/api/events"],
@@ -45,8 +65,10 @@ export default function DispatchPage() {
       const res = await apiRequest("GET", "/api/events");
       return res.json();
     },
-    refetchInterval: 5000,
+    refetchInterval: 30_000,
   });
+
+  useEventsStream();
 
   const dispatchMutation = useMutation({
     mutationFn: async (data: any) => {
