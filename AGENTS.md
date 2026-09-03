@@ -13,13 +13,47 @@ A full-stack dispatch monitoring dashboard. It captures live audio, transcribes 
 This Windows machine is the **Whisper v3 Turbo tester** for the fleet. Other devices
 (Mac, DISP-1/2) run their own Whisper models but can send transcription to this box.
 
-- **Whisper endpoint (LAN):** `http://192.168.6.53:8178` — wired static IP on the
-  TL-SG608 switch. Old wireless IP `192.168.5.251` is retired; update any device
-  configs still pointing at it.
+- **Whisper endpoint (LAN):** `http://192.168.6.52:8178` — THIS machine's wired IP on
+  the TL-SG608 switch (verified 2026-09-02; the earlier report claiming `.53` was
+  wrong). `192.168.6.53` is a DIFFERENT device (MAC 04-7b-cb-a3-6c-ed) running its own
+  Whisper on `medium.en` — devices pointed at `.53` are NOT using this box's turbo.
+  Old wireless IP `192.168.5.251` is retired.
+
+**Fleet map (confirmed 2026-09-03):**
+| Device | IP | Role |
+|--------|----|------|
+| **DISP-2 (this machine)** | 192.168.6.52 | Whisper v3 turbo tester, dispatch :5000, nexus :5001 |
+| DISP-3 | 192.168.6.53 | Whisper medium.en, watchdog-managed (4h restart, 6h git pull), runs `trial/` reconciler every 3 min |
+
+Status reports mentioning "medium.en, watchdog-managed, reconciler, .53" come from the
+DISP-3 box — do not mistake them for this machine's state. The Azure Maps account
+(Client ID 65434727-…) is shared across the fleet; this machine uses the same key
+(stored in `.env`, gitignored).
+
+## Local vs shared (READ FIRST)
+
+**DO NOT `git push` from this machine without the user's explicit say-so.**
+
+- Unpushed local commits (as of 2026-09-03): dispatch-monitor **ahead 7**,
+  nexus-dispatch **ahead 4**. Everything we did is local-only; the fleet has
+  received nothing from us. The flow has been one-directional (we pulled their
+  beam-5 tuning, Azure Maps geocoder, watchdog rework, `trial/` reconciler).
+- **Policy (user decision 2026-09-03):** turbo stays on DISP-2 as the tester.
+  If it keeps getting good results, the user will share it with the other DISP
+  devices. Until then: no pushes.
+- When sharing IS approved, push ONLY the model-selection mechanism
+  (the `whisper-model.local` block in `scripts/start-whisper.ps1`). Do NOT push:
+  the helper bats / detached start scripts (upstream deleted those on purpose),
+  or this AGENTS.md (machine-specific).
+- Never travels via git (gitignored): `whisper-model.local`, `.env` (Azure Maps
+  key), `KIMI_RESUME.md`, logs, `test-audio.wav`.
+- After ANY future `git pull`, run the post-pull checklist below — upstream
+  removed the `whisper-model.local` block once already.
 - **Model:** `turbo` (device-local, via `whisper-model.local`, gitignored). Do not
   change to `medium.en` — that is only the fallback default in the start scripts.
-  Other devices run their own models (e.g. DISP-2 runs `distil-large-v3` on port 8179);
-  this box is the fleet's turbo tester.
+  This box IS DISP-2 and runs turbo; other devices run their own models. Note:
+  `nexus-dispatch/start-whisper-disp2.bat` (distil-large-v3, port 8179) came from the
+  fleet's shared repo — it is NOT this box's config and should not be run here.
 - **Whisper bind:** `0.0.0.0:8178` in BOTH `scripts/start-whisper.ps1` and
   `scripts/start-whisper-detached.ps1` — keep them consistent or LAN access breaks.
 - **Firewall:** inbound TCP 8178 must be allowed (rule name `Whisper v3 Turbo (8178)`).
@@ -42,6 +76,8 @@ This Windows machine is the **Whisper v3 Turbo tester** for the fleet. Other dev
   fallback; `GEOCODE_SUFFIX` defaults to "Tampa, FL". Optional: `ADMIN_SECRET`
   (write-endpoint auth), `WHISPER_API_KEY`/`VITE_WHISPER_API_KEY` (protects Whisper
   when LAN-exposed — if set, all fleet devices must send the `X-Whisper-Key` header).
+  DECISION (2026-09-02): `WHISPER_API_KEY` stays UNSET on this machine — Whisper is
+  our own local/LAN service, no key. Do not add one; fleet devices call it bare.
 - **Post-pull checklist (learned 2026-09-02):**
   1. `npm install` if `package.json` changed, then `npm run check`.
   2. Verify the `whisper-model.local` block survived in `scripts/start-whisper.ps1`
