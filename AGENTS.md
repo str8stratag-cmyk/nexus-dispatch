@@ -4,9 +4,33 @@
 A full-stack dispatch monitoring dashboard. It captures live audio, transcribes speech, detects emergency keywords, and creates dispatch events stored in Supabase.
 
 - Repo: `str8stratag-cmyk/dispatch-monitor`
-- Local path: `/tmp/dispatch-monitor`
+- Local path: `C:\Users\str8s\dispatch-monitor`
 - Branch: `main`
 - Deployment target: Vercel
+
+## Local runtime environment (this device)
+
+This Windows machine is the **Whisper v3 Turbo tester** for the fleet. Other devices
+(Mac, DISP-1/2) run their own Whisper models but can send transcription to this box.
+
+- **Whisper endpoint (LAN):** `http://192.168.6.53:8178` — wired static IP on the
+  TL-SG608 switch. Old wireless IP `192.168.5.251` is retired; update any device
+  configs still pointing at it.
+- **Model:** `turbo` (device-local, via `whisper-model.local`, gitignored). Do not
+  change to `medium.en`; shared default in `whisper-model.example` stays `medium.en`.
+- **Whisper bind:** `0.0.0.0:8178` in BOTH `scripts/start-whisper.ps1` and
+  `scripts/start-whisper-detached.ps1` — keep them consistent or LAN access breaks.
+- **Firewall:** inbound TCP 8178 must be allowed (rule name `Whisper v3 Turbo (8178)`).
+  Adding it requires an elevated shell:
+  `netsh advfirewall firewall add rule name="Whisper v3 Turbo (8178)" dir=in action=allow protocol=TCP localport=8178`
+- **Services:** Whisper `:8178`, Dispatch Monitor `:5000`, Nexus Dispatch `:5001`.
+  Start/stop via Desktop `Refresh Dispatch Services.bat` / `Kill Dispatch Services.bat`
+  or `scripts/refresh-services.bat` (Git-Bash safe) / `scripts/kill-services.bat`.
+- **Watchdog:** `scripts/watchdog.ps1` is NOT auto-started. Its health check uses
+  `GET /health` (fixed — previously hit `POST /` which always 404s and would have
+  caused a restart loop). Start manually from PowerShell if wanted.
+- **Known quirk:** `/health` can time out mid-transcription (CPU-bound, single
+  worker). Transcription is unaffected; retry the health check.
 
 ## Tech stack
 - Frontend: React + Vite + Tailwind + shadcn/ui

@@ -10,7 +10,7 @@ for /f "tokens=2,5" %%a in ('netstat -ano ^| findstr /R /C:"127\.0\.0\.1:8178.*L
   taskkill /PID %%b /F >nul 2>&1
 )
 
-timeout /t 2 /nobreak >nul
+powershell.exe -Command "Start-Sleep -Seconds 2" >nul 2>&1
 
 echo Starting Whisper service...
 powershell.exe -ExecutionPolicy Bypass -File "%repoRoot%\scripts\start-whisper-detached.ps1"
@@ -20,7 +20,7 @@ powershell.exe -ExecutionPolicy Bypass -File "%repoRoot%\scripts\start-app-detac
 
 echo.
 echo Waiting for services to start...
-timeout /t 15 /nobreak >nul
+powershell.exe -Command "Start-Sleep -Seconds 15" >nul 2>&1
 
 echo.
 curl -s http://127.0.0.1:8178/health

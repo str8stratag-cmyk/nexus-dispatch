@@ -38,7 +38,7 @@ $appDir = Join-Path $repoRoot "whisper"
 
 Start-Process `
   -FilePath $python `
-  -ArgumentList "-m", "uvicorn", "whisper_service:app", "--app-dir", $appDir, "--host", "127.0.0.1", "--port", $Port `
+  -ArgumentList "-m", "uvicorn", "whisper_service:app", "--app-dir", $appDir, "--host", "0.0.0.0", "--port", $Port `
   -WorkingDirectory $repoRoot `
   -WindowStyle Hidden `
   -RedirectStandardOutput $outLog `

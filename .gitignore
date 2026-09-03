@@ -32,3 +32,6 @@ supabase/.temp
 
 # Device-local Whisper model selection
 whisper-model.local
+
+# Kimi session resume notes
+KIMI_RESUME.md

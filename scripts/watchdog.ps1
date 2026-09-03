@@ -32,7 +32,7 @@ function Stop-ProcessOnPort($port) {
 
 function Test-WhisperAlive() {
     try {
-        $res = Invoke-WebRequest -Uri "http://127.0.0.1:8178" -Method POST -Body '{}' -TimeoutSec 5
+        $res = Invoke-WebRequest -Uri "http://127.0.0.1:8178/health" -TimeoutSec 5
         return $res.StatusCode -eq 200
     } catch {
         return $false
