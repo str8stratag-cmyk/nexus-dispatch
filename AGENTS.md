@@ -17,7 +17,9 @@ This Windows machine is the **Whisper v3 Turbo tester** for the fleet. Other dev
   TL-SG608 switch. Old wireless IP `192.168.5.251` is retired; update any device
   configs still pointing at it.
 - **Model:** `turbo` (device-local, via `whisper-model.local`, gitignored). Do not
-  change to `medium.en`; shared default in `whisper-model.example` stays `medium.en`.
+  change to `medium.en` — that is only the fallback default in the start scripts.
+  Other devices run their own models (e.g. DISP-2 runs `distil-large-v3` on port 8179);
+  this box is the fleet's turbo tester.
 - **Whisper bind:** `0.0.0.0:8178` in BOTH `scripts/start-whisper.ps1` and
   `scripts/start-whisper-detached.ps1` — keep them consistent or LAN access breaks.
 - **Firewall:** inbound TCP 8178 must be allowed (rule name `Whisper v3 Turbo (8178)`).
@@ -26,9 +28,26 @@ This Windows machine is the **Whisper v3 Turbo tester** for the fleet. Other dev
 - **Services:** Whisper `:8178`, Dispatch Monitor `:5000`, Nexus Dispatch `:5001`.
   Start/stop via Desktop `Refresh Dispatch Services.bat` / `Kill Dispatch Services.bat`
   or `scripts/refresh-services.bat` (Git-Bash safe) / `scripts/kill-services.bat`.
-- **Watchdog:** `scripts/watchdog.ps1` is NOT auto-started. Its health check uses
-  `GET /health` (fixed — previously hit `POST /` which always 404s and would have
-  caused a restart loop). Start manually from PowerShell if wanted.
+  NOTE: `refresh-services.bat`/`kill-services.bat` and both `*-detached.ps1` scripts
+  are LOCAL-ONLY (upstream deleted them in favor of the watchdog flow — kept here
+  because the Desktop shortcuts depend on them). Their kill patterns match `:8178`/`:5000`
+  on ANY binding; if you edit the bind host, keep these patterns in sync.
+- **Watchdog:** upstream flow is `start-watchdog.bat` → `scripts/watchdog.ps1`
+  (starts all three services hidden, restarts Whisper every 4h, `git pull` every 6h).
+  NOT auto-started on this box. Health check is `GET /health` (30s timeout).
+  When active it starts Whisper via `start-whisper.ps1`, which reads
+  `whisper-model.local` → stays on turbo.
+- **Geocoding (merged 2026-09-02):** Azure Maps is PRIMARY, Geoapify is FALLBACK.
+  `.env` needs `AZURE_MAPS_KEY`; `GEOAPIFY_API_KEY`+`GEOAPIFY_BOUNDING_BOX` optional
+  fallback; `GEOCODE_SUFFIX` defaults to "Tampa, FL". Optional: `ADMIN_SECRET`
+  (write-endpoint auth), `WHISPER_API_KEY`/`VITE_WHISPER_API_KEY` (protects Whisper
+  when LAN-exposed — if set, all fleet devices must send the `X-Whisper-Key` header).
+- **Post-pull checklist (learned 2026-09-02):**
+  1. `npm install` if `package.json` changed, then `npm run check`.
+  2. Verify the `whisper-model.local` block survived in `scripts/start-whisper.ps1`
+     (upstream removed it once already — without it this box silently boots `medium.en`).
+  3. Restart services (`scripts/refresh-services.bat`) and confirm
+     `/health` reports `"model":"turbo"`.
 - **Known quirk:** `/health` can time out mid-transcription (CPU-bound, single
   worker). Transcription is unaffected; retry the health check.
 

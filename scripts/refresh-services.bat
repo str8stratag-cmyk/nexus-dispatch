@@ -5,7 +5,7 @@ set "repoRoot=%~dp0.."
 cd /d "%repoRoot%"
 
 echo Stopping any running dispatch services...
-for /f "tokens=2,5" %%a in ('netstat -ano ^| findstr /R /C:"127\.0\.0\.1:8178.*LISTENING" /C:"0\.0\.0\.0:5000.*LISTENING"') do (
+for /f "tokens=2,5" %%a in ('netstat -ano ^| findstr /R /C:":8178.*LISTENING" /C:":5000.*LISTENING"') do (
   echo Killing PID %%b on %%a
   taskkill /PID %%b /F >nul 2>&1
 )
