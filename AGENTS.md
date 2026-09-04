@@ -20,11 +20,12 @@ This Windows machine (**DISP-2**) is the **Whisper v3 Turbo tester** for the fle
 Other devices (Mac, DISP-1, DISP-3) run their own Whisper models but can send
 transcription to this box.
 
-**BLOCKER (since 2026-09-03):** the merged app requires MongoDB; this box's `.env`
-has the placeholder `MONGODB_URI=mongodb://127.0.0.1:27017` and no mongod exists
-here — `/api/events` + `/api/dispatch` fail with `ECONNREFUSED 127.0.0.1:27017`.
-FIX: user pastes the real `MONGODB_URI` (from another device's `.env`) → add to
-`.env` → restart app. Do NOT hunt for MongoDB on other devices; ask the user.
+**MongoDB (RESOLVED 2026-09-04):** the app is MongoDB-only (migrated from Supabase).
+Shared fleet cluster: **MongoDB Atlas** (`mongodb+srv`, host `nexus-disp.dndtjvg.
+mongodb.net`, db `str8stratag_db_user`) — the SAME database all DISP devices write
+to (that's how the reconciler dedups across devices). Credentials live ONLY in each
+repo's `.env` (gitignored) — NEVER commit them, never write them into this file.
+If `.env` ever loses them, ask the user; do not hunt for MongoDB on other devices.
 
 - **Whisper endpoint (LAN):** `http://192.168.6.52:8178` — THIS machine's wired IP on
   the TL-SG608 switch (verified 2026-09-02; the earlier report claiming `.53` was
