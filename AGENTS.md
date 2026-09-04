@@ -1,5 +1,11 @@
 # Dispatch Monitor — Project Context
 
+> **IDENTITY: THIS MACHINE IS DISP-2** (192.168.6.52). Work self-contained:
+> do NOT probe or depend on other DISP devices for config or shared services —
+> their DBs/services are localhost-bound and irrelevant here. When something is
+> missing (e.g. MongoDB URI), the fix comes from the user or this box, not from
+> poking DISP-3/Mac.
+
 ## Project overview
 A full-stack dispatch monitoring dashboard. It captures live audio, transcribes speech, detects emergency keywords, and creates dispatch events stored in Supabase.
 
@@ -10,8 +16,15 @@ A full-stack dispatch monitoring dashboard. It captures live audio, transcribes 
 
 ## Local runtime environment (this device)
 
-This Windows machine is the **Whisper v3 Turbo tester** for the fleet. Other devices
-(Mac, DISP-1/2) run their own Whisper models but can send transcription to this box.
+This Windows machine (**DISP-2**) is the **Whisper v3 Turbo tester** for the fleet.
+Other devices (Mac, DISP-1, DISP-3) run their own Whisper models but can send
+transcription to this box.
+
+**BLOCKER (since 2026-09-03):** the merged app requires MongoDB; this box's `.env`
+has the placeholder `MONGODB_URI=mongodb://127.0.0.1:27017` and no mongod exists
+here — `/api/events` + `/api/dispatch` fail with `ECONNREFUSED 127.0.0.1:27017`.
+FIX: user pastes the real `MONGODB_URI` (from another device's `.env`) → add to
+`.env` → restart app. Do NOT hunt for MongoDB on other devices; ask the user.
 
 - **Whisper endpoint (LAN):** `http://192.168.6.52:8178` — THIS machine's wired IP on
   the TL-SG608 switch (verified 2026-09-02; the earlier report claiming `.53` was
