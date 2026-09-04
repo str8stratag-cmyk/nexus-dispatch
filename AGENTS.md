@@ -55,10 +55,24 @@ DISP-3 box — do not mistake them for this machine's state. The Azure Maps acco
 - **Policy (user decision 2026-09-03):** turbo stays on DISP-2 as the tester.
   If it keeps getting good results, the user will share it with the other DISP
   devices. Until then: no pushes.
-- When sharing IS approved, push ONLY the model-selection mechanism
-  (the `whisper-model.local` block in `scripts/start-whisper.ps1`). Do NOT push:
-  the helper bats / detached start scripts (upstream deleted those on purpose),
-  or this AGENTS.md (machine-specific).
+- When sharing IS approved, push ONLY: (1) the model-selection mechanism
+  (the `whisper-model.local` block in `scripts/start-whisper.ps1`), and (2) the
+  `whisperModel` event tagging (schema + storage + whisper.ts + routes stamp +
+  whisper_service.py response). Do NOT push: the helper bats / detached start
+  scripts (upstream deleted those on purpose), or this AGENTS.md (machine-specific).
+- **QA tooling (added 2026-09-04, local-only until push approved):**
+  - `node scripts/accuracy-by-source.mjs [hours]` — per-source event stats from
+    Atlas (count, avg transcript length, no-keyword %, no-coords %). First run
+    (72h): DISP-3/medium.en 74% no-keyword vs 0% for DISP2/turbo and others.
+  - `powershell -ExecutionPolicy Bypass -File scripts\regression-check.ps1` —
+    transcribes `test-audio.wav`, diffs vs `test-audio.expected.txt`. PASS = no
+    drift. Use `-UpdateBaseline` only after an intentional model/params change.
+  - Baseline 2026-09-04 (turbo, beam 5): "Unit 1 responding to emergency at Main
+    Street and Fifth Avenue. Suspect is fleeing northbound on foot."
+- **Autostart:** Task Scheduler task `Dispatch Services Autostart` runs
+  `scripts\refresh-services.bat` at user logon (registered 2026-09-04; refresh bat
+  now starts/stops all three services incl. Nexus :5001). After a reboot, services
+  come up on login — verify with the health checks if anything seems down.
 - Never travels via git (gitignored): `whisper-model.local`, `.env` (Azure Maps
   key), `KIMI_RESUME.md`, logs, `test-audio.wav`.
 - After ANY future `git pull`, run the post-pull checklist below — upstream
