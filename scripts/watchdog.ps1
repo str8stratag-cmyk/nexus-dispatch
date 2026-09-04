@@ -132,9 +132,13 @@ while ($true) {
         $ndUpdated = Pull-Repo $nexusDispatch
 
         if ($dmUpdated) {
+            Write-Host "$(Get-Date) npm install (dispatch-monitor)..." -ForegroundColor Cyan
+            cmd /c "cd /d `"$dispatchMonitor`" && npm install" | Out-Null
             Restart-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev"
         }
         if ($ndUpdated) {
+            Write-Host "$(Get-Date) npm install (nexus-dispatch)..." -ForegroundColor Cyan
+            cmd /c "cd /d `"$nexusDispatch`" && npm install" | Out-Null
             Restart-App "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev"
         }
 

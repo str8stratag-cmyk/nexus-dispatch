@@ -99,6 +99,10 @@ DISP-3 box — do not mistake them for this machine's state. The Azure Maps acco
   NOT auto-started on this box. Health check is `GET /health` (30s timeout).
   When active it starts Whisper via `start-whisper.ps1`, which reads
   `whisper-model.local` → stays on turbo.
+  LOCAL CHANGE (2026-09-04): after a pull updates a repo, the watchdog runs
+  `npm install` for that repo BEFORE restarting its app — prevents the
+  missing-dependency crash (e.g. `express-rate-limit`) on post-pull restarts.
+  If pushing the watchdog upstream later, keep this addition.
 - **Geocoding (merged 2026-09-02):** Azure Maps is PRIMARY, Geoapify is FALLBACK.
   `.env` needs `AZURE_MAPS_KEY`; `GEOAPIFY_API_KEY`+`GEOAPIFY_BOUNDING_BOX` optional
   fallback; `GEOCODE_SUFFIX` defaults to "Tampa, FL". Optional: `ADMIN_SECRET`
