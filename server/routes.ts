@@ -487,6 +487,45 @@ export async function registerRoutes(
         geocodedRoad = await reverseGeocodeRoad(lat, lng);
       }
 
+      // Suppress near-duplicate auto-dispatches. The same incident gets
+      // re-broadcast on the radio for hours; without this, each broadcast
+      // creates a fresh event and Telegram alert for the same call.
+      if (!parsed.isManual) {
+        const DEDUP_WINDOW_MS = 4 * 60 * 60 * 1000;
+        const DEDUP_RADIUS_M = 500;
+        const norm = (s: string | null | undefined) =>
+          (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        const crashClass = new Set(["mva", "mvc", "signal 4", "signal4", "10 50"]);
+        const sameIncidentType = (a: string, b: string) => {
+          const na = norm(a);
+          const nb = norm(b);
+          return na === nb || (crashClass.has(na) && crashClass.has(nb));
+        };
+        const distanceM = (aLat: number, aLng: number, bLat: number, bLng: number) => {
+          const toRad = (d: number) => (d * Math.PI) / 180;
+          const dLat = toRad(bLat - aLat);
+          const dLng = toRad(bLng - aLng);
+          const h =
+            Math.sin(dLat / 2) ** 2 +
+            Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2;
+          return 2 * 6371000 * Math.asin(Math.sqrt(h));
+        };
+        const cutoff = Date.now() - DEDUP_WINDOW_MS;
+        const newAddr = norm(parsed.address);
+        const existing = (await storage.getEvents()).find((e) => {
+          if (e.status !== "active" && e.status !== "accepted") return false;
+          if (new Date(e.createdAt).getTime() < cutoff) return false;
+          if (!sameIncidentType(e.signalType || "", parsed.signalType || "")) return false;
+          if (lat && lng && e.lat != null && e.lng != null) {
+            return distanceM(lat, lng, e.lat, e.lng) < DEDUP_RADIUS_M;
+          }
+          return newAddr.length >= 5 && newAddr === norm(e.address);
+        });
+        if (existing) {
+          return res.status(200).json({ duplicate: true, event: existing });
+        }
+      }
+
       let event = await storage.createEvent({ ...parsed, lat, lng, geocodedRoad });
       broadcastEvent(event);
 
