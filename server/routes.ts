@@ -6,6 +6,7 @@ import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent } f
 import { normalizeKeywordEntry } from "@shared/keywords";
 import { isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
+import { getWhisperModel } from "./whisper";
 
 const sseClients = new Set<Response>();
 
@@ -452,6 +453,12 @@ export async function registerRoutes(
   app.post("/api/dispatch", dispatchLimiter, async (req, res) => {
     try {
       const parsed = insertDispatchEventSchema.parse(req.body);
+
+      // Stamp which Whisper model produced this event (fleet accuracy comparison).
+      if (!parsed.whisperModel) {
+        const model = await getWhisperModel();
+        if (model) parsed.whisperModel = model;
+      }
 
       // Auto-dispatches without a real address are usually TV/noise false positives.
       // Manual dispatches can still be created without an address.
