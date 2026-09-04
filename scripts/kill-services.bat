@@ -4,7 +4,7 @@ setlocal enabledelayedexpansion
 echo Killing local dispatch services...
 set "killed="
 
-for /f "tokens=2,5" %%a in ('netstat -ano ^| findstr /R /C:":8178.*LISTENING" /C:":5000.*LISTENING"') do (
+for /f "tokens=2,5" %%a in ('netstat -ano ^| findstr /R /C:":8178.*LISTENING" /C:":5000.*LISTENING" /C:":5001.*LISTENING"') do (
   echo Killing PID %%b on %%a
   taskkill /PID %%b /F >nul 2>&1
   set "killed=1"

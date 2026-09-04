@@ -5,7 +5,7 @@ set "repoRoot=%~dp0.."
 cd /d "%repoRoot%"
 
 echo Stopping any running dispatch services...
-for /f "tokens=2,5" %%a in ('netstat -ano ^| findstr /R /C:":8178.*LISTENING" /C:":5000.*LISTENING"') do (
+for /f "tokens=2,5" %%a in ('netstat -ano ^| findstr /R /C:":8178.*LISTENING" /C:":5000.*LISTENING" /C:":5001.*LISTENING"') do (
   echo Killing PID %%b on %%a
   taskkill /PID %%b /F >nul 2>&1
 )
@@ -18,6 +18,9 @@ powershell.exe -ExecutionPolicy Bypass -File "%repoRoot%\scripts\start-whisper-d
 echo Starting app dev server...
 powershell.exe -ExecutionPolicy Bypass -File "%repoRoot%\scripts\start-app-detached.ps1"
 
+echo Starting Nexus Dispatch dev server...
+powershell.exe -ExecutionPolicy Bypass -File "C:\Users\str8s\nexus-dispatch\scripts\start-app-detached.ps1"
+
 echo.
 echo Waiting for services to start...
 powershell.exe -Command "Start-Sleep -Seconds 15" >nul 2>&1
@@ -26,6 +29,7 @@ echo.
 curl -s http://127.0.0.1:8178/health
 echo.
 curl -s -o nul -w "App HTTP status: %%{http_code}\n" http://127.0.0.1:5000/
+curl -s -o nul -w "Nexus HTTP status: %%{http_code}\n" http://127.0.0.1:5001/
 
 echo.
 echo Refresh complete.
