@@ -13,9 +13,13 @@ export async function transcribeAudio(
   filename: string,
   keywords: string[]
 ): Promise<WhisperResponse> {
+  // Keep this prompt generic. Whisper treats initial_prompt as prior context and
+  // will hallucinate a concrete call example into unrelated audio — a hardcoded
+  // "Signal 4, MVA at Dale Mabry and Linebaugh" example caused ~330 bogus events
+  // over one weekend (see client hook fix; 2026-09-08).
   const prompt = keywords.length
-    ? `Dispatch radio: Signal 4, MVA at Dale Mabry and Linebaugh. Unit responding. ${keywords.slice(0, 8).join(", ")}.`
-    : "Dispatch radio: Signal 4, MVA at Dale Mabry and Linebaugh. Unit responding.";
+    ? `Dispatch radio terminology: ${keywords.slice(0, 8).join(", ")}.`
+    : "Dispatch radio terminology.";
   const body = new FormData();
   body.set("audio", new Blob([audio]), filename);
   body.set("prompt", prompt);
