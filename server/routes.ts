@@ -1,5 +1,6 @@
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import type { Server } from "node:http";
+import { hostname } from "node:os";
 import rateLimit from "express-rate-limit";
 import { storage } from "./storage";
 import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent } from "@shared/schema";
@@ -346,7 +347,34 @@ const TV_VIDEO_PHRASES = [
   "what would you say",
   "i'll be there for you",
   "why come they need me",
+  "live stream",
+  "livestream",
+  "youtube",
 ];
+
+// Show/announcement phrases that reject a dispatch UNCONDITIONALLY — a real
+// dispatch never follows "this is a production of...", so unlike the soft
+// TV_VIDEO_PHRASES these are not bypassed by signal+address heuristics.
+const HARD_PRODUCTION_PHRASES = [
+  "this is a production of",
+  "thank you for your attention",
+  "thanks for watching",
+  "thank you for watching",
+];
+
+// Radio checks / mic tests where someone runs through the signal numbers
+// ("signal 3, signal 5, signal 6, ... signal 38"). A real dispatch carries
+// one, maybe two signal types — 4+ distinct numbers is a counting run.
+function isSignalCountingRun(transcript: string): boolean {
+  const numbers = new Set<string>();
+  const re = /\bsignal\s+(\d+)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(transcript)) !== null) {
+    numbers.add(match[1]);
+    if (numbers.size >= 4) return true;
+  }
+  return false;
+}
 
 const STREET_SUFFIX_ONLY = new Set([
   "street", "st", "avenue", "ave", "road", "rd", "boulevard", "blvd", "drive", "dr",
@@ -373,12 +401,35 @@ function containsTvVideoPhrase(transcript: string): boolean {
   return TV_VIDEO_PHRASES.some((p) => t.includes(p));
 }
 
+// Chatter fragments that leak into parsed addresses from non-dispatch audio.
+const ADDRESS_CHATTER = [
+  "sorry",
+  "thank you",
+  "excuse me",
+  "you're welcome",
+  "live stream",
+  "livestream",
+];
+
 function isInvalidAutoAddress(address: string | null | undefined): boolean {
   const a = (address || "").trim().toLowerCase();
   if (!a || a === "" || a.includes("unknown") || a === "n/a" || a === "null") return true;
   // Reject addresses that are just a street suffix (e.g. "wall", "drive", "point").
   if (STREET_SUFFIX_ONLY.has(a)) return true;
+  // Reject addresses that are actually conversation fragments.
+  if (ADDRESS_CHATTER.some((p) => a.includes(p))) return true;
   return false;
+}
+
+// A bare road name (e.g. "Dale Mabry") has no block number and no cross
+// street, so geocoding can only pin the road centroid — the marker is
+// approximate and dispatch may need to search for the exact location.
+function isBareRoadName(address: string | null | undefined): boolean {
+  const a = (address || "").trim().toLowerCase();
+  if (!a || isInvalidAutoAddress(a)) return false;
+  if (/\d/.test(a)) return false;
+  if (/\band\b|@|&|\//.test(a)) return false;
+  return true;
 }
 
 function hasKeywordSpam(transcript: string): boolean {
@@ -422,6 +473,13 @@ export async function registerRoutes(
     });
   });
 
+  // Machine identity — the client derives its default district/source
+  // (DISP-N → District N / source "DISP-N") so capture can auto-configure
+  // after a restart without manual entry.
+  app.get("/api/machine", (_req, res) => {
+    res.json({ hostname: hostname() });
+  });
+
   // Get all dispatch events
   app.get("/api/events", async (req, res) => {
     try {
@@ -463,6 +521,18 @@ export async function registerRoutes(
       // Auto-dispatches without a real address are usually TV/noise false positives.
       // Manual dispatches can still be created without an address.
       if (!parsed.isManual) {
+        // Show/recap audio ("this is a production of...") can contain a real
+        // address AND a crash keyword from a recap — reject it unconditionally.
+        const productionPhrase = HARD_PRODUCTION_PHRASES.find((p) =>
+          normalizeText(parsed.transcript).includes(p)
+        );
+        if (productionPhrase) {
+          return res.status(400).json({ message: `Auto-dispatch rejected: production audio (${productionPhrase})` });
+        }
+        // Radio checks that count through the signal numbers.
+        if (isSignalCountingRun(parsed.transcript)) {
+          return res.status(400).json({ message: "Auto-dispatch rejected: signal counting run (radio check)" });
+        }
         // A strong dispatch signal + real address overrides noise phrases
         // (e.g. TV audio before the actual call).
         const likelyReal = isLikelyRealDispatch(parsed.transcript, parsed.address);
@@ -494,7 +564,54 @@ export async function registerRoutes(
         geocodedRoad = await reverseGeocodeRoad(lat, lng);
       }
 
-      let event = await storage.createEvent({ ...parsed, lat, lng, geocodedRoad });
+      // Suppress near-duplicate dispatches. The same incident gets
+      // re-broadcast on the radio for hours; without this, each broadcast
+      // creates a fresh event and Telegram alert for the same call.
+      // Applies to feed events and reconciler (DISP 3) output; only the
+      // manual entry form is exempt so dispatchers can always log a call.
+      if (parsed.source !== "Manual Dispatch") {
+        const DEDUP_WINDOW_MS = 30 * 60 * 1000;
+        const DEDUP_RADIUS_M = 500;
+        const norm = (s: string | null | undefined) =>
+          (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        const crashClass = new Set(["mva", "mvc", "signal 4", "signal4", "10 50"]);
+        const sameIncidentType = (a: string, b: string) => {
+          const na = norm(a);
+          const nb = norm(b);
+          return na === nb || (crashClass.has(na) && crashClass.has(nb));
+        };
+        const distanceM = (aLat: number, aLng: number, bLat: number, bLng: number) => {
+          const toRad = (d: number) => (d * Math.PI) / 180;
+          const dLat = toRad(bLat - aLat);
+          const dLng = toRad(bLng - aLng);
+          const h =
+            Math.sin(dLat / 2) ** 2 +
+            Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2;
+          return 2 * 6371000 * Math.asin(Math.sqrt(h));
+        };
+        const cutoff = Date.now() - DEDUP_WINDOW_MS;
+        const newAddr = norm(parsed.address);
+        const newTranscript = norm(parsed.transcript);
+        const existing = (await storage.getEvents()).find((e) => {
+          if (e.status !== "active" && e.status !== "accepted") return false;
+          if (new Date(e.createdAt).getTime() < cutoff) return false;
+          // Identical transcript in the window = the same broadcast reposted
+          // (e.g. a feed replaying audio, or the reconciler re-emitting a
+          // call that was already entered), even if the parsed address or
+          // signal type came out differently.
+          if (newTranscript.length >= 20 && newTranscript === norm(e.transcript)) return true;
+          if (!sameIncidentType(e.signalType || "", parsed.signalType || "")) return false;
+          if (lat && lng && e.lat != null && e.lng != null) {
+            return distanceM(lat, lng, e.lat, e.lng) < DEDUP_RADIUS_M;
+          }
+          return newAddr.length >= 5 && newAddr === norm(e.address);
+        });
+        if (existing) {
+          return res.status(200).json({ duplicate: true, event: existing });
+        }
+      }
+
+      let event = await storage.createEvent({ ...parsed, lat, lng, geocodedRoad, locationApprox: isBareRoadName(parsed.address) });
       broadcastEvent(event);
 
       // Send to Telegram if configured
@@ -758,6 +875,10 @@ function formatTelegramMessage(event: DispatchEvent, options: FormatOptions = {}
 
   let msg = `${header}\n\n`;
   msg += `<b>📍 Location:</b> ${escapeHtml(address)}\n`;
+
+  if (event.locationApprox) {
+    msg += `<b>⚠️ APPROXIMATE LOCATION:</b> single cross street named — may need to search exact location. READ DISPATCH FOR CONTEXT.\n`;
+  }
 
   if (event.lat && event.lng) {
     msg += `<b>🗺️ GPS:</b> <a href="${buildGpsLink(event.lat, event.lng)}">Open in Maps</a>\n`;

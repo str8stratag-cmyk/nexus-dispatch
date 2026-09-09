@@ -22,6 +22,7 @@ interface DispatchEventDocument {
   telegramMessageId: string | null;
   geocodedRoad: string | null;
   whisperModel: string | null;
+  locationApprox?: boolean;
   createdAt: Date;
 }
 
@@ -50,6 +51,7 @@ function mapEvent(row: DispatchEventDocument): DispatchEvent {
     telegramMessageId: row.telegramMessageId ?? null,
     geocodedRoad: row.geocodedRoad ?? null,
     whisperModel: row.whisperModel ?? null,
+    locationApprox: row.locationApprox ?? false,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -120,6 +122,7 @@ export class DatabaseStorage implements IStorage {
       telegramMessageId: event.telegramMessageId ?? null,
       geocodedRoad: event.geocodedRoad ?? null,
       whisperModel: event.whisperModel ?? null,
+      locationApprox: event.locationApprox ?? false,
       createdAt: new Date(),
     };
     await database.collection<DispatchEventDocument>("dispatchEvents").insertOne(document);

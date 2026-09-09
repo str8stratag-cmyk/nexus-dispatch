@@ -15,6 +15,7 @@ interface DispatchMarker {
   transcript: string;
   createdAt: string;
   status?: string;
+  locationApprox?: boolean;
 }
 
 interface DispatchMapProps {
@@ -48,6 +49,21 @@ function buildPopupContent(marker: DispatchMarker): HTMLElement {
     ? `${marker.address} & ${marker.crossStreet}`
     : marker.address || "Address unknown";
   container.appendChild(address);
+
+  if (marker.locationApprox) {
+    const approx = document.createElement("div");
+    approx.style.fontWeight = "700";
+    approx.style.fontSize = "11px";
+    approx.style.color = "hsl(45 100% 60%)";
+    approx.style.background = "hsl(45 100% 50% / 0.12)";
+    approx.style.border = "1px solid hsl(45 100% 50% / 0.55)";
+    approx.style.borderRadius = "4px";
+    approx.style.padding = "4px 6px";
+    approx.style.marginBottom = "8px";
+    approx.textContent =
+      "⚠️ APPROXIMATE LOCATION — single cross street named, may need to search exact location. Read dispatch for context.";
+    container.appendChild(approx);
+  }
 
   if (marker.geocodedRoad) {
     const roadRef = document.createElement("div");

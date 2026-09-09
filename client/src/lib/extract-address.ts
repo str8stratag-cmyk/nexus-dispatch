@@ -13,6 +13,7 @@ const STREET_SUFFIXES = new Set([
   "meadow", "meadows", "mill", "mills", "mission", "mont", "mount", "mountain", "neck",
   "oval", "overlook", "park", "pass", "path", "pike", "pine", "pines", "prairie", "ranch",
   "river", "route", "row", "shoal", "shore", "spring", "springs", "station", "stravenue",
+  "mabry", "linebaugh", "cypress",
   "stream", "summit", "throughway", "trace", "track", "trafficway", "trailer", "tunnel",
   "turnpike", "union", "valley", "vista", "village", "vllg", "ville", "walk", "wall",
   "waters", "wells",
@@ -24,6 +25,8 @@ const DIRECTIONALS = new Set([
 ]);
 
 // Words that should not appear inside a street name and stop backtracking.
+// Includes generic suffix abbreviations so consecutive street names don't
+// fuse ("Fowler Ave Fletcher Ave") and dispatch jargon that precedes roads.
 const STOP_WORDS = new Set([
   "at", "and", "near", "by", "of", "on", "to", "the", "a", "an", "in", "with",
   "from", "for", "is", "are", "was", "were", "be", "been", "being", "have", "has",
@@ -35,16 +38,31 @@ const STOP_WORDS = new Set([
   "ten", "signal", "sig", "district", "dis", "zone", "channel", "ch", "dispatch",
   "respond", "responding", "enroute", "en route", "unit", "units", "engine", "truck",
   "squad", "medic", "rescue", "tow", "flatbed", "rotator", "wrecker",
+  "mva", "mvc", "nba", "nbc", "crash",
   "between", "intersection", "corner", "exit",
+  // Generic suffix abbreviations: stop backtracking so back-to-back street
+  // names stay separate. Local name-suffixes (mabry, linebaugh, cypress,
+  // shore, waters...) are deliberately NOT here — they must stay absorbable.
+  "ave", "avenue", "blvd", "boulevard", "st", "street", "rd", "road", "dr",
+  "drive", "ln", "lane", "ct", "court", "cir", "circle", "hwy", "highway",
+  "pkwy", "parkway", "pl", "place", "ter", "terrace", "trl", "trail", "way",
 ]);
 
+// Candidate texts that are places, not street addresses.
+const CANDIDATE_BLOCKLIST = new Set(["busch gardens", "great way"]);
+
 // Conjunctions/prepositions that often precede a cross street.
-const CROSS_LINKERS = new Set(["and", "at", "near", "by", "/", "between", "intersection", "corner"]);
+const CROSS_LINKERS = new Set(["and", "at", "in", "near", "by", "/", "between", "intersection", "corner"]);
 
 // Common Whisper mishearings for Hillsborough County street/neighborhood names.
 // These are corrected BEFORE street extraction so "mcdull and mlk" becomes
 // "mcdill and mlk" and the address parser can find the real street names.
 const ADDRESS_HOMOPHONES: [RegExp, string][] = [
+  [/\bgandhi\s+boulevard\b/gi, "Gandy Blvd"],
+  [/\bgandhi\s+blvd\b/gi, "Gandy Blvd"],
+  [/\bgandhi\b/gi, "Gandy"],
+  [/\bgandy\s+boulevard\b/gi, "Gandy Blvd"],
+  [/\bdale\s+mason\b/gi, "Dale Mabry"],
   [/\bmcdull\b/gi, "McDill"],
   [/\bmcdonald\b/gi, "McDill"],
   [/\bhigh park\b/gi, "Hyde Park"],
@@ -76,6 +94,31 @@ const ADDRESS_HOMOPHONES: [RegExp, string][] = [
   [/\bmlk\b/gi, "Martin Luther King Jr Blvd"],
   [/\bplatt\s+st\b/gi, "Platt Street"],
   [/\bplatt\s+street\b/gi, "Platt Street"],
+  // Major Tampa roads are usually spoken with NO suffix ("on Hillsborough",
+  // "at Busch and 56th"). Canonicalize bare mentions to their full form so
+  // they extract as addresses. Optional-suffix groups keep already-suffixed
+  // forms canonical without doubling up.
+  [/(?<!\bof\s)\bflorida(?:\s+ave(?:nue)?)?\b(?!\s+state)/gi, "Florida Ave"],
+  [/\bfloribraska\b/gi, "Nebraska Ave"],
+  [/\bhi?l+s+borough(?:\s+ave(?:nue)?)?\b(?!\s+county)/gi, "Hillsborough Ave"],
+  [/\bfowller\b/gi, "Fowler"],
+  [/\bfowler(?:\s+ave(?:nue)?)?\b/gi, "Fowler Ave"],
+  [/\bfletcher(?:\s+ave(?:nue)?)?\b/gi, "Fletcher Ave"],
+  [/\bwaters(?:\s+ave(?:nue)?)?\b/gi, "Waters Ave"],
+  [/\bhimes(?:\s+ave(?:nue)?)?\b/gi, "Himes Ave"],
+  [/\bdale\s+marby\b/gi, "Dale Mabry"],
+  [/\bcolumbus(?:\s+ave(?:nue)?|\s+dr(?:ive)?)?\b/gi, "Columbus Ave"],
+  [/\b50th(?:\s+st(?:reet)?)?\b/gi, "50th St"],
+  [/\b56th(?:\s+st(?:reet)?)?\b/gi, "56th St"],
+  [/\b30th(?:\s+st(?:reet)?)?\b/gi, "30th St"],
+  [/\bbusch(?:\s+blvd|\s+boulevard)?\b(?!\s+gardens)/gi, "Busch Blvd"],
+  [/\bsligh(?:\s+ave(?:nue)?)?\b/gi, "Sligh Ave"],
+  [/\bkennedy(?:\s+blvd|\s+boulevard)?\b/gi, "Kennedy Blvd"],
+  [/\bbroadway(?:\s+ave(?:nue)?)?\b/gi, "Broadway Ave"],
+  [/\bbayshore(?:\s+blvd|\s+boulevard)?\b/gi, "Bayshore Blvd"],
+  [/\bwest\s+shore(?:\s+blvd|\s+boulevard)?\b/gi, "West Shore Blvd"],
+  [/\bgandy(?:\s+blvd|\s+boulevard)?\b/gi, "Gandy Blvd"],
+  [/\bmemorial\b(?!\s+parkway)/gi, "Memorial Highway"],
 ];
 
 interface Token {
@@ -120,7 +163,8 @@ function tokenize(text: string): Token[] {
 }
 
 function isNumberToken(word: string): boolean {
-  return /^\d{1,6}[a-z]?$/i.test(word.replace(/[.,;]+$/, ""));
+  // Street numbers and spoken ordinals ("30th", "50th", "808", "4a").
+  return /^\d{1,6}(?:st|nd|rd|th)?[a-z]?$/i.test(word.replace(/[.,;]+$/, ""));
 }
 
 function isStandaloneDispatchNumber(word: string): boolean {
@@ -225,7 +269,9 @@ function findStreetCandidates(text: string): StreetCandidate[] {
   for (let i = 0; i < tokens.length; i++) {
     if (tokens[i].isSuffix) {
       const candidate = buildStreetCandidate(tokens, i);
-      if (candidate) candidates.push(candidate);
+      if (candidate && !CANDIDATE_BLOCKLIST.has(candidate.text.toLowerCase())) {
+        candidates.push(candidate);
+      }
     }
   }
 
@@ -286,8 +332,10 @@ function findCrossStreet(
       .filter((c) => c.startIndex > i && (!primary || !isSameStreet(c, primary)))
       .shift();
 
+    // Either side of the linker can be the cross street: "Busch Blvd and
+    // 56th" (named-then-numbered) is as valid as "56th and Busch Blvd".
     if (after) return after;
-    if (before && primaryEnd >= 0 && before.endIndex > primaryEnd) return before;
+    if (before) return before;
   }
 
   // Fallback: pick the first candidate after the primary that is different.
@@ -351,12 +399,23 @@ function matchKnownStreets(text: string): string[] {
   return found;
 }
 
-function applyAddressHomophones(text: string): string {
+export function applyAddressHomophones(text: string): string {
   let corrected = text;
   for (const [pattern, replacement] of ADDRESS_HOMOPHONES) {
     corrected = corrected.replace(pattern, replacement);
   }
   return corrected;
+}
+
+// Major roads that warrant a review dispatch even when no crash keyword was
+// detected — dispatchers name them bare ("on Hillsborough", "at Busch and
+// 56th") and those calls used to be dropped entirely. Tested AFTER homophone
+// correction so mishearings (gandhi -> Gandy) still count.
+const MAJOR_ROAD_RE = /\b(Florida Ave|Nebraska Ave|Hillsborough Ave|Fowler Ave|Fletcher Ave|Waters Ave|Himes Ave|Dale Mabry|Columbus Ave|Memorial Highway|50th St|56th St|30th St|Busch Blvd|Sligh Ave|Kennedy Blvd|Martin Luther King Jr Blvd|Cypress|Broadway Ave|Bayshore Blvd|Gandy Blvd|West Shore Blvd)\b/i;
+
+export function containsMajorRoad(transcript: string): boolean {
+  if (!transcript) return false;
+  return MAJOR_ROAD_RE.test(applyAddressHomophones(transcript));
 }
 
 export function extractAddress(transcript: string): ExtractedAddress {
@@ -379,7 +438,9 @@ export function extractAddress(transcript: string): ExtractedAddress {
   const numbered = candidates.filter((c) => c.hasNumber);
   const primary = numbered.length > 0
     ? numbered.sort((a, b) => b.text.length - a.text.length)[0]
-    : candidates[0];
+    // No numbers: take the most specific (longest) name — "West Shore Blvd"
+    // over the bare "West Shore" that the same tokens also produce.
+    : candidates.reduce((a, b) => (b.text.length > a.text.length ? b : a));
   const cross = findCrossStreet(text, primary, candidates);
 
   return {

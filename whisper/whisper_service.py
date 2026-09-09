@@ -1,7 +1,9 @@
 import asyncio
 import functools
+import json
 import os
 import tempfile
+import time
 from hmac import compare_digest
 from pathlib import Path
 
@@ -13,6 +15,11 @@ MODEL_NAME = os.getenv("WHISPER_MODEL", "medium.en")
 DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 API_KEY = os.getenv("WHISPER_API_KEY")
+# Opt-in: set WHISPER_SAVE_AUDIO to a directory to retain incoming chunks
+# (audio + JSON sidecar with transcript and confidence) for tuning. Ring
+# buffer — oldest files are deleted past WHISPER_SAVE_MAX files.
+SAVE_AUDIO_DIR = os.getenv("WHISPER_SAVE_AUDIO") or None
+SAVE_AUDIO_MAX = int(os.getenv("WHISPER_SAVE_MAX", "200"))
 
 app = FastAPI(title="Dispatch Monitor Whisper")
 app.add_middleware(
@@ -61,23 +68,47 @@ async def transcribe(
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 700},
             initial_prompt=prompt or None,
-            condition_on_previous_text=True,
+            condition_on_previous_text=False,
             compression_ratio_threshold=2.4,
         )
         loop = asyncio.get_running_loop()
         segments, info = await loop.run_in_executor(None, transcribe_call, temp_path)
         result_segments = [
-            {"start": segment.start, "end": segment.end, "text": segment.text.strip()}
+            {
+                "start": segment.start,
+                "end": segment.end,
+                "text": segment.text.strip(),
+                "no_speech_prob": round(segment.no_speech_prob, 4),
+                "avg_logprob": round(segment.avg_logprob, 4),
+                "compression_ratio": round(segment.compression_ratio, 4),
+            }
             for segment in segments
             if segment.text.strip()
         ]
-        return {
+        result = {
             "text": " ".join(segment["text"] for segment in result_segments),
             "language": info.language,
             "duration": info.duration,
             "model": MODEL_NAME,
             "segments": result_segments,
         }
+
+        if SAVE_AUDIO_DIR:
+            save_dir = Path(SAVE_AUDIO_DIR)
+            save_dir.mkdir(parents=True, exist_ok=True)
+            stem = f"{int(time.time() * 1000)}"
+            saved_audio = save_dir / f"{stem}{suffix}"
+            Path(temp_path).replace(saved_audio)
+            temp_path = ""
+            (save_dir / f"{stem}.json").write_text(
+                json.dumps({"prompt": prompt, **result}, indent=2),
+                encoding="utf-8",
+            )
+            kept = sorted(save_dir.iterdir(), key=lambda p: p.stat().st_mtime)
+            while len(kept) > SAVE_AUDIO_MAX:
+                kept.pop(0).unlink(missing_ok=True)
+
+        return result
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Whisper transcription failed: {error}") from error
     finally:

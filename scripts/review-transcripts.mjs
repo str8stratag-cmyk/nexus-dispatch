@@ -3,7 +3,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const file = join(__dirname, "..", "shared", "calls-for-review-2026-09-01.json");
+const file = join(__dirname, "..", "shared", "calls-for-review-2026-09-03.json");
 const events = JSON.parse(readFileSync(file, "utf-8"));
 
 function normalizeSource(src) {
@@ -25,11 +25,12 @@ const TAMPA_STREETS = new Set([
   "nebraska", "san miguel", "san miquel", "beach", "george j bean", "george j. bean",
   "parkway", "nassau", "mc dill", "macdill ave", "mcdill ave", "south tampa", "tampa",
   "ybor", "channelside", "downtown", "interstate", "i 4", "i 75", "i 275", "us 10",
+  "busch", "del ray", "delray", "del rey", "del rey ct", "delray dr", "del ray ct", "del ray dr",
 ]);
 
 const knownBadWords = new Set([
   "hives", "hines", "mcdull", "high park", "lowest ave", "lowest avenue",
-  "san miquel", "miquel", "miguel",
+  "san miquel", "miquel", "miguel", "braska",
 ]);
 
 function norm(text) {
@@ -94,32 +95,47 @@ for (const { e, misspellings } of flagged) {
   console.log(`   ${e.transcript.replace(/\n/g, " ")}`);
 }
 
-// DISP2 vs DISP4 comparison: group by similar transcript/address/signal within 10 min
-console.log("\n=== DISP2 vs DISP4 SAME-CALL COMPARISON ===");
-const disp2 = events.filter(e => e.normalizedSource === "DISP2").sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-const disp4 = events.filter(e => e.normalizedSource === "DISP4").sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+// DISP1/DISP2/DISP4 comparison: group by similar transcript/address/signal within 10 min
+console.log("\n=== DISP1/DISP2/DISP4 SAME-CALL COMPARISON ===");
+
+function feedEvents(name) {
+  return events
+    .filter(e => e.normalizedSource === name)
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+}
+
+const feeds = ["DISP1", "DISP2", "DISP4"]
+  .map(name => ({ name, events: feedEvents(name) }))
+  .filter(f => f.events.length > 0);
 
 const matched = [];
-for (const e2 of disp2) {
-  const t2 = norm(e2.transcript);
-  const candidates = disp4.filter(e4 => Math.abs(new Date(e4.createdAt) - new Date(e2.createdAt)) < 10 * 60 * 1000);
-  for (const e4 of candidates) {
-    const t4 = norm(e4.transcript);
-    // same signal type or address overlap
-    const signalMatch = e2.signalType && e4.signalType && e2.signalType === e4.signalType;
-    const addrMatch = (e2.address && e4.address && norm(e2.address) === norm(e4.address)) ||
-                      (e2.crossStreet && e4.crossStreet && norm(e2.crossStreet) === norm(e4.crossStreet));
-    if (signalMatch || addrMatch) {
-      matched.push({ e2, e4 });
-      break;
+for (let i = 0; i < feeds.length; i++) {
+  for (let j = i + 1; j < feeds.length; j++) {
+    const A = feeds[i];
+    const B = feeds[j];
+    for (const eA of A.events) {
+      const tA = norm(eA.transcript);
+      const candidates = B.events.filter(eB => Math.abs(new Date(eB.createdAt) - new Date(eA.createdAt)) < 10 * 60 * 1000);
+      for (const eB of candidates) {
+        const tB = norm(eB.transcript);
+        // same signal type or address overlap
+        const signalMatch = eA.signalType && eB.signalType && eA.signalType === eB.signalType;
+        const addrMatch = (eA.address && eB.address && norm(eA.address) === norm(eB.address)) ||
+                          (eA.crossStreet && eB.crossStreet && norm(eA.crossStreet) === norm(eB.crossStreet));
+        if (signalMatch || addrMatch) {
+          matched.push({ a: A.name, aEvent: eA, b: B.name, bEvent: eB });
+          break;
+        }
+      }
     }
   }
 }
 
-for (const { e2, e4 } of matched.slice(-30)) {
-  console.log(`\nPair: DISP2 #${e2.id} vs DISP4 #${e4.id} (${new Date(e2.createdAt).toLocaleTimeString()})`);
-  console.log(`  DISP2 addr: ${e2.address || ""}${e2.crossStreet ? " & " + e2.crossStreet : ""}`);
-  console.log(`       trnsc: ${e2.transcript.replace(/\n/g, " ")}`);
-  console.log(`  DISP4 addr: ${e4.address || ""}${e4.crossStreet ? " & " + e4.crossStreet : ""}`);
-  console.log(`       trnsc: ${e4.transcript.replace(/\n/g, " ")}`);
+for (const { a, aEvent, b, bEvent } of matched.slice(-40)) {
+  const fmt = (e) => `${e.address || ""}${e.crossStreet ? " & " + e.crossStreet : ""}`;
+  console.log(`\nPair: ${a} #${aEvent.id} vs ${b} #${bEvent.id} (${new Date(aEvent.createdAt).toLocaleTimeString()})`);
+  console.log(`  ${a} addr: ${fmt(aEvent)}`);
+  console.log(`      trnsc: ${aEvent.transcript.replace(/\n/g, " ")}`);
+  console.log(`  ${b} addr: ${fmt(bEvent)}`);
+  console.log(`      trnsc: ${bEvent.transcript.replace(/\n/g, " ")}`);
 }

@@ -89,6 +89,12 @@ function Pull-Repo($path) {
     $after = git -C $path rev-parse HEAD
     if ($before -ne $after) {
         Write-Host "$(Get-Date) Updated $path" -ForegroundColor Green
+        # A dependency change without an install leaves the app unable to boot.
+        $pkgChanged = git -C $path diff --name-only $before $after | Select-String -Quiet "^package(-lock)?\.json$"
+        if ($pkgChanged) {
+            Write-Host "$(Get-Date) package.json changed in $path - running npm install..." -ForegroundColor Cyan
+            npm --prefix $path install --no-audit --no-fund
+        }
         return $true
     }
     return $false

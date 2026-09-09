@@ -62,6 +62,7 @@ const TAMPA_STREETS = [
   "university center", "lois", "gandy", "selmon", "brittany", "northdale",
   "schultenberg", "himes", "boy scout", "floribraska", "nebraska", "san miguel",
   "san miquel", "bruce b downs", "bush", "tampa", "i 4", "i 275", "i 75",
+  "busch", "del ray", "delray", "del rey",
 ];
 
 // Whisper/common transcription misspellings -> corrected Tampa street names.
@@ -98,6 +99,7 @@ const ADDRESS_CORRECTIONS = {
   "boyscama": "Boy Scout Rd",
   "san miquel": "San Miguel",
   "nabraska": "Nebraska Ave",
+  "braska": "Nebraska Ave",
   "selmon expressway": "Selmon Expressway",
   "selman expressway": "Selmon Expressway",
   "salman expressway": "Selmon Expressway",
@@ -118,6 +120,12 @@ const ADDRESS_CORRECTIONS = {
   "john o'mishal": "Dona Michelle Dr",
   "john o mishal": "Dona Michelle Dr",
   "mishal": "Michelle",
+  "del ray": "Del Rey Ct",
+  "del rey": "Del Rey Ct",
+  "del rey ct": "Del Rey Ct",
+  "del ray ct": "Del Rey Ct",
+  "delray": "Delray Dr",
+  "del ray dr": "Delray Dr",
 };
 
 function normalize(text) {
@@ -518,7 +526,10 @@ async function reconcile() {
     const events = await eventsCol
       .find({
         createdAt: { $gte: since },
-        source: { $ne: SOURCE_OUTPUT }, // don't re-process our own output
+        source: {
+          $ne: SOURCE_OUTPUT, // don't re-process our own output
+          $ne: "Manual Dispatch", // don't re-emit manually-fired events as DISP 3
+        },
       })
       .sort({ createdAt: 1 })
       .toArray();
