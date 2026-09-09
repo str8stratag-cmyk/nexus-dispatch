@@ -13,6 +13,7 @@ const STREET_SUFFIXES = new Set([
   "meadow", "meadows", "mill", "mills", "mission", "mont", "mount", "mountain", "neck",
   "oval", "overlook", "park", "pass", "path", "pike", "pine", "pines", "prairie", "ranch",
   "river", "route", "row", "shoal", "shore", "spring", "springs", "station", "stravenue",
+  "mabry", "linebaugh", "cypress",
   "stream", "summit", "throughway", "trace", "track", "trafficway", "trailer", "tunnel",
   "turnpike", "union", "valley", "vista", "village", "vllg", "ville", "walk", "wall",
   "waters", "wells",
@@ -39,12 +40,17 @@ const STOP_WORDS = new Set([
 ]);
 
 // Conjunctions/prepositions that often precede a cross street.
-const CROSS_LINKERS = new Set(["and", "at", "near", "by", "/", "between", "intersection", "corner"]);
+const CROSS_LINKERS = new Set(["and", "at", "in", "near", "by", "/", "between", "intersection", "corner"]);
 
 // Common Whisper mishearings for Hillsborough County street/neighborhood names.
 // These are corrected BEFORE street extraction so "mcdull and mlk" becomes
 // "mcdill and mlk" and the address parser can find the real street names.
 const ADDRESS_HOMOPHONES: [RegExp, string][] = [
+  [/\bgandhi\s+boulevard\b/gi, "Gandy Blvd"],
+  [/\bgandhi\s+blvd\b/gi, "Gandy Blvd"],
+  [/\bgandhi\b/gi, "Gandy"],
+  [/\bgandy\s+boulevard\b/gi, "Gandy Blvd"],
+  [/\bdale\s+mason\b/gi, "Dale Mabry"],
   [/\bmcdull\b/gi, "McDill"],
   [/\bmcdonald\b/gi, "McDill"],
   [/\bhigh park\b/gi, "Hyde Park"],
