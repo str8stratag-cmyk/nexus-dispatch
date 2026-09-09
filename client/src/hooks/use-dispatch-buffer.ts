@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { detectKeywords, type KeywordEntry } from "@/lib/constants";
-import { extractAddress, type ExtractedAddress } from "@/lib/extract-address";
+import { extractAddress, containsMajorRoad, type ExtractedAddress } from "@/lib/extract-address";
 
 export interface DispatchPayload {
   transcript: string;
@@ -14,6 +14,16 @@ interface UseDispatchBufferOptions {
   onDispatch: (payload: DispatchPayload) => Promise<void>;
   silenceMs?: number;
   maxChunks?: number;
+}
+
+// Dispatches triggered purely by a major-road mention (no crash keyword) are
+// review prompts: signalType "Road Mention" tells dispatchers to listen back
+// through the buffered transcript rather than roll a truck.
+const ROAD_MENTION_KEYWORD = { keyword: "major road mention", signalType: "Road Mention" };
+
+function buildKeywords(transcript: string, detected: DispatchPayload["keywords"]): DispatchPayload["keywords"] {
+  if (detected.length > 0) return detected;
+  return containsMajorRoad(transcript) ? [ROAD_MENTION_KEYWORD] : [];
 }
 
 export function useDispatchBuffer({
@@ -54,8 +64,9 @@ export function useDispatchBuffer({
     // clipped calls where a keyword is split across final transcript chunks.
     const fullTranscript = bufferRef.current.join(" ");
     const allKeywords = detectKeywords(fullTranscript, keywordList);
+    const roadMention = allKeywords.length === 0 && containsMajorRoad(fullTranscript);
 
-    if (allKeywords.length > 0) {
+    if (allKeywords.length > 0 || roadMention) {
       setIsPending(true);
 
       // 3. Reset the silence timer
@@ -63,10 +74,11 @@ export function useDispatchBuffer({
       timerRef.current = setTimeout(async () => {
         const finalChunks = bufferRef.current;
         const { transcript, keywords, address, crossStreet } = buildPayload(finalChunks);
+        const effectiveKeywords = buildKeywords(transcript, keywords);
 
-        if (keywords.length > 0) {
+        if (effectiveKeywords.length > 0) {
           try {
-            await onDispatch({ transcript, keywords, address, crossStreet });
+            await onDispatch({ transcript, keywords: effectiveKeywords, address, crossStreet });
           } catch (error) {
             console.error("Dispatch failed:", error);
           }
@@ -87,10 +99,11 @@ export function useDispatchBuffer({
 
     const finalChunks = bufferRef.current;
     const { transcript, keywords, address, crossStreet } = buildPayload(finalChunks);
+    const effectiveKeywords = buildKeywords(transcript, keywords);
 
-    if (keywords.length > 0) {
+    if (effectiveKeywords.length > 0) {
       try {
-        await onDispatch({ transcript, keywords, address, crossStreet });
+        await onDispatch({ transcript, keywords: effectiveKeywords, address, crossStreet });
       } catch (error) {
         console.error("Dispatch flush failed:", error);
       }
