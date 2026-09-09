@@ -31,14 +31,59 @@ interface DispatchEventRow {
   createdAt: string;
 }
 
+// Per-machine defaults from the server hostname: DISP-2 → District 2, source
+// "DISP-2". A manually entered district/source (persisted in localStorage)
+// always wins over these defaults.
+function defaultsFromHostname(hostname: string | null | undefined): { district: string; source: string } {
+  const match = hostname?.match(/disp(?:atch)?\s*-?\s*(\d+)/i);
+  if (match) {
+    return { district: `District ${match[1]}`, source: `DISP-${match[1]}` };
+  }
+  return { district: "District 1", source: hostname || "" };
+}
+
 export default function DispatchPage() {
   const { theme, toggleTheme } = useTheme();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  const [district, setDistrict] = useState("District 1");
-  const [sourceName, setSourceName] = useState("");
+  const [district, setDistrictState] = useState(() => localStorage.getItem("dispatch.district") || "District 1");
+  const [sourceName, setSourceNameState] = useState(() => localStorage.getItem("dispatch.source") || "");
   const [districts, setDistricts] = useState<string[]>(["District 1", "District 2", "District 3", "District 4", "District 5", "District 6", "District 7"]);
+
+  // Manual entries persist across restarts and always win over the
+  // machine-derived defaults below.
+  const setDistrict = useCallback((value: string) => {
+    localStorage.setItem("dispatch.district", value);
+    setDistrictState(value);
+  }, []);
+  const setSourceName = useCallback((value: string) => {
+    localStorage.setItem("dispatch.source", value);
+    setSourceNameState(value);
+  }, []);
+
+  const { data: machineConfig } = useQuery({
+    queryKey: ["/api/machine"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/machine");
+      return res.json() as Promise<{ hostname: string }>;
+    },
+    staleTime: Infinity,
+    retry: false,
+  });
+
+  // Fresh browsers (nothing manually entered) self-configure from the
+  // machine identity: DISP-N → District N, source "DISP-N".
+  useEffect(() => {
+    if (!machineConfig?.hostname) return;
+    const defaults = defaultsFromHostname(machineConfig.hostname);
+    if (!localStorage.getItem("dispatch.district")) {
+      setDistrictState(defaults.district);
+    }
+    if (!localStorage.getItem("dispatch.source")) {
+      setSourceNameState(defaults.source);
+    }
+  }, [machineConfig]);
 
   const { data: districtSettings } = useQuery({
     queryKey: ["/api/settings"],

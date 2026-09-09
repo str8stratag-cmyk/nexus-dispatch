@@ -1,5 +1,6 @@
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import type { Server } from "node:http";
+import { hostname } from "node:os";
 import rateLimit from "express-rate-limit";
 import { storage } from "./storage";
 import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent } from "@shared/schema";
@@ -445,6 +446,13 @@ export async function registerRoutes(
       hasMongoDbName: Boolean(process.env.MONGODB_DB_NAME),
       nodeEnv: process.env.NODE_ENV || null,
     });
+  });
+
+  // Machine identity — the client derives its default district/source
+  // (DISP-N → District N / source "DISP-N") so capture can auto-configure
+  // after a restart without manual entry.
+  app.get("/api/machine", (_req, res) => {
+    res.json({ hostname: hostname() });
   });
 
   // Get all dispatch events
