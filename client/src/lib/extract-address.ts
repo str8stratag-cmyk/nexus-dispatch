@@ -49,7 +49,7 @@ const STOP_WORDS = new Set([
 ]);
 
 // Candidate texts that are places, not street addresses.
-const CANDIDATE_BLOCKLIST = new Set(["busch gardens"]);
+const CANDIDATE_BLOCKLIST = new Set(["busch gardens", "great way"]);
 
 // Conjunctions/prepositions that often precede a cross street.
 const CROSS_LINKERS = new Set(["and", "at", "in", "near", "by", "/", "between", "intersection", "corner"]);

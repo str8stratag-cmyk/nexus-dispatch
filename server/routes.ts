@@ -351,6 +351,30 @@ const TV_VIDEO_PHRASES = [
   "youtube",
 ];
 
+// Show/announcement phrases that reject a dispatch UNCONDITIONALLY — a real
+// dispatch never follows "this is a production of...", so unlike the soft
+// TV_VIDEO_PHRASES these are not bypassed by signal+address heuristics.
+const HARD_PRODUCTION_PHRASES = [
+  "this is a production of",
+  "thank you for your attention",
+  "thanks for watching",
+  "thank you for watching",
+];
+
+// Radio checks / mic tests where someone runs through the signal numbers
+// ("signal 3, signal 5, signal 6, ... signal 38"). A real dispatch carries
+// one, maybe two signal types — 4+ distinct numbers is a counting run.
+function isSignalCountingRun(transcript: string): boolean {
+  const numbers = new Set<string>();
+  const re = /\bsignal\s+(\d+)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(transcript)) !== null) {
+    numbers.add(match[1]);
+    if (numbers.size >= 4) return true;
+  }
+  return false;
+}
+
 const STREET_SUFFIX_ONLY = new Set([
   "street", "st", "avenue", "ave", "road", "rd", "boulevard", "blvd", "drive", "dr",
   "lane", "ln", "court", "ct", "circle", "cir", "highway", "hwy", "parkway", "pkwy",
@@ -490,6 +514,18 @@ export async function registerRoutes(
       // Auto-dispatches without a real address are usually TV/noise false positives.
       // Manual dispatches can still be created without an address.
       if (!parsed.isManual) {
+        // Show/recap audio ("this is a production of...") can contain a real
+        // address AND a crash keyword from a recap — reject it unconditionally.
+        const productionPhrase = HARD_PRODUCTION_PHRASES.find((p) =>
+          normalizeText(parsed.transcript).includes(p)
+        );
+        if (productionPhrase) {
+          return res.status(400).json({ message: `Auto-dispatch rejected: production audio (${productionPhrase})` });
+        }
+        // Radio checks that count through the signal numbers.
+        if (isSignalCountingRun(parsed.transcript)) {
+          return res.status(400).json({ message: "Auto-dispatch rejected: signal counting run (radio check)" });
+        }
         // A strong dispatch signal + real address overrides noise phrases
         // (e.g. TV audio before the actual call).
         const likelyReal = isLikelyRealDispatch(parsed.transcript, parsed.address);
