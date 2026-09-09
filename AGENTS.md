@@ -118,6 +118,13 @@ DISP-3 box — do not mistake them for this machine's state. The Azure Maps acco
      `/health` reports `"model":"turbo"`.
 - **Known quirk:** `/health` can time out mid-transcription (CPU-bound, single
   worker). Transcription is unaffected; retry the health check.
+- **Whisper initial_prompt (fixed 2026-09-08):** the transcription prompt sent by
+  `server/whisper.ts` and `client/src/hooks/use-audio-capture.ts` must stay
+  GENERIC (domain words only, no concrete call). A hardcoded example
+  ("Signal 4, MVA at Dale Mabry and Linebaugh") made Whisper hallucinate that
+  exact call into ~300 unrelated events over one weekend. Never put a specific
+  address/signal in the prompt. Upstream/fleet copies may still carry the bad
+  prompt — they need the same fix.
 
 ## Tech stack
 - Frontend: React + Vite + Tailwind + shadcn/ui
