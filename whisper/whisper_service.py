@@ -59,7 +59,7 @@ async def transcribe(
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 700},
             initial_prompt=prompt or None,
-            condition_on_previous_text=True,
+            condition_on_previous_text=False,
             compression_ratio_threshold=2.4,
         )
         result_segments = [

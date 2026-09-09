@@ -345,6 +345,9 @@ const TV_VIDEO_PHRASES = [
   "what would you say",
   "i'll be there for you",
   "why come they need me",
+  "live stream",
+  "livestream",
+  "youtube",
 ];
 
 const STREET_SUFFIX_ONLY = new Set([
@@ -372,12 +375,35 @@ function containsTvVideoPhrase(transcript: string): boolean {
   return TV_VIDEO_PHRASES.some((p) => t.includes(p));
 }
 
+// Chatter fragments that leak into parsed addresses from non-dispatch audio.
+const ADDRESS_CHATTER = [
+  "sorry",
+  "thank you",
+  "excuse me",
+  "you're welcome",
+  "live stream",
+  "livestream",
+];
+
 function isInvalidAutoAddress(address: string | null | undefined): boolean {
   const a = (address || "").trim().toLowerCase();
   if (!a || a === "" || a.includes("unknown") || a === "n/a" || a === "null") return true;
   // Reject addresses that are just a street suffix (e.g. "wall", "drive", "point").
   if (STREET_SUFFIX_ONLY.has(a)) return true;
+  // Reject addresses that are actually conversation fragments.
+  if (ADDRESS_CHATTER.some((p) => a.includes(p))) return true;
   return false;
+}
+
+// A bare road name (e.g. "Dale Mabry") has no block number and no cross
+// street, so geocoding can only pin the road centroid — the marker is
+// approximate and dispatch may need to search for the exact location.
+function isBareRoadName(address: string | null | undefined): boolean {
+  const a = (address || "").trim().toLowerCase();
+  if (!a || isInvalidAutoAddress(a)) return false;
+  if (/\d/.test(a)) return false;
+  if (/\band\b|@|&|\//.test(a)) return false;
+  return true;
 }
 
 function hasKeywordSpam(transcript: string): boolean {
@@ -487,11 +513,13 @@ export async function registerRoutes(
         geocodedRoad = await reverseGeocodeRoad(lat, lng);
       }
 
-      // Suppress near-duplicate auto-dispatches. The same incident gets
+      // Suppress near-duplicate dispatches. The same incident gets
       // re-broadcast on the radio for hours; without this, each broadcast
       // creates a fresh event and Telegram alert for the same call.
-      if (!parsed.isManual) {
-        const DEDUP_WINDOW_MS = 4 * 60 * 60 * 1000;
+      // Applies to feed events and reconciler (DISP 3) output; only the
+      // manual entry form is exempt so dispatchers can always log a call.
+      if (parsed.source !== "Manual Dispatch") {
+        const DEDUP_WINDOW_MS = 30 * 60 * 1000;
         const DEDUP_RADIUS_M = 500;
         const norm = (s: string | null | undefined) =>
           (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -512,9 +540,15 @@ export async function registerRoutes(
         };
         const cutoff = Date.now() - DEDUP_WINDOW_MS;
         const newAddr = norm(parsed.address);
+        const newTranscript = norm(parsed.transcript);
         const existing = (await storage.getEvents()).find((e) => {
           if (e.status !== "active" && e.status !== "accepted") return false;
           if (new Date(e.createdAt).getTime() < cutoff) return false;
+          // Identical transcript in the window = the same broadcast reposted
+          // (e.g. a feed replaying audio, or the reconciler re-emitting a
+          // call that was already entered), even if the parsed address or
+          // signal type came out differently.
+          if (newTranscript.length >= 20 && newTranscript === norm(e.transcript)) return true;
           if (!sameIncidentType(e.signalType || "", parsed.signalType || "")) return false;
           if (lat && lng && e.lat != null && e.lng != null) {
             return distanceM(lat, lng, e.lat, e.lng) < DEDUP_RADIUS_M;
@@ -526,7 +560,7 @@ export async function registerRoutes(
         }
       }
 
-      let event = await storage.createEvent({ ...parsed, lat, lng, geocodedRoad });
+      let event = await storage.createEvent({ ...parsed, lat, lng, geocodedRoad, locationApprox: isBareRoadName(parsed.address) });
       broadcastEvent(event);
 
       // Send to Telegram if configured
@@ -790,6 +824,10 @@ function formatTelegramMessage(event: DispatchEvent, options: FormatOptions = {}
 
   let msg = `${header}\n\n`;
   msg += `<b>📍 Location:</b> ${escapeHtml(address)}\n`;
+
+  if (event.locationApprox) {
+    msg += `<b>⚠️ APPROXIMATE LOCATION:</b> single cross street named — may need to search exact location. READ DISPATCH FOR CONTEXT.\n`;
+  }
 
   if (event.lat && event.lng) {
     msg += `<b>🗺️ GPS:</b> <a href="${buildGpsLink(event.lat, event.lng)}">Open in Maps</a>\n`;

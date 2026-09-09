@@ -28,6 +28,7 @@ interface DispatchEventRow {
   status: string;
   isManual: boolean;
   geocodedRoad: string | null;
+  locationApprox: boolean;
   createdAt: string;
 }
 
@@ -234,6 +235,11 @@ export default function EventLog() {
                 {event.crossStreet ? `${event.address} & ${event.crossStreet}` : event.address}
               </div>
             )}
+            {event.locationApprox && (
+              <div className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-amber-400">
+                ⚠️ Approximate location — single cross street named, may need to search exact location. Read dispatch for context.
+              </div>
+            )}
             {event.geocodedRoad && (
               <div className="text-[11px] text-amber-500">
                 🛣️ Road x-ref: {event.geocodedRoad}
@@ -296,6 +302,11 @@ export default function EventLog() {
                 {event.crossStreet ? `${event.address} & ${event.crossStreet}` : event.address}
               </div>
             )}
+            {event.locationApprox && (
+              <div className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-amber-400">
+                ⚠️ Approximate location — single cross street named, may need to search exact location. Read dispatch for context.
+              </div>
+            )}
             {event.geocodedRoad && (
               <div className="text-[11px] text-amber-500">
                 🛣️ Road x-ref: {event.geocodedRoad}
@@ -342,6 +353,11 @@ export default function EventLog() {
               <div className="flex items-center gap-1 text-xs font-mono text-muted-foreground">
                 <MapPin className="h-3 w-3 shrink-0" />
                 {event.address}
+              </div>
+            )}
+            {event.locationApprox && (
+              <div className="text-[10px] font-bold uppercase tracking-wide text-amber-500">
+                ⚠️ Approximate location — single cross street named. Read dispatch for context.
               </div>
             )}
           </div>
