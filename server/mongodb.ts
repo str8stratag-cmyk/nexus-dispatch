@@ -21,6 +21,11 @@ export function getDatabase(): Promise<Db> {
         database.collection("settings").createIndex({ key: 1 }, { unique: true }),
       ]);
       return database;
+    }).catch((err) => {
+      // Don't cache a rejected promise — otherwise one transient network/Atlas
+      // blip poisons every later request until the process is restarted.
+      databasePromise = undefined;
+      throw err;
     });
   }
 
