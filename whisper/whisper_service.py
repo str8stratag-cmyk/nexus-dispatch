@@ -69,8 +69,14 @@ async def transcribe(
             condition_on_previous_text=False,
             compression_ratio_threshold=2.4,
         )
-        result_segments = [
-            {
+        nsp_drop = float(os.getenv("WHISPER_NSP_THRESHOLD", "0.5"))
+        cr_drop = float(os.getenv("WHISPER_CR_THRESHOLD", "2.0"))
+        result_segments: list[dict[str, object]] = []
+        dropped_segments: list[dict[str, object]] = []
+        for segment in segments:
+            if not segment.text.strip():
+                continue
+            entry = {
                 "start": segment.start,
                 "end": segment.end,
                 "text": segment.text.strip(),
@@ -78,14 +84,20 @@ async def transcribe(
                 "avg_logprob": round(segment.avg_logprob, 4),
                 "compression_ratio": round(segment.compression_ratio, 4),
             }
-            for segment in segments
-            if segment.text.strip()
-        ]
+            # Hallucinated junk ("thanks for watching!", "one, two, three,
+            # four.") clusters at high no_speech_prob; compression_ratio
+            # catches counting loops. Calibrated on debug-audio sidecars:
+            # keepers (real road mentions) sit at nsp <= 0.17.
+            if segment.no_speech_prob > nsp_drop or segment.compression_ratio > cr_drop:
+                dropped_segments.append(entry)
+            else:
+                result_segments.append(entry)
         result = {
             "text": " ".join(segment["text"] for segment in result_segments),
             "language": info.language,
             "duration": info.duration,
             "segments": result_segments,
+            "dropped_segments": dropped_segments,
         }
 
         if SAVE_AUDIO_DIR:
