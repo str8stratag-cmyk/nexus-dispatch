@@ -49,9 +49,13 @@ DISP-3 box — do not mistake them for this machine's state. The Azure Maps acco
 **DO NOT `git push` from this machine without the user's explicit say-so.**
 
 - Unpushed local commits (as of 2026-09-03): dispatch-monitor **ahead 7**,
-  nexus-dispatch **ahead 4**. Everything we did is local-only; the fleet has
-  received nothing from us. The flow has been one-directional (we pulled their
-  beam-5 tuning, Azure Maps geocoder, watchdog rework, `trial/` reconciler).
+  nexus-dispatch **ahead 4**.
+- **EXCEPTION (pushed 2026-09-10, user-approved):** the MongoDB
+  server-selection fix (clear the cached `getDatabase()` promise on failure
+  so one transient Atlas blip can't poison every DB request until restart)
+  was squash-merged to both repos' `main` as PR #1 (dispatch-monitor
+  `96da4cc`, nexus-dispatch `5782ff4`). First fleet-shared code from this
+  box; everything else below remains local-only.
 - **Policy (user decision 2026-09-03):** turbo stays on DISP-2 as the tester.
   If it keeps getting good results, the user will share it with the other DISP
   devices. Until then: no pushes.
