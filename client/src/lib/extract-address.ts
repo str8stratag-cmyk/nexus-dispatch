@@ -66,6 +66,7 @@ const ADDRESS_HOMOPHONES: [RegExp, string][] = [
   [/\bmcdull\b/gi, "McDill"],
   [/\bmcdonald\b/gi, "McDill"],
   [/\bhigh park\b/gi, "Hyde Park"],
+  [/\bharford\b/gi, "Harvey"],
   [/\bmemorial partway\b/gi, "Memorial Parkway"],
   [/\bmemorial parkway\b/gi, "Memorial Parkway"],
   [/\bmemorial highway\b/gi, "Memorial Highway"],
@@ -100,6 +101,7 @@ const ADDRESS_HOMOPHONES: [RegExp, string][] = [
   // forms canonical without doubling up.
   [/(?<!\bof\s)\bflorida(?:\s+ave(?:nue)?)?\b(?!\s+state)/gi, "Florida Ave"],
   [/\bfloribraska\b/gi, "Nebraska Ave"],
+  [/\bpalesboro\b/gi, "Hillsborough"],
   [/\bhi?l+s+borough(?:\s+ave(?:nue)?)?\b(?!\s+county)/gi, "Hillsborough Ave"],
   [/\bfowller\b/gi, "Fowler"],
   [/\bfowler(?:\s+ave(?:nue)?)?\b/gi, "Fowler Ave"],
@@ -111,6 +113,8 @@ const ADDRESS_HOMOPHONES: [RegExp, string][] = [
   [/\b50th(?:\s+st(?:reet)?)?\b/gi, "50th St"],
   [/\b56th(?:\s+st(?:reet)?)?\b/gi, "56th St"],
   [/\b30th(?:\s+st(?:reet)?)?\b/gi, "30th St"],
+  [/\babbot\s+bush\b/gi, "Busch"],
+  [/\bbush\b/gi, "Busch"],
   [/\bbusch(?:\s+blvd|\s+boulevard)?\b(?!\s+gardens)/gi, "Busch Blvd"],
   [/\bsligh(?:\s+ave(?:nue)?)?\b/gi, "Sligh Ave"],
   [/\bkennedy(?:\s+blvd|\s+boulevard)?\b/gi, "Kennedy Blvd"],
@@ -191,6 +195,11 @@ function buildStreetCandidate(tokens: Token[], suffixIndex: number): StreetCandi
 
     // Stop at punctuation-only tokens.
     if (!/^\w/.test(token.text)) break;
+
+    // Never absorb across a sentence boundary: a token ending in "." ends
+    // the previous utterance ("...electrical. Florida Ave", "...nba. 3rd
+    // street"). Real street-name words don't carry periods mid-name.
+    if (/\.$/.test(token.text)) break;
 
     // If we already have a street number, don't absorb a second standalone digit
     // (likely a Signal/District/Zone number that leaked through).

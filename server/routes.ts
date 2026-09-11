@@ -360,6 +360,8 @@ const HARD_PRODUCTION_PHRASES = [
   "thank you for your attention",
   "thanks for watching",
   "thank you for watching",
+  "dispatch radio terminology",
+  "one, two, three",
 ];
 
 // Radio checks / mic tests where someone runs through the signal numbers
@@ -589,6 +591,39 @@ export async function registerRoutes(
             Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2;
           return 2 * 6371000 * Math.asin(Math.sqrt(h));
         };
+        // Mishearings of the same road geocode differently ("regions park" vs
+        // "regents park" land far apart or fail to geocode), so exact address
+        // equality misses re-broadcasts of the same call. Fuzzy fallback:
+        // substring, token overlap, or near-levenshtein. Numbered streets must
+        // match exactly — "50th st" vs "56th st" is a different incident.
+        const levenshtein = (a: string, b: string): number => {
+          let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+          for (let i = 1; i <= a.length; i++) {
+            let cur = [i];
+            for (let j = 1; j <= b.length; j++) {
+              cur[j] = Math.min(
+                prev[j] + 1,
+                cur[j - 1] + 1,
+                prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+              );
+            }
+            prev = cur;
+          }
+          return prev[b.length];
+        };
+        const addressesSimilar = (a: string, b: string): boolean => {
+          if (a.includes(b) || b.includes(a)) return true;
+          const numsA = a.split(" ").filter((t) => /^\d/.test(t));
+          const numsB = b.split(" ").filter((t) => /^\d/.test(t));
+          if (numsA.length > 0 && numsB.length > 0 && numsA.join(" ") !== numsB.join(" ")) {
+            return false;
+          }
+          const ta = a.split(" ");
+          const tb = b.split(" ");
+          const overlap = ta.filter((t) => tb.includes(t)).length;
+          if (overlap / Math.max(ta.length, tb.length) >= 0.6) return true;
+          return levenshtein(a, b) / Math.max(a.length, b.length) <= 0.25;
+        };
         const cutoff = Date.now() - DEDUP_WINDOW_MS;
         const newAddr = norm(parsed.address);
         const newTranscript = norm(parsed.transcript);
@@ -600,11 +635,18 @@ export async function registerRoutes(
           // call that was already entered), even if the parsed address or
           // signal type came out differently.
           if (newTranscript.length >= 20 && newTranscript === norm(e.transcript)) return true;
+          // Bare-road "Road Mention" events all geocode to the same road
+          // centroid, so coordinate/address dedupe would suppress every
+          // distinct mention of the same road within the window (e.g. four
+          // separate MLK transmissions 15 min apart = one event). Only
+          // identical-transcript replays dedupe for this class.
+          if (parsed.signalType === "Road Mention" || e.signalType === "Road Mention") return false;
           if (!sameIncidentType(e.signalType || "", parsed.signalType || "")) return false;
           if (lat && lng && e.lat != null && e.lng != null) {
-            return distanceM(lat, lng, e.lat, e.lng) < DEDUP_RADIUS_M;
+            if (distanceM(lat, lng, e.lat, e.lng) < DEDUP_RADIUS_M) return true;
           }
-          return newAddr.length >= 5 && newAddr === norm(e.address);
+          const eAddr = norm(e.address);
+          return newAddr.length >= 5 && eAddr.length >= 5 && addressesSimilar(newAddr, eAddr);
         });
         if (existing) {
           return res.status(200).json({ duplicate: true, event: existing });
