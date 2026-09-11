@@ -2,10 +2,11 @@ import express, { type Express, type Request, type Response, type NextFunction }
 import type { Server } from "node:http";
 import { hostname } from "node:os";
 import rateLimit from "express-rate-limit";
+import { ObjectId } from "mongodb";
 import { storage } from "./storage";
-import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent } from "@shared/schema";
+import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent, type InsertDispatchEvent } from "@shared/schema";
 import { normalizeKeywordEntry } from "@shared/keywords";
-import { isMongoConfigured } from "./mongodb";
+import { getDatabase, isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
 import { getWhisperModel } from "./whisper";
 
@@ -459,6 +460,35 @@ function isLikelyRealDispatch(transcript: string, address: string | null | undef
   return hasSignal && hasRealAddress;
 }
 
+// Rejected auto-dispatches go to a quarantine collection instead of being
+// silently dropped, so a real call killed by a false-positive gate (spam
+// filter, address resolution) can be reviewed and recovered afterwards.
+async function quarantineRejection(parsed: InsertDispatchEvent, reason: string): Promise<void> {
+  try {
+    const db = await getDatabase();
+    await db.collection("quarantinedDispatches").insertOne({
+      reason,
+      transcript: parsed.transcript,
+      address: parsed.address ?? null,
+      keywords: parsed.keywords ?? null,
+      source: parsed.source ?? null,
+      signalType: parsed.signalType ?? null,
+      whisperModel: parsed.whisperModel ?? null,
+      createdAt: new Date(),
+    });
+  } catch {
+    // Quarantine is best-effort; never block the rejection response on it.
+  }
+}
+
+function rejectAutoDispatch(res: Response, parsed: InsertDispatchEvent, reason: string) {
+  console.log(
+    `[quarantine] ${reason} :: transcript="${(parsed.transcript || "").slice(0, 140)}" :: address=${parsed.address || "(none)"} :: source=${parsed.source || "?"}`
+  );
+  void quarantineRejection(parsed, reason);
+  return res.status(400).json({ message: `Auto-dispatch rejected: ${reason}` });
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -509,9 +539,61 @@ export async function registerRoutes(
     });
   });
 
-  // Create a dispatch event (auto or manual)
-  app.post("/api/dispatch", dispatchLimiter, async (req, res) => {
+  // Quarantined auto-dispatches — clips rejected by the auto-dispatch gates
+  // (spam filter, unresolved address, TV audio...). Kept for review so a real
+  // call killed by a false positive can be inspected and restored.
+  app.get("/api/quarantine", async (req, res) => {
     try {
+      const limit = Math.min(parseInt(req.query.limit as string) || 200, 1000);
+      const reason = (req.query.reason as string) || "";
+      const db = await getDatabase();
+      const filter = reason ? { reason } : {};
+      const items = await db
+        .collection("quarantinedDispatches")
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .toArray();
+      res.json(items);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // Promote a quarantined item to a real dispatch event. It was rejected by
+  // the gates once, so create it as manual to bypass the auto-dispatch
+  // filters; a human pressing "restore" is the override.
+  app.post("/api/quarantine/:id/restore", async (req, res) => {
+    try {
+      const db = await getDatabase();
+      const doc = await db
+        .collection("quarantinedDispatches")
+        .findOne({ _id: new ObjectId(req.params.id) });
+      if (!doc) {
+        return res.status(404).json({ message: "Quarantined item not found" });
+      }
+      const event = await storage.createEvent({
+        transcript: String(doc.transcript ?? ""),
+        keywords: String(doc.keywords ?? "[]"),
+        address: doc.address ?? null,
+        signalType: doc.signalType ?? null,
+        district: "Unknown",
+        source: doc.source ?? "Unknown",
+        status: "active",
+        isManual: true,
+        whisperModel: doc.whisperModel ?? null,
+        locationApprox: false,
+      });
+      await db.collection("quarantinedDispatches").deleteOne({ _id: doc._id });
+      broadcastEvent(event);
+      res.json(event);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // Create a dispatch event (auto or manual)
+  app.post("/api/dispatch", dispatchLimiter, async (req, res) => {    try {
       const parsed = insertDispatchEventSchema.parse(req.body);
 
       // Stamp which Whisper model produced this event (fleet accuracy comparison).
@@ -529,23 +611,29 @@ export async function registerRoutes(
           normalizeText(parsed.transcript).includes(p)
         );
         if (productionPhrase) {
-          return res.status(400).json({ message: `Auto-dispatch rejected: production audio (${productionPhrase})` });
+          return rejectAutoDispatch(res, parsed, `production audio (${productionPhrase})`);
         }
         // Radio checks that count through the signal numbers.
         if (isSignalCountingRun(parsed.transcript)) {
-          return res.status(400).json({ message: "Auto-dispatch rejected: signal counting run (radio check)" });
+          return rejectAutoDispatch(res, parsed, "signal counting run (radio check)");
         }
         // A strong dispatch signal + real address overrides noise phrases
         // (e.g. TV audio before the actual call).
         const likelyReal = isLikelyRealDispatch(parsed.transcript, parsed.address);
         if (containsTvVideoPhrase(parsed.transcript) && !likelyReal) {
-          return res.status(400).json({ message: "Auto-dispatch rejected: detected TV/video audio" });
+          return rejectAutoDispatch(res, parsed, "detected TV/video audio");
         }
-        if (hasKeywordSpam(parsed.transcript) && !likelyReal) {
-          return res.status(400).json({ message: "Auto-dispatch rejected: keyword spam detected" });
+        // Repeated words ("yeah yeah yeah yeah") are normal in radio chatter,
+        // so the spam filter is laxer than the TV filter: either a dispatch
+        // signal or a real address is enough to override it.
+        const hasSpamOverride =
+          DISPATCH_SIGNALS.some((s) => normalizeText(parsed.transcript).includes(s)) ||
+          !isInvalidAutoAddress(parsed.address);
+        if (hasKeywordSpam(parsed.transcript) && !hasSpamOverride) {
+          return rejectAutoDispatch(res, parsed, "keyword spam detected");
         }
         if (isInvalidAutoAddress(parsed.address)) {
-          return res.status(400).json({ message: "Auto-dispatch requires a resolved address" });
+          return rejectAutoDispatch(res, parsed, "requires a resolved address");
         }
       }
 
