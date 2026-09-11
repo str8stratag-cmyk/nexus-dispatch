@@ -628,6 +628,12 @@ export async function registerRoutes(
           // call that was already entered), even if the parsed address or
           // signal type came out differently.
           if (newTranscript.length >= 20 && newTranscript === norm(e.transcript)) return true;
+          // Bare-road "Road Mention" events all geocode to the same road
+          // centroid, so coordinate/address dedupe would suppress every
+          // distinct mention of the same road within the window (e.g. four
+          // separate MLK transmissions 15 min apart = one event). Only
+          // identical-transcript replays dedupe for this class.
+          if (parsed.signalType === "Road Mention" || e.signalType === "Road Mention") return false;
           if (!sameIncidentType(e.signalType || "", parsed.signalType || "")) return false;
           if (lat && lng && e.lat != null && e.lng != null) {
             if (distanceM(lat, lng, e.lat, e.lng) < DEDUP_RADIUS_M) return true;
