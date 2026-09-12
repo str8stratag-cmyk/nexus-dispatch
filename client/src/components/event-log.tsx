@@ -217,7 +217,7 @@ export default function EventLog() {
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-mono text-muted-foreground">
                 {event.district} • {event.source}
-                {event.isManual && (event.source === "Manual Dispatch" ? " • Manual" : " • TERMINAL")}
+                {event.isManual && (event.source === "Manual Dispatch" ? " • Manual" : event.description?.startsWith("Reconciled from") ? " • Reconciled" : null)}
               </span>
               <Button
                 size="sm"
