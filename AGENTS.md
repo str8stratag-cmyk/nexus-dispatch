@@ -1,17 +1,17 @@
 # Dispatch Monitor — Project Context
 
 ## Project overview
-A full-stack dispatch monitoring dashboard. It captures live audio, transcribes speech, detects emergency keywords, and creates dispatch events stored in Supabase.
+A full-stack dispatch monitoring dashboard. It captures live audio, transcribes speech, detects emergency keywords, and creates dispatch events stored in MongoDB Atlas.
 
 - Repo: `str8stratag-cmyk/dispatch-monitor`
-- Local path: `/tmp/dispatch-monitor`
+- Local path: `C:\Users\str8s\dispatch-monitor` (DISP-4 master; fleet machines clone the same repo)
 - Branch: `main`
-- Deployment target: Vercel
+- Deployment: **Vercel retired** (switched to MongoDB Atlas + locally-run apps on the fleet, at agent advice) — see master `AGENTS.md`
 
 ## Tech stack
 - Frontend: React + Vite + Tailwind + shadcn/ui
-- Backend: Express server bundled into a Vercel serverless function (`api-src/index.ts` → `api/index.js`)
-- Database / storage: Supabase (PostgreSQL + Storage)
+- Backend: Express server run locally (`npm run dev`, port 5000); `api-src/index.ts` → `api/index.js` bundling kept but no longer deployed
+- Database / storage: MongoDB Atlas (DB `str8stratag_db_user`, `dispatchEvents` collection). Supabase = legacy/migration only.
 - Audio processing: `ffmpeg-static` via `server/audio-optimizer.ts`
 
 ## Recent changes (2026-08-18)
@@ -33,9 +33,7 @@ Commit `ce36bae`: "Add ffmpeg audio optimization for AI transcription"
 - Added `ffmpeg-static` dependency.
 
 ## Pending tasks / next steps
-1. Verify the live Vercel deployment URL (the one previously shared returned `DEPLOYMENT_NOT_FOUND`).
-2. Test `POST /api/audio/upload` on the deployed Vercel instance with a small WAV file.
-3. If the upload fails on Vercel, resolve the ffmpeg runtime issue (see Known issues below).
+(none — the Vercel-deployment tasks that lived here are obsolete; Vercel retired, app runs locally on the fleet against MongoDB Atlas)
 
 ## Key commands
 ```bash
@@ -71,11 +69,11 @@ ALTER TABLE dispatch_events ADD COLUMN IF NOT EXISTS audio_url text;
 Create a public Supabase Storage bucket named `dispatch-audio` (or match `AUDIO_STORAGE_BUCKET`).
 
 ## Known issues
-- **ffmpeg on Vercel**: The `ffmpeg-static` binary installed locally is macOS ARM64. Vercel serverless functions run Linux x86_64, so the static binary may fail there. The `findFfmpeg()` helper tries system `ffmpeg` first, then falls back to the static binary. If Vercel does not provide a system `ffmpeg`, the upload endpoint will fail in production. Verify by testing the deployed `/api/audio/upload` endpoint.
+- ~~ffmpeg on Vercel~~ (obsolete — Vercel retired; app runs locally where `findFfmpeg()` uses system `ffmpeg` first, then the `ffmpeg-static` fallback)
 
 ## How to test audio upload
 ```bash
-curl -X POST https://YOUR_VERCEL_URL/api/audio/upload \
+curl -X POST http://127.0.0.1:5000/api/audio/upload \
   -F "audio=@test.wav" \
   -F "transcript=Audio upload test" \
   -F "district=Tampa" \
