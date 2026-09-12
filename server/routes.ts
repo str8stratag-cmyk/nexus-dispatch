@@ -572,6 +572,29 @@ export async function registerRoutes(
         const DEDUP_RADIUS_M = 500;
         const norm = (s: string | null | undefined) =>
           (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        // Road Mention review prompts: one per road per 15 minutes. These name
+        // a major road without a crash keyword, so busy corridors re-alert
+        // constantly (Florida Ave fired 28x in 24h); a repeat mention of the
+        // same road within minutes adds nothing new. Keyworded dispatches are
+        // unaffected — only keyword-less mentions dedupe here. Road mentions
+        // stay exempt from the incident dedup below — this cooldown is their
+        // only suppression.
+        if (parsed.signalType === "Road Mention") {
+          const ROAD_MENTION_COOLDOWN_MS = 15 * 60 * 1000;
+          const roadKey = norm(parsed.address || "") || norm(parsed.crossStreet || "");
+          const roadCutoff = Date.now() - ROAD_MENTION_COOLDOWN_MS;
+          if (roadKey) {
+            const recentSameRoad = (await storage.getEvents()).find((e) => {
+              if (e.signalType !== "Road Mention") return false;
+              if (e.status !== "active" && e.status !== "accepted") return false;
+              if (new Date(e.createdAt).getTime() < roadCutoff) return false;
+              return norm(e.address || "") === roadKey || norm(e.crossStreet || "") === roadKey;
+            });
+            if (recentSameRoad) {
+              return res.status(200).json({ duplicate: true, event: recentSameRoad });
+            }
+          }
+        }
         const crashClass = new Set(["mva", "mvc", "signal 4", "signal4", "10 50"]);
         const sameIncidentType = (a: string, b: string) => {
           const na = norm(a);
@@ -703,6 +726,28 @@ export async function registerRoutes(
       res.status(500).json({ message: err.message });
     }
   });
+
+  // Housekeeping: Road Mention review prompts go stale fast — dispatchers
+  // either listen back immediately or never. Auto-resolve them after 90 min
+  // so the board doesn't accumulate dead prompts.
+  const roadMentionSweeper = setInterval(async () => {
+    try {
+      const staleBefore = new Date(Date.now() - 90 * 60 * 1000);
+      for (const e of await storage.getEvents()) {
+        if (
+          e.signalType === "Road Mention" &&
+          e.status === "active" &&
+          new Date(e.createdAt) < staleBefore
+        ) {
+          const updated = await storage.updateEventStatus(e.id, "resolved");
+          if (updated) broadcastEvent(updated);
+        }
+      }
+    } catch (err) {
+      console.error("road mention sweeper failed:", err);
+    }
+  }, 5 * 60 * 1000);
+  roadMentionSweeper.unref();
 
   // Geocode an address. Use Geoapify when configured, otherwise fall back to
   // OpenStreetMap Nominatim.
