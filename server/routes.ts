@@ -939,12 +939,6 @@ function formatTelegramMessage(event: DispatchEvent, options: FormatOptions = {}
   msg += `\n<b>📝 Transcript (for verification):</b>\n<i>${escapeHtml(event.transcript)}</i>\n`;
   msg += `\n<i>Posted: ${new Date(event.createdAt).toLocaleString()}</i>`;
 
-  if (event.isManual) {
-    msg += event.source === "Manual Dispatch"
-      ? `\n<b>Source:</b> Manual Dispatch`
-      : `\n<b>Source:</b> TERMINAL`;
-  }
-
   return msg;
 }
 
