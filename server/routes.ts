@@ -512,6 +512,9 @@ export async function registerRoutes(
   app.post("/api/dispatch", dispatchLimiter, async (req, res) => {
     try {
       const parsed = insertDispatchEventSchema.parse(req.body);
+      // skipDedup is an intake-only flag (see schema) — keep it out of the
+      // stored event document.
+      const { skipDedup, ...eventFields } = parsed;
 
       // Auto-dispatches without a real address are usually TV/noise false positives.
       // Manual dispatches can still be created without an address.
@@ -562,9 +565,9 @@ export async function registerRoutes(
       // Suppress near-duplicate dispatches. The same incident gets
       // re-broadcast on the radio for hours; without this, each broadcast
       // creates a fresh event and Telegram alert for the same call.
-      // Applies to feed events and reconciler (DISP 3) output; only the
-      // manual entry form is exempt so dispatchers can always log a call.
-      if (parsed.source !== "Manual Dispatch") {
+      // Applies to feed events and reconciler (DISP 3) output. The manual
+      // entry form sets skipDedup so dispatchers can always log a call.
+      if (!skipDedup) {
         const DEDUP_WINDOW_MS = 30 * 60 * 1000;
         const DEDUP_RADIUS_M = 500;
         const norm = (s: string | null | undefined) =>
@@ -646,7 +649,7 @@ export async function registerRoutes(
         }
       }
 
-      let event = await storage.createEvent({ ...parsed, lat, lng, geocodedRoad, locationApprox: isBareRoadName(parsed.address) });
+      let event = await storage.createEvent({ ...eventFields, lat, lng, geocodedRoad, locationApprox: isBareRoadName(parsed.address) });
       broadcastEvent(event);
 
       // Send to Telegram if configured
