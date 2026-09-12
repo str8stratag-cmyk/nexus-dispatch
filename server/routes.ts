@@ -467,11 +467,5 @@ function formatTelegramMessage(event: any): string {
   msg += `\n<b>Transcript:</b>\n<i>${escapeHtml(event.transcript)}</i>\n`;
   msg += `\n<b>Time:</b> ${new Date(event.createdAt).toLocaleString()}`;
 
-  if (event.isManual) {
-    msg += event.source === "Manual Dispatch"
-      ? `\n<b>Source:</b> Manual Dispatch`
-      : `\n<b>Source:</b> TERMINAL`;
-  }
-
   return msg;
 }
