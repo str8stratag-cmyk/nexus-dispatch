@@ -46,6 +46,10 @@ export const insertDispatchEventSchema = z.object({
   geocodedRoad: z.string().nullable().optional(),
   whisperModel: z.string().nullable().optional(),
   locationApprox: z.boolean().default(false),
+  // Intake-only flag: when true, skip the near-duplicate suppression below.
+  // Used by the manual entry form so dispatchers can always log a call.
+  // Stripped before the event is stored.
+  skipDedup: z.boolean().optional(),
 });
 
 export const insertSettingsSchema = z.object({
