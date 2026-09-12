@@ -18,6 +18,18 @@ function clean(value: string): string {
   return value.replace(/\s+/g, " ").replace(/[.,;]+$/, "").trim();
 }
 
+// Whisper mishearings of Dale Mabry (user report 2026-09-11: "dealt maybury
+// highway"). Corrected before matching so the street parser sees the real name.
+const ROAD_HOMOPHONES: [RegExp, string][] = [
+  [/\bdealt\s+maybury\b/gi, "Dale Mabry"],
+  [/\bdale\s+maybury\b/gi, "Dale Mabry"],
+  [/\bdale\s+mayberry\b/gi, "Dale Mabry"],
+  [/\bdealt\s+mabry\b/gi, "Dale Mabry"],
+  [/\bdale\s+mason\b/gi, "Dale Mabry"],
+  [/\bmaybury\b/gi, "Mabry"],
+  [/\bhillsbough\b/gi, "Hillsborough"],
+];
+
 export interface ExtractedAddress {
   address: string | null;
   crossStreet: string | null;
@@ -26,7 +38,10 @@ export interface ExtractedAddress {
 export function extractAddress(transcript: string): ExtractedAddress {
   if (!transcript) return { address: null, crossStreet: null };
 
-  const text = transcript.replace(/\s+/g, " ");
+  let text = transcript.replace(/\s+/g, " ");
+  for (const [pattern, replacement] of ROAD_HOMOPHONES) {
+    text = text.replace(pattern, replacement);
+  }
   const direct = text.match(DIRECT_ADDRESS_REGEX)?.[0];
   const cross = text.match(CROSS_ADDRESS_REGEX)?.[1];
 

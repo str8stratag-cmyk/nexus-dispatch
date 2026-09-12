@@ -13,9 +13,10 @@ import { SIGNAL_TYPES } from "@/lib/constants";
 
 interface ManualDispatchProps {
   districts: string[];
+  sourceName: string;
 }
 
-export default function ManualDispatch({ districts }: ManualDispatchProps) {
+export default function ManualDispatch({ districts, sourceName }: ManualDispatchProps) {
   const [signalType, setSignalType] = useState("");
   const [address, setAddress] = useState("");
   const [description, setDescription] = useState("");
@@ -58,7 +59,7 @@ export default function ManualDispatch({ districts }: ManualDispatchProps) {
     }
 
     dispatchMutation.mutate({
-      transcript: `Manual dispatch: ${signalType} — ${description}`,
+      transcript: `${signalType} — ${description}`,
       keywords: JSON.stringify([{ keyword: signalType, signalType }]),
       address: address || null,
       lat: null,
@@ -66,7 +67,7 @@ export default function ManualDispatch({ districts }: ManualDispatchProps) {
       signalType,
       description,
       district,
-      source: "Manual Dispatch",
+      source: sourceName || "Dispatch",
       status: "active",
       isManual: true,
     });

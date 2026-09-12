@@ -188,7 +188,7 @@ export default function DispatchPage() {
 
         {/* Manual Dispatch Tab */}
         <TabsContent value="manual" className="flex-1 min-h-0 overflow-y-auto mt-2">
-          <ManualDispatch districts={districts} />
+          <ManualDispatch districts={districts} sourceName={sourceName} />
         </TabsContent>
 
         {/* Settings Tab */}
