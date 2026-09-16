@@ -5,6 +5,7 @@ interface WhisperResponse {
   text: string;
   language: string;
   duration: number;
+  model?: string;
 }
 
 export async function transcribeAudio(
@@ -50,5 +51,25 @@ export async function transcribeAudio(
     text: result.text,
     language: typeof result.language === "string" ? result.language : "en",
     duration: typeof result.duration === "number" ? result.duration : 0,
+    model: typeof result.model === "string" ? result.model : undefined,
   };
+}
+
+// Cached model name of the local Whisper service (from /health). Used to stamp
+// dispatch events with which model produced them (fleet accuracy comparison).
+let cachedWhisperModel: string | undefined;
+let whisperModelPromise: Promise<string | undefined> | undefined;
+
+export function getWhisperModel(): Promise<string | undefined> {
+  if (cachedWhisperModel) return Promise.resolve(cachedWhisperModel);
+  whisperModelPromise ??= fetch(`${WHISPER_SERVICE_URL}/health`, {
+    signal: AbortSignal.timeout(10_000),
+  })
+    .then((res) => (res.ok ? res.json() : undefined))
+    .then((health: { model?: string } | undefined) => {
+      cachedWhisperModel = typeof health?.model === "string" ? health.model : undefined;
+      return cachedWhisperModel;
+    })
+    .catch(() => undefined);
+  return whisperModelPromise;
 }

@@ -96,6 +96,7 @@ async def transcribe(
             "text": " ".join(segment["text"] for segment in result_segments),
             "language": info.language,
             "duration": info.duration,
+            "model": MODEL_NAME,
             "segments": result_segments,
             "dropped_segments": dropped_segments,
         }
