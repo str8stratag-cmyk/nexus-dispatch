@@ -18,6 +18,7 @@ export interface DispatchEvent {
   telegramMessageId: string | null;
   geocodedRoad: string | null;
   locationApprox: boolean;
+  whisperModel: string | null;
   createdAt: string;
 }
 
@@ -48,6 +49,7 @@ export const insertDispatchEventSchema = z.object({
   // Used by the manual entry form so dispatchers can always log a call.
   // Stripped before the event is stored.
   skipDedup: z.boolean().optional(),
+  whisperModel: z.string().nullable().optional(),
 });
 
 export const insertSettingsSchema = z.object({
