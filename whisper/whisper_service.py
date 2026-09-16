@@ -53,12 +53,14 @@ async def transcribe(
         segments, info = model.transcribe(
             temp_path,
             language="en",
-            beam_size=1,
-            best_of=1,
+            beam_size=5,
+            best_of=5,
+            temperature=(0.0, 0.2, 0.4),
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 400},
+            vad_parameters={"min_silence_duration_ms": 700},
             initial_prompt=prompt or None,
-            condition_on_previous_text=False,
+            condition_on_previous_text=True,
+            compression_ratio_threshold=2.4,
         )
         result_segments = [
             {"start": segment.start, "end": segment.end, "text": segment.text.strip()}

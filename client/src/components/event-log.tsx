@@ -9,8 +9,9 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { CheckCircle2, Radio, MapPin, Clock, Download } from "lucide-react";
+import { CheckCircle2, Radio, MapPin, Clock, Download, ShieldAlert } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useEventsStream } from "@/hooks/use-events-stream";
 
 interface DispatchEventRow {
   id: number;
@@ -26,6 +27,7 @@ interface DispatchEventRow {
   source: string;
   status: string;
   isManual: boolean;
+  geocodedRoad: string | null;
   createdAt: string;
 }
 
@@ -38,6 +40,7 @@ function eventsToCSV(events: DispatchEventRow[]): string {
     "Source",
     "Address",
     "Cross Street",
+    "Road X-Ref",
     "Latitude",
     "Longitude",
     "Status",
@@ -60,6 +63,7 @@ function eventsToCSV(events: DispatchEventRow[]): string {
       e.source || "",
       e.address || "",
       e.crossStreet || "",
+      e.geocodedRoad || "",
       e.lat ?? "",
       e.lng ?? "",
       e.status || "",
@@ -103,7 +107,18 @@ export default function EventLog() {
       const res = await apiRequest("GET", "/api/events");
       return res.json() as Promise<DispatchEventRow[]>;
     },
-    refetchInterval: 5000,
+    refetchInterval: 30_000,
+  });
+
+  useEventsStream();
+
+  const acceptMutation = useMutation({
+    mutationFn: async (id: number) => {
+      return apiRequest("PATCH", `/api/events/${id}/status`, { status: "accepted" });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/events"] });
+    },
   });
 
   const resolveMutation = useMutation({
@@ -116,6 +131,7 @@ export default function EventLog() {
   });
 
   const activeEvents = events.filter((e) => e.status === "active");
+  const acceptedEvents = events.filter((e) => e.status === "accepted");
   const resolvedEvents = events.filter((e) => e.status === "resolved");
 
   const handleExportCSV = () => {
@@ -149,9 +165,16 @@ export default function EventLog() {
             Dispatch Events
           </span>
           <div className="flex items-center gap-2">
-            <Badge variant="outline" className="text-xs">
-              {activeEvents.length} active
-            </Badge>
+            <div className="flex items-center gap-1.5">
+              <Badge variant="outline" className="text-xs text-emerald-600 border-emerald-600/30 bg-emerald-600/10">
+                {activeEvents.length} active
+              </Badge>
+              {acceptedEvents.length > 0 && (
+                <Badge variant="outline" className="text-xs text-red-600 border-red-600/30 bg-red-600/10">
+                  {acceptedEvents.length} accepted
+                </Badge>
+              )}
+            </div>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -189,11 +212,11 @@ export default function EventLog() {
         {activeEvents.map((event) => (
           <div
             key={event.id}
-            className="rounded-md border border-orange-900/40 bg-orange-950/10 p-2 space-y-1"
+            className="group rounded-r-lg border border-l-[3px] border-emerald-900/30 border-l-emerald-500 bg-emerald-950/10 p-3 space-y-2 transition-all hover:translate-x-1 hover:bg-emerald-950/20 hover:shadow-md"
             data-testid={`event-${event.id}`}
           >
             <div className="flex items-center justify-between">
-              <Badge variant="default" className="text-[10px] bg-orange-600/80">
+              <Badge variant="default" className="text-[10px] bg-emerald-600/90 hover:bg-emerald-600">
                 {event.signalType || "Unknown"}
               </Badge>
               <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
@@ -211,6 +234,73 @@ export default function EventLog() {
                 {event.crossStreet ? `${event.address} & ${event.crossStreet}` : event.address}
               </div>
             )}
+            {event.geocodedRoad && (
+              <div className="text-[11px] text-amber-500">
+                🛣️ Road x-ref: {event.geocodedRoad}
+              </div>
+            )}
+            {event.description && (
+              <div className="text-xs text-muted-foreground">{event.description}</div>
+            )}
+            {event.transcript && (
+              <div className="line-clamp-2 border-l border-border/70 pl-2 text-[11px] leading-relaxed text-muted-foreground">
+                {event.transcript}
+              </div>
+            )}
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-mono text-muted-foreground">
+                {event.district} • {event.source}
+                {event.isManual && (event.source === "Manual Dispatch" ? " • Manual" : " • TERMINAL")}
+              </span>
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 px-2 text-[10px] text-emerald-600 hover:text-emerald-500 hover:bg-emerald-950/20"
+                  onClick={() => acceptMutation.mutate(event.id)}
+                  data-testid={`accept-event-${event.id}`}
+                >
+                  <ShieldAlert className="h-3 w-3 mr-1" /> Accept
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 px-2 text-[10px]"
+                  onClick={() => resolveMutation.mutate(event.id)}
+                  data-testid={`resolve-event-${event.id}`}
+                >
+                  <CheckCircle2 className="h-3 w-3 mr-1" /> Resolve
+                </Button>
+              </div>
+            </div>
+          </div>
+        ))}
+        {acceptedEvents.map((event) => (
+          <div
+            key={event.id}
+            className="rounded-r-lg border border-l-[3px] border-red-900/40 border-l-red-500 bg-red-950/10 p-3 space-y-2 opacity-90"
+            data-testid={`accepted-event-${event.id}`}
+          >
+            <div className="flex items-center justify-between">
+              <Badge variant="default" className="text-[10px] bg-red-600/90 hover:bg-red-600">
+                {event.signalType || "Unknown"}
+              </Badge>
+              <div className="flex items-center gap-1 text-[10px] text-red-400 font-semibold uppercase tracking-wider">
+                <ShieldAlert className="h-3 w-3" />
+                Accepted
+              </div>
+            </div>
+            {event.address && (
+              <div className="flex items-center gap-1 text-xs font-mono text-foreground">
+                <MapPin className="h-3 w-3 text-red-400 shrink-0" />
+                {event.crossStreet ? `${event.address} & ${event.crossStreet}` : event.address}
+              </div>
+            )}
+            {event.geocodedRoad && (
+              <div className="text-[11px] text-amber-500">
+                🛣️ Road x-ref: {event.geocodedRoad}
+              </div>
+            )}
             {event.description && (
               <div className="text-xs text-muted-foreground">{event.description}</div>
             )}
@@ -224,7 +314,7 @@ export default function EventLog() {
                 variant="ghost"
                 className="h-6 px-2 text-[10px]"
                 onClick={() => resolveMutation.mutate(event.id)}
-                data-testid={`resolve-event-${event.id}`}
+                data-testid={`resolve-accepted-event-${event.id}`}
               >
                 <CheckCircle2 className="h-3 w-3 mr-1" /> Resolve
               </Button>
@@ -234,7 +324,7 @@ export default function EventLog() {
         {resolvedEvents.slice(0, 10).map((event) => (
           <div
             key={event.id}
-            className="rounded-md border border-border/40 bg-muted/20 p-2 space-y-1 opacity-60"
+            className="rounded-r-lg border border-l-[3px] border-border/40 border-l-muted-foreground/50 bg-muted/20 p-3 space-y-1 opacity-60"
           >
             <div className="flex items-center justify-between">
               <Badge variant="outline" className="text-[10px]">

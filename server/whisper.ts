@@ -13,8 +13,8 @@ export async function transcribeAudio(
   keywords: string[]
 ): Promise<WhisperResponse> {
   const prompt = keywords.length
-    ? `Dispatch radio terminology: ${keywords.join(", ")}.`
-    : "Dispatch radio terminology.";
+    ? `Dispatch radio: Signal 4, MVA at Dale Mabry and Linebaugh. Unit responding. ${keywords.slice(0, 8).join(", ")}.`
+    : "Dispatch radio: Signal 4, MVA at Dale Mabry and Linebaugh. Unit responding.";
   const body = new FormData();
   body.set("audio", new Blob([audio]), filename);
   body.set("prompt", prompt);
