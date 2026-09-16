@@ -2,11 +2,13 @@ import express, { type Express, type Request, type Response, type NextFunction }
 import type { Server } from "node:http";
 import { hostname } from "node:os";
 import rateLimit from "express-rate-limit";
+import { ObjectId } from "mongodb";
 import { storage } from "./storage";
-import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent } from "@shared/schema";
+import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent, type InsertDispatchEvent } from "@shared/schema";
 import { normalizeKeywordEntry } from "@shared/keywords";
-import { isMongoConfigured } from "./mongodb";
+import { getDatabase, isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
+import { getWhisperModel } from "./whisper";
 
 const sseClients = new Set<Response>();
 
@@ -108,9 +110,13 @@ const FLORIDA_BOUNDS: [number, number, number, number] = [-87.6, 24.5, -80.0, 31
 function getGeocodeQuery(address: string): string {
   const suffix = process.env.GEOCODE_SUFFIX?.trim() || DEFAULT_GEOCODE_SUFFIX;
   const normalized = address.trim();
-  // Don't double-append if the address already includes Tampa/FL context.
+  // Don't double-append if the address already includes Tampa/FL context. The
+  // FL/Florida match must anchor to the END of the address (", FL", ", Florida",
+  // optional ZIP) — a ROAD named Florida ("Florida Ave", "34th, Florida Ave")
+  // contains the substring but still needs the suffix, else Azure resolves
+  // out-of-state matches that the Florida bounds check then rejects.
   const lower = normalized.toLowerCase();
-  if (lower.includes("tampa") || lower.includes("florida") || lower.includes(", fl")) {
+  if (lower.includes("tampa") || /,\s*(fl|florida)(\s+\d{5})?\s*$/.test(lower)) {
     return normalized;
   }
   return `${normalized}, ${suffix}`;
@@ -121,11 +127,126 @@ function isInServiceArea(lat: number, lng: number): boolean {
   return lng >= west && lng <= east && lat >= south && lat <= north;
 }
 
+// Tampa corridors Whisper usually transcribes with NO street type ("NEBRASKA
+// AND ORCHID"). Azure resolves an intersection only when at least one side
+// carries a suffix — the bare query matched "Orchid Ln" miles from Nebraska
+// Ave. Canonicalize the names we know; unknown cross streets ("Orchid") are
+// left bare and still resolve once the other side is typed.
+const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
+  [/\bflorida(?:\s+ave(?:nue)?)?\b(?!\s+state)/gi, "Florida Ave"],
+  [/\bnebraska(?:\s+ave(?:nue)?)?\b/gi, "Nebraska Ave"],
+  [/\bhillsborough(?:\s+ave(?:nue)?)?\b(?!\s+county)/gi, "Hillsborough Ave"],
+  [/\bfowler(?:\s+ave(?:nue)?)?\b/gi, "Fowler Ave"],
+  [/\bfletcher(?:\s+ave(?:nue)?)?\b/gi, "Fletcher Ave"],
+  [/\bwaters(?:\s+ave(?:nue)?)?\b/gi, "Waters Ave"],
+  [/\bhimes(?:\s+ave(?:nue)?)?\b/gi, "Himes Ave"],
+  [/\bdale\s+mabry(?:\s+hwy|\s+highway)?\b/gi, "Dale Mabry Hwy"],
+  [/\bcolumbus(?:\s+ave(?:nue)?)?\b/gi, "Columbus Ave"],
+  [/\barmenia(?:\s+ave(?:nue)?)?\b/gi, "Armenia Ave"],
+  [/\bmacdill(?:\s+ave(?:nue)?)?\b/gi, "MacDill Ave"],
+  [/\bplatt(?:\s+st(?:reet)?)?\b/gi, "Platt St"],
+  [/\bchannelside(?:\s+dr(?:ive)?)?\b/gi, "Channelside Dr"],
+  [/\badamo(?:\s+dr(?:ive)?)?\b/gi, "Adamo Dr"],
+  [/\briverview(?:\s+dr(?:ive)?)?\b/gi, "Riverview Dr"],
+  [/\bbrandon(?:\s+blvd|\s+boulevard)?\b/gi, "Brandon Blvd"],
+  [/\bbearss(?:\s+ave(?:nue)?)?\b/gi, "Bearss Ave"],
+  [/\bgunn(?:\s+hwy|\s+highway)?\b/gi, "Gunn Hwy"],
+  [/\bbruce\s+b\s+downs(?:\s+blvd|\s+boulevard)?\b/gi, "Bruce B Downs Blvd"],
+  [/\behrlich(?:\s+rd|\s+road)?\b/gi, "Ehrlich Rd"],
+  [/\bosborne(?:\s+ave(?:nue)?)?\b/gi, "Osborne Ave"],
+  [/\bcomanche(?:\s+ave(?:nue)?)?\b/gi, "Comanche Ave"],
+  [/\bwilder(?:\s+ave(?:nue)?)?\b/gi, "Wilder Ave"],
+  [/\blivingston(?:\s+ave(?:nue)?)?\b/gi, "Livingston Ave"],
+  [/\bmemorial(?:\s+hwy|\s+highway)?\b(?!\s+parkway)/gi, "Memorial Highway"],
+  [/\b(?:dr\s+)?martin\s+luther\s+king(?:\s+jr)?(?:\s+blvd|\s+boulevard)?\b/gi, "Martin Luther King Jr Blvd"],
+  [/\bmlk\b/gi, "Martin Luther King Jr Blvd"],
+  [/\bbusch(?:\s+blvd|\s+boulevard)?\b(?!\s+gardens)/gi, "Busch Blvd"],
+  [/\bsligh(?:\s+ave(?:nue)?)?\b/gi, "Sligh Ave"],
+  [/\bkennedy(?:\s+blvd|\s+boulevard)?\b/gi, "Kennedy Blvd"],
+  [/\bbroadway(?:\s+ave(?:nue)?)?\b/gi, "Broadway Ave"],
+  [/\bbayshore(?:\s+blvd|\s+boulevard)?\b/gi, "Bayshore Blvd"],
+  [/\bwest\s+shore(?:\s+blvd|\s+boulevard)?\b/gi, "West Shore Blvd"],
+  [/\bgandy(?:\s+blvd|\s+boulevard)?\b/gi, "Gandy Blvd"],
+  [/\bbay\s+to\s+bay(?:\s+blvd|\s+boulevard)?\b/gi, "Bay to Bay Blvd"],
+  [/\bgandhi(?:\s+blvd|\s+boulevard)?\b/gi, "Gandy Blvd"],
+  [/\bosbou?rne(?:\s+ave(?:nue)?)?\b/gi, "Osborne Ave"],
+  [/\bgrady(?:\s+ave(?:nue)?)?\b/gi, "Grady Ave"],
+  [/\bmanhattan(?:\s+ave(?:nue)?)?\b/gi, "Manhattan Ave"],
+  [/\balva(?:\s+st(?:reet)?|\s+ave(?:nue)?)?\b/gi, "Alva St"],
+  [/\b15th(?:\s+st(?:reet)?)?\b/gi, "15th St"],
+  [/\b22nd(?:\s+st(?:reet)?)?\b/gi, "22nd St"],
+  [/\b30th(?:\s+st(?:reet)?)?\b/gi, "30th St"],
+  [/\b40th(?:\s+st(?:reet)?)?\b/gi, "40th St"],
+  [/\b50th(?:\s+st(?:reet)?)?\b/gi, "50th St"],
+  [/\b56th(?:\s+st(?:reet)?)?\b/gi, "56th St"],
+];
+
+// Joiners that separate the two roads of an intersection. Directionals act
+// as linkers in clipped radio speech ("north armenia west busch").
+const INTERSECTION_SPLIT_RE = /\s+(?:and|&|@|n|s|e|w|north|south|east|west)\s+/i;
+
+function canonicalizeKnownRoads(address: string): string {
+  let normalized = address;
+  for (const [pattern, replacement] of KNOWN_ROAD_CANONICAL) {
+    normalized = normalized.replace(pattern, replacement);
+  }
+  // Azure documents "&" for intersections; bare "and" can resolve to the
+  // city centroid. Rewrite only single-linker shapes where both sides still
+  // name a road ("22nd St South" must not become "22nd St & South").
+  const parts = normalized.split(INTERSECTION_SPLIT_RE).map((p) => p.trim()).filter(Boolean);
+  if (
+    parts.length === 2 &&
+    !/[&@]/.test(normalized) &&
+    parts.every((p) => roadNameStem(p))
+  ) {
+    normalized = normalized.replace(INTERSECTION_SPLIT_RE, " & ");
+  }
+  return normalized;
+}
+
+const STEM_SUFFIX_RE = /\b(?:ave|avenue|st|street|rd|road|blvd|boulevard|dr|drive|ln|lane|ct|court|cir|circle|hwy|highway|pkwy|parkway|pl|place|ter|terrace|trl|trail|way|rdg|ridge|expy|expressway|run|path|row)\b\.?/gi;
+const STEM_DIR_RE = /^(?:n|s|e|w|ne|nw|se|sw|north|south|east|west)\s+/i;
+// Street numbers and dispatch chatter that leak into extracted addresses —
+// stripped before comparing the queried road name against the match so
+// "KENNEDY AND ALVA HONDA VS UNKNOWN" still validates against "Alva St".
+const STEM_NOISE_RE = /\b(?:\d+[a-z]?|car|cars|mvc|mva|vs|signal|signals|unknown|unkown|unknow|injury|injuries|involved|involving|invlving|rollover|airbags|deployed|block|with|minor|honda|toyota|ford|chevy|chevrolet|nissan|dodge|hyundai|mazda|jeep|bmw|audi|kia|tesla|lexus|acura|gmc|subaru|chrysler|ram)\b/gi;
+
+function roadNameStem(part: string): string {
+  return part
+    .toLowerCase()
+    .replace(STEM_SUFFIX_RE, "")
+    .replace(STEM_DIR_RE, "")
+    .replace(STEM_NOISE_RE, "")
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
   const azureKey = process.env.AZURE_MAPS_KEY?.trim();
   const geoapifyKey = process.env.GEOAPIFY_API_KEY?.trim();
   const boundingBox = process.env.GEOAPIFY_BOUNDING_BOX?.trim();
-  const query = getGeocodeQuery(address);
+  const normalized = canonicalizeKnownRoads(address);
+  const query = getGeocodeQuery(normalized);
+  // The matched street must contain every road name in the query — a match
+  // without one means the provider silently dropped it and fuzzy-matched a
+  // fallback (junk addresses used to pin near E Twiggs St miles from any
+  // road in the call). Rejected results fall through to the next provider.
+  const queryStems = normalized
+    .split(INTERSECTION_SPLIT_RE)
+    .map((p) => roadNameStem(p))
+    .filter((s) => s.length >= 2);
+  // Route-only queries ("I-20") reduce to a meaningless stem after number
+  // stripping — validate them against the route designation instead, so a
+  // city fallback can't stand in for an interstate that isn't there.
+  const routeOnly = normalized.match(/^\s*(i[- ]?\d{1,3}|us[- ]?\d{1,4}|sr[- ]?\d{1,4}|state road \d{1,4}|route \d{1,4})\s*$/i);
+  const validateMatch = (streetName: string): boolean => {
+    if (routeOnly) {
+      const route = routeOnly[1].toLowerCase();
+      return streetName.includes(route) || streetName.includes(route.replace(/\s+/g, "-"));
+    }
+    return queryStems.length === 0 || queryStems.every((s) => streetName.includes(s));
+  };
 
   // 1. Try Azure Maps (primary)
   if (azureKey) {
@@ -149,16 +270,20 @@ async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
         const result = data.features?.[0];
         const [lng, lat] = result?.geometry?.coordinates ?? [];
         if (Number.isFinite(lat) && Number.isFinite(lng)) {
-          if (!isInServiceArea(lat, lng)) {
+          const matchedStreet = `${result?.properties?.address?.streetName || ""} ${result?.properties?.address?.street || ""} ${result?.properties?.address?.addressLine || ""} ${result?.properties?.address?.formattedAddress || ""}`.toLowerCase();
+          if (!validateMatch(matchedStreet)) {
+            console.warn(`Azure match lacks queried road for "${address}" (query: "${query}") -> ${result?.properties?.address?.formattedAddress}`);
+          } else if (!isInServiceArea(lat, lng)) {
             console.warn(`Geocoded "${address}" outside Florida: ${lat},${lng}`);
             return null;
+          } else {
+            return {
+              lat,
+              lng,
+              display_name: result.properties?.address?.formattedAddress ?? address,
+              provider: "azure-maps",
+            };
           }
-          return {
-            lat,
-            lng,
-            display_name: result.properties?.address?.formattedAddress ?? address,
-            provider: "azure-maps",
-          };
         }
       } else {
         console.error("Azure Maps geocoding failed:", azureRes.status, await azureRes.text());
@@ -199,23 +324,27 @@ async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
         const result = data.features?.[0];
         const [lng, lat] = result?.geometry?.coordinates ?? [];
         if (Number.isFinite(lat) && Number.isFinite(lng)) {
-          if (
+          const props = result?.properties ?? {};
+          const matchedStreet = `${props.street || ""} ${props.road || ""} ${props.name || ""} ${props.address_line1 || ""} ${props.formatted || ""}`.toLowerCase();
+          if (!validateMatch(matchedStreet)) {
+            console.warn(`Geoapify match lacks queried road for "${address}" (query: "${query}") -> ${props.formatted}`);
+          } else if (
             bounds &&
             (lng < bounds[0] || lng > bounds[2] || lat < bounds[1] || lat > bounds[3])
           ) {
             console.warn(`Geocoded "${address}" outside configured bounding box: ${lat},${lng}`);
             return null;
-          }
-          if (!isInServiceArea(lat, lng)) {
+          } else if (!isInServiceArea(lat, lng)) {
             console.warn(`Geocoded "${address}" outside Florida: ${lat},${lng}`);
             return null;
+          } else {
+            return {
+              lat,
+              lng,
+              display_name: props.formatted ?? address,
+              provider: "geoapify",
+            };
           }
-          return {
-            lat,
-            lng,
-            display_name: result.properties?.formatted ?? address,
-            provider: "geoapify",
-          };
         }
       } else {
         console.error("Geoapify geocoding failed:", geoapifyRes.status, await geoapifyRes.text());
@@ -239,16 +368,20 @@ async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
     if (Array.isArray(data) && data.length > 0) {
       const lat = parseFloat(data[0].lat);
       const lng = parseFloat(data[0].lon);
-      if (!isInServiceArea(lat, lng)) {
+      const matchedStreet = `${data[0].address?.road || ""} ${data[0].address?.street || ""} ${data[0].address?.name || ""} ${data[0].display_name || ""}`.toLowerCase();
+      if (!validateMatch(matchedStreet)) {
+        console.warn(`Nominatim match lacks queried road for "${address}" (query: "${query}") -> ${data[0].display_name}`);
+      } else if (!isInServiceArea(lat, lng)) {
         console.warn(`Geocoded "${address}" outside Florida: ${lat},${lng}`);
         return null;
+      } else {
+        return {
+          lat,
+          lng,
+          display_name: data[0].display_name,
+          provider: "nominatim",
+        };
       }
-      return {
-        lat,
-        lng,
-        display_name: data[0].display_name,
-        provider: "nominatim",
-      };
     }
   } catch (err: any) {
     console.error("Nominatim geocoding failed:", err);
@@ -458,6 +591,61 @@ function isLikelyRealDispatch(transcript: string, address: string | null | undef
   return hasSignal && hasRealAddress;
 }
 
+// Road Mentions (major road named, no crash keyword) are review prompts, not
+// dispatches — on their own they flood the feed (~half of all events). Tune
+// (2026-09-12): require a second signal — dispatch context in the same
+// transmission, or the same road already active in a recent event.
+// Anything else is quarantined for review, not dropped.
+const ROAD_MENTION_WINDOW_MS = 45 * 60 * 1000;
+const ROAD_MENTION_CONTEXT_RE =
+  /\b(units?|respond\w*|en route|copy(?: that)?|dispatch\w*|emergency|callers?|complainant|victims?|witness(?:es)?|suspects?|blocking|blocked|lanes?|10-?\d{1,2}|signal[- ]?\d{1,2}|shots? fired|smoke)\b/i;
+
+function normalizeRoadName(s: string | null | undefined): string {
+  return (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+async function roadMentionedRecently(address: string | null | undefined): Promise<boolean> {
+  const road = normalizeRoadName(address);
+  if (road.length < 4) return false;
+  const cutoff = Date.now() - ROAD_MENTION_WINDOW_MS;
+  const events = await storage.getEvents(500);
+  return events.some((e) => {
+    if (e.status !== "active" && e.status !== "accepted") return false;
+    if (new Date(e.createdAt).getTime() < cutoff) return false;
+    const eAddr = normalizeRoadName(e.address);
+    return eAddr === road || eAddr.includes(road) || road.includes(eAddr);
+  });
+}
+
+// Rejected auto-dispatches go to a quarantine collection instead of being
+// silently dropped, so a real call killed by a false-positive gate (spam
+// filter, address resolution) can be reviewed and recovered afterwards.
+async function quarantineRejection(parsed: InsertDispatchEvent, reason: string): Promise<void> {
+  try {
+    const db = await getDatabase();
+    await db.collection("quarantinedDispatches").insertOne({
+      reason,
+      transcript: parsed.transcript,
+      address: parsed.address ?? null,
+      keywords: parsed.keywords ?? null,
+      source: parsed.source ?? null,
+      signalType: parsed.signalType ?? null,
+      whisperModel: parsed.whisperModel ?? null,
+      createdAt: new Date(),
+    });
+  } catch {
+    // Quarantine is best-effort; never block the rejection response on it.
+  }
+}
+
+function rejectAutoDispatch(res: Response, parsed: InsertDispatchEvent, reason: string) {
+  console.log(
+    `[quarantine] ${reason} :: transcript="${(parsed.transcript || "").slice(0, 140)}" :: address=${parsed.address || "(none)"} :: source=${parsed.source || "?"}`
+  );
+  void quarantineRejection(parsed, reason);
+  return res.status(400).json({ message: `Auto-dispatch rejected: ${reason}` });
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -508,13 +696,71 @@ export async function registerRoutes(
     });
   });
 
-  // Create a dispatch event (auto or manual)
-  app.post("/api/dispatch", dispatchLimiter, async (req, res) => {
+  // Quarantined auto-dispatches — clips rejected by the auto-dispatch gates
+  // (spam filter, unresolved address, TV audio...). Kept for review so a real
+  // call killed by a false positive can be inspected and restored.
+  app.get("/api/quarantine", async (req, res) => {
     try {
+      const limit = Math.min(parseInt(req.query.limit as string) || 200, 1000);
+      const reason = (req.query.reason as string) || "";
+      const db = await getDatabase();
+      const filter = reason ? { reason } : {};
+      const items = await db
+        .collection("quarantinedDispatches")
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .toArray();
+      res.json(items);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // Promote a quarantined item to a real dispatch event. It was rejected by
+  // the gates once, so create it as manual to bypass the auto-dispatch
+  // filters; a human pressing "restore" is the override.
+  app.post("/api/quarantine/:id/restore", async (req, res) => {
+    try {
+      const db = await getDatabase();
+      const doc = await db
+        .collection("quarantinedDispatches")
+        .findOne({ _id: new ObjectId(req.params.id) });
+      if (!doc) {
+        return res.status(404).json({ message: "Quarantined item not found" });
+      }
+      const event = await storage.createEvent({
+        transcript: String(doc.transcript ?? ""),
+        keywords: String(doc.keywords ?? "[]"),
+        address: doc.address ?? null,
+        signalType: doc.signalType ?? null,
+        district: "Unknown",
+        source: doc.source ?? "Unknown",
+        status: "active",
+        isManual: true,
+        whisperModel: doc.whisperModel ?? null,
+        locationApprox: false,
+      });
+      await db.collection("quarantinedDispatches").deleteOne({ _id: doc._id });
+      broadcastEvent(event);
+      res.json(event);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // Create a dispatch event (auto or manual)
+  app.post("/api/dispatch", dispatchLimiter, async (req, res) => {    try {
       const parsed = insertDispatchEventSchema.parse(req.body);
       // skipDedup is an intake-only flag (see schema) — keep it out of the
       // stored event document.
       const { skipDedup, ...eventFields } = parsed;
+
+      // Stamp which Whisper model produced this event (fleet accuracy comparison).
+      if (!parsed.whisperModel) {
+        const model = await getWhisperModel();
+        if (model) parsed.whisperModel = model;
+      }
 
       // Auto-dispatches without a real address are usually TV/noise false positives.
       // Manual dispatches can still be created without an address.
@@ -525,23 +771,36 @@ export async function registerRoutes(
           normalizeText(parsed.transcript).includes(p)
         );
         if (productionPhrase) {
-          return res.status(400).json({ message: `Auto-dispatch rejected: production audio (${productionPhrase})` });
+          return rejectAutoDispatch(res, parsed, `production audio (${productionPhrase})`);
         }
         // Radio checks that count through the signal numbers.
         if (isSignalCountingRun(parsed.transcript)) {
-          return res.status(400).json({ message: "Auto-dispatch rejected: signal counting run (radio check)" });
+          return rejectAutoDispatch(res, parsed, "signal counting run (radio check)");
         }
         // A strong dispatch signal + real address overrides noise phrases
         // (e.g. TV audio before the actual call).
         const likelyReal = isLikelyRealDispatch(parsed.transcript, parsed.address);
         if (containsTvVideoPhrase(parsed.transcript) && !likelyReal) {
-          return res.status(400).json({ message: "Auto-dispatch rejected: detected TV/video audio" });
+          return rejectAutoDispatch(res, parsed, "detected TV/video audio");
         }
-        if (hasKeywordSpam(parsed.transcript) && !likelyReal) {
-          return res.status(400).json({ message: "Auto-dispatch rejected: keyword spam detected" });
+        // Repeated words ("yeah yeah yeah yeah") are normal in radio chatter,
+        // so the spam filter is laxer than the TV filter: either a dispatch
+        // signal or a real address is enough to override it.
+        const hasSpamOverride =
+          DISPATCH_SIGNALS.some((s) => normalizeText(parsed.transcript).includes(s)) ||
+          !isInvalidAutoAddress(parsed.address);
+        if (hasKeywordSpam(parsed.transcript) && !hasSpamOverride) {
+          return rejectAutoDispatch(res, parsed, "keyword spam detected");
         }
         if (isInvalidAutoAddress(parsed.address)) {
-          return res.status(400).json({ message: "Auto-dispatch requires a resolved address" });
+          return rejectAutoDispatch(res, parsed, "requires a resolved address");
+        }
+        // Road Mentions need a second signal (see roadMentionedRecently).
+        if (parsed.signalType === "Road Mention") {
+          const hasContext = ROAD_MENTION_CONTEXT_RE.test(parsed.transcript);
+          if (!hasContext && !(await roadMentionedRecently(parsed.address))) {
+            return rejectAutoDispatch(res, parsed, "road mention lacks corroborating signal");
+          }
         }
       }
 
@@ -749,8 +1008,8 @@ export async function registerRoutes(
   }, 5 * 60 * 1000);
   roadMentionSweeper.unref();
 
-  // Geocode an address. Use Geoapify when configured, otherwise fall back to
-  // OpenStreetMap Nominatim.
+  // Geocode an address via geocodeAddress: Azure Maps (primary), then
+  // Geoapify, then OpenStreetMap Nominatim as final fallback.
   app.get("/api/geocode", async (req, res) => {
     const address = req.query.q as string;
     if (!address) {
