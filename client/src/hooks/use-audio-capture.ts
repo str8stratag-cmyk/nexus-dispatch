@@ -68,7 +68,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     form.set("audio", audio, "dispatch.webm");
     form.set(
       "prompt",
-      keywords.length ? `Dispatch radio terminology: ${keywords.join(", ")}.` : "Dispatch radio terminology."
+      keywords.length ? `Dispatch radio terminology: ${keywords.join(", ")}. Local street names: Olla.` : "Dispatch radio terminology. Local street names: Olla."
     );
 
     try {

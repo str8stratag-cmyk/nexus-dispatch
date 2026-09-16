@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 import time
 from hmac import compare_digest
@@ -18,6 +19,41 @@ API_KEY = os.getenv("WHISPER_API_KEY")
 # buffer — oldest files are deleted past WHISPER_SAVE_MAX files.
 SAVE_AUDIO_DIR = os.getenv("WHISPER_SAVE_AUDIO") or None
 SAVE_AUDIO_MAX = int(os.getenv("WHISPER_SAVE_MAX", "200"))
+
+# Known homophone corrections: word-boundary, case-insensitive; the
+# replacement always uses the intended casing. Add entries here when call
+# review surfaces a recurring mis-transcription (e.g. the street "Olla"
+# by Men's World comes out as "alla").
+HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\balla\b", re.IGNORECASE), "Olla"),
+]
+
+
+def apply_homophone_fixes(text: str) -> str:
+    for pattern, replacement in HOMOPHONE_FIXES:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def trim_repetition_loops(text: str) -> str:
+    # Whisper stutter-loops on squelch/static at the tail of a transmission
+    # ("...copy four, nba, nba, nba, nba"). Any word repeated 4+ times in a
+    # row is loop junk — natural radio speech doubles/triples ("thank you,
+    # thank you") are left alone.
+    words = text.split()
+    normalized = [re.sub(r"\W+", "", word).lower() for word in words]
+    trimmed: list[str] = []
+    i = 0
+    while i < len(words):
+        run = 1
+        while i + run < len(words) and normalized[i + run] == normalized[i]:
+            run += 1
+        if run >= 4:
+            i += run
+            continue
+        trimmed.extend(words[i : i + run])
+        i += run
+    return " ".join(trimmed)
 
 app = FastAPI(title="Dispatch Monitor Whisper")
 app.add_middleware(
@@ -76,10 +112,14 @@ async def transcribe(
         for segment in segments:
             if not segment.text.strip():
                 continue
+            text = trim_repetition_loops(apply_homophone_fixes(segment.text.strip()))
+            if not text:
+                # Segment was entirely a repetition loop.
+                continue
             entry = {
                 "start": segment.start,
                 "end": segment.end,
-                "text": segment.text.strip(),
+                "text": text,
                 "no_speech_prob": round(segment.no_speech_prob, 4),
                 "avg_logprob": round(segment.avg_logprob, 4),
                 "compression_ratio": round(segment.compression_ratio, 4),
