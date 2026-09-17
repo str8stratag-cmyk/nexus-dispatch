@@ -52,9 +52,48 @@ function Test-WhisperAlive() {
     }
 }
 
+function Test-AppAlive($port) {
+    # Hit the DB-backed route — /api/health stays 200 even when Mongo is wedged.
+    try {
+        $res = Invoke-WebRequest -Uri "http://127.0.0.1:$port/api/events?limit=1" -Method GET -TimeoutSec 15 -UseBasicParsing
+        return $res.StatusCode -eq 200
+    } catch {
+        return $false
+    }
+}
+
+function Stop-StrayWhisper() {
+    # Kill whisper_service python processes that don't hold the port (stale
+    # duplicates wedge the service by squatting on memory while a new instance
+    # serves, or by holding the port while wedged).
+    Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object {
+        $_.CommandLine -like "*uvicorn whisper_service:app*"
+    } | ForEach-Object {
+        Write-Host "$(Get-Date) Killing stray whisper python PID $($_.ProcessId)" -ForegroundColor DarkYellow
+        taskkill /PID $_.ProcessId /F | Out-Null
+    }
+}
+
+# Per-app restart throttling: minimum gap between restarts of one app
+$minAppRestartGap = [TimeSpan]::FromMinutes(2)
+$lastAppRestart = @{ "Dispatch Monitor" = [DateTime]::MinValue; "Nexus Dispatch" = [DateTime]::MinValue }
+
+function Restart-AppIfDead($title, $directory, $port, $command) {
+    if (Test-AppAlive $port) { return }
+    $elapsed = Get-Date - $lastAppRestart[$title]
+    if ($elapsed -lt $minAppRestartGap) {
+        Write-Host "$(Get-Date) $title is down but was restarted $([int]$elapsed.TotalSeconds)s ago; skipping this cycle." -ForegroundColor DarkYellow
+        return
+    }
+    Write-Host "$(Get-Date) $title (port $port) is not responding; restarting..." -ForegroundColor Cyan
+    Restart-App $title $directory $port $command
+    $lastAppRestart[$title] = Get-Date
+}
+
 function Start-Whisper() {
     Write-Host "$(Get-Date) Starting Whisper..." -ForegroundColor Cyan
     Stop-ProcessOnPort 8178
+    Stop-StrayWhisper
     Stop-WhisperLauncher
     Start-Sleep -Seconds 2
     # Run hidden and without -NoExit so the window closes when Whisper exits.
@@ -131,6 +170,10 @@ while ($true) {
     if (($now - $lastWhisperRestart) -gt $whisperRestartInterval -or -not (Test-WhisperAlive)) {
         Restart-Whisper
     }
+
+    # Restart apps if their DB-backed endpoint stops responding
+    Restart-AppIfDead "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev"
+    Restart-AppIfDead "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev"
 
     # Pull git updates periodically
     if (($now - $lastGitPull) -gt $gitPullInterval) {
