@@ -2,6 +2,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 from hmac import compare_digest
 from pathlib import Path
@@ -64,6 +65,15 @@ app.add_middleware(
 )
 model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
 
+# Serialize the CPU-bound transcription work. Parallel runs only contend for
+# the same cores (a 2s clip measured 100s under a 40-deep pileup on DISP-4)
+# and queued requests exhaust the threadpool until clients see connection
+# resets ("Failed to fetch"). One at a time keeps per-chunk latency flat;
+# /health stays responsive because this endpoint is a sync def (note above).
+# The client capture hook serializes too — this is the backstop for any
+# direct POSTer (fleet boxes POSTing here instead of their local Whisper).
+TRANSCRIBE_LOCK = threading.Lock()
+
 
 @app.get("/health")
 def health() -> dict[str, str]:
@@ -97,45 +107,46 @@ def transcribe(
             while chunk := audio.file.read(1024 * 1024):
                 temp_file.write(chunk)
 
-        segments, info = model.transcribe(
-            temp_path,
-            language="en",
-            beam_size=5,
-            best_of=5,
-            temperature=(0.0, 0.2, 0.4),
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 700},
-            initial_prompt=prompt or None,
-            condition_on_previous_text=False,
-            compression_ratio_threshold=2.4,
-        )
-        nsp_drop = float(os.getenv("WHISPER_NSP_THRESHOLD", "0.5"))
-        cr_drop = float(os.getenv("WHISPER_CR_THRESHOLD", "2.0"))
-        result_segments: list[dict[str, object]] = []
-        dropped_segments: list[dict[str, object]] = []
-        for segment in segments:
-            if not segment.text.strip():
-                continue
-            text = trim_repetition_loops(apply_homophone_fixes(segment.text.strip()))
-            if not text:
-                # Segment was entirely a repetition loop.
-                continue
-            entry = {
-                "start": segment.start,
-                "end": segment.end,
-                "text": text,
-                "no_speech_prob": round(segment.no_speech_prob, 4),
-                "avg_logprob": round(segment.avg_logprob, 4),
-                "compression_ratio": round(segment.compression_ratio, 4),
-            }
-            # Hallucinated junk ("thanks for watching!", "one, two, three,
-            # four.") clusters at high no_speech_prob; compression_ratio
-            # catches counting loops. Calibrated on debug-audio sidecars:
-            # keepers (real road mentions) sit at nsp <= 0.17.
-            if segment.no_speech_prob > nsp_drop or segment.compression_ratio > cr_drop:
-                dropped_segments.append(entry)
-            else:
-                result_segments.append(entry)
+        with TRANSCRIBE_LOCK:
+            segments, info = model.transcribe(
+                temp_path,
+                language="en",
+                beam_size=5,
+                best_of=5,
+                temperature=(0.0, 0.2, 0.4),
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 700},
+                initial_prompt=prompt or None,
+                condition_on_previous_text=False,
+                compression_ratio_threshold=2.4,
+            )
+            nsp_drop = float(os.getenv("WHISPER_NSP_THRESHOLD", "0.5"))
+            cr_drop = float(os.getenv("WHISPER_CR_THRESHOLD", "2.0"))
+            result_segments: list[dict[str, object]] = []
+            dropped_segments: list[dict[str, object]] = []
+            for segment in segments:
+                if not segment.text.strip():
+                    continue
+                text = trim_repetition_loops(apply_homophone_fixes(segment.text.strip()))
+                if not text:
+                    # Segment was entirely a repetition loop.
+                    continue
+                entry = {
+                    "start": segment.start,
+                    "end": segment.end,
+                    "text": text,
+                    "no_speech_prob": round(segment.no_speech_prob, 4),
+                    "avg_logprob": round(segment.avg_logprob, 4),
+                    "compression_ratio": round(segment.compression_ratio, 4),
+                }
+                # Hallucinated junk ("thanks for watching!", "one, two, three,
+                # four.") clusters at high no_speech_prob; compression_ratio
+                # catches counting loops. Calibrated on debug-audio sidecars:
+                # keepers (real road mentions) sit at nsp <= 0.17.
+                if segment.no_speech_prob > nsp_drop or segment.compression_ratio > cr_drop:
+                    dropped_segments.append(entry)
+                else:
+                    result_segments.append(entry)
         result = {
             "text": " ".join(segment["text"] for segment in result_segments),
             "language": info.language,
