@@ -78,11 +78,11 @@ def health() -> dict[str, str]:
 
 
 @app.post("/transcribe")
-# Sync def on purpose: FastAPI runs it in a threadpool, so the CPU-heavy
-# transcription cannot block the event loop and starve /health (which made
-# the watchdog think Whisper was dead under load). Do not re-add "async"
-# without reading the 2026-09-16 note in AGENTS.md.
-def transcribe(
+# 2026-09-17 (DISP-2): async + executor transport restored; the sync-def
+# variant slowed large uploads to ~2KB/s through the venv launcher chain.
+# /health may time out mid-transcription again (known quirk; no watchdog
+# on this box).
+async def transcribe(
     audio: UploadFile = File(...),
     prompt: str = Form(default=""),
     whisper_key: str | None = Header(default=None, alias="X-Whisper-Key"),
@@ -96,7 +96,7 @@ def transcribe(
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
             temp_path = temp_file.name
-            while chunk := audio.file.read(1024 * 1024):
+            while chunk := await audio.read(1024 * 1024):
                 temp_file.write(chunk)
 
         transcribe_call = functools.partial(
@@ -112,7 +112,9 @@ def transcribe(
             compression_ratio_threshold=2.4,
         )
         loop = asyncio.get_running_loop()
+        _t0 = time.time()
         segments, info = await loop.run_in_executor(None, transcribe_call, temp_path)
+        print(f"[timing] transcribe={time.time()-_t0:.1f}s audio={info.duration:.1f}s", flush=True)
         nsp_drop = float(os.getenv("WHISPER_NSP_THRESHOLD", "0.5"))
         cr_drop = float(os.getenv("WHISPER_CR_THRESHOLD", "2.0"))
         result_segments: list[dict[str, object]] = []
