@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import functools
 import json
 import os
@@ -66,6 +67,12 @@ app.add_middleware(
 )
 model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
 
+# Dedicated single-worker pool: serializes transcriptions (full CPU per clip on
+# this 4-core box, no threadpile thrash) while the async endpoint keeps the
+# event loop free for /health - DISP-1's d762cfe goal, without sync-def's
+# upload stall on this box. Bump max_workers only on bigger boxes.
+_transcribe_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="transcribe")
+
 
 @app.get("/health")
 def health() -> dict[str, str]:
@@ -113,7 +120,7 @@ async def transcribe(
         )
         loop = asyncio.get_running_loop()
         _t0 = time.time()
-        segments, info = await loop.run_in_executor(None, transcribe_call, temp_path)
+        segments, info = await loop.run_in_executor(_transcribe_executor, transcribe_call, temp_path)
         print(f"[timing] transcribe={time.time()-_t0:.1f}s audio={info.duration:.1f}s", flush=True)
         nsp_drop = float(os.getenv("WHISPER_NSP_THRESHOLD", "0.5"))
         cr_drop = float(os.getenv("WHISPER_CR_THRESHOLD", "2.0"))
