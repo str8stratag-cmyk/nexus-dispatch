@@ -135,7 +135,20 @@ export async function registerRoutes(
         }
       }
 
-      const event = await storage.createEvent(parsed);
+      // Pin coordinates at creation. Manual entries arrive with lat/lng null
+      // and auto events may come from clients that don't geocode — resolve
+      // here so every event lands with coordinates when its address resolves.
+      let lat = parsed.lat;
+      let lng = parsed.lng;
+      if ((!lat || !lng) && parsed.address) {
+        const geo = await geocodeAddress(parsed.address).catch(() => null);
+        if (geo) {
+          lat = geo.lat;
+          lng = geo.lng;
+        }
+      }
+
+      const event = await storage.createEvent({ ...parsed, lat, lng });
 
       // Send to Telegram if configured
       const botToken = (await storage.getSetting("telegram_bot_token"))?.value;
@@ -190,8 +203,8 @@ export async function registerRoutes(
     }
   });
 
-  // Retain the existing geocoder for dispatch records while a replacement
-  // provider is evaluated. The UI intentionally does not render a map.
+  // Azure Maps is the primary geocoder for dispatch records; Geoapify and
+  // Nominatim are fallbacks only. The UI intentionally does not render a map.
   // Local context appended to every geocode query so generic names like
   // "Westshore", "Hyde Park", or "University Center" resolve to Tampa instead
   // of other states/countries. Override with GEOCODE_SUFFIX in .env.
@@ -201,8 +214,13 @@ export async function registerRoutes(
   function getGeocodeQuery(addr: string): string {
     const suffix = process.env.GEOCODE_SUFFIX?.trim() || DEFAULT_GEOCODE_SUFFIX;
     const normalized = addr.trim();
+    // Don't double-append if the address already includes Tampa/FL context. The
+    // FL/Florida match must anchor to the END of the address (", FL", ", Florida",
+    // optional ZIP) — a ROAD named Florida ("Florida Ave", "34th, Florida Ave")
+    // contains the substring but still needs the suffix, else Azure resolves
+    // out-of-state matches that the Florida bounds check then rejects.
     const lower = normalized.toLowerCase();
-    if (lower.includes("tampa") || lower.includes("florida") || lower.includes(", fl")) {
+    if (lower.includes("tampa") || /,\s*(fl|florida)(\s+\d{5})?\s*$/.test(lower)) {
       return normalized;
     }
     return `${normalized}, ${suffix}`;
@@ -213,16 +231,65 @@ export async function registerRoutes(
     return lng >= west && lng <= east && lat >= south && lat <= north;
   }
 
-  app.get("/api/geocode", async (req, res) => {
-    const address = req.query.q as string;
-    if (!address) {
-      return res.status(400).json({ message: "Address query parameter 'q' is required" });
-    }
+  interface GeocodeResult {
+    lat: number;
+    lng: number;
+    display_name: string;
+    provider: string;
+  }
 
+  // Azure Maps first, Geoapify then Nominatim as fallbacks. Returns null when
+  // the address cannot be resolved inside the service area. Shared by the
+  // /api/geocode endpoint and dispatch creation, so events created without
+  // coordinates (manual entries arrive with lat/lng null) still get pinned.
+  async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
+    const azureKey = process.env.AZURE_MAPS_KEY?.trim();
     const geoapifyKey = process.env.GEOAPIFY_API_KEY?.trim();
     const boundingBox = process.env.GEOAPIFY_BOUNDING_BOX?.trim();
     const query = getGeocodeQuery(address);
 
+    // 1. Try Azure Maps (primary)
+    if (azureKey) {
+      try {
+        const params = new URLSearchParams({
+          "api-version": "2026-01-01",
+          query,
+          top: "1",
+        });
+        if (boundingBox) {
+          params.set("bbox", boundingBox);
+        }
+        params.set("countrySet", "US");
+
+        const azureRes = await fetch(
+          `https://atlas.microsoft.com/geocode?${params.toString()}`,
+          { headers: { "subscription-key": azureKey } },
+        );
+        if (azureRes.ok) {
+          const data = await azureRes.json();
+          const result = data.features?.[0];
+          const [lng, lat] = result?.geometry?.coordinates ?? [];
+          if (Number.isFinite(lat) && Number.isFinite(lng)) {
+            if (!isInServiceArea(lat, lng)) {
+              console.warn(`Geocoded "${address}" outside Florida: ${lat},${lng}`);
+              return null;
+            }
+            return {
+              lat,
+              lng,
+              display_name: result.properties?.address?.formattedAddress ?? address,
+              provider: "azure-maps",
+            };
+          }
+        } else {
+          console.error("Azure Maps geocoding failed:", azureRes.status, await azureRes.text());
+        }
+      } catch (err) {
+        console.error("Azure Maps geocoding failed:", err);
+      }
+    }
+
+    // 2. Fallback to Geoapify
     if (geoapifyKey) {
       const bounds = boundingBox?.split(",").map(Number);
       if (
@@ -232,9 +299,7 @@ export async function registerRoutes(
           bounds[0] >= bounds[2] ||
           bounds[1] >= bounds[3])
       ) {
-        return res.status(500).json({
-          message: "GEOAPIFY_BOUNDING_BOX must use west,south,east,north coordinates",
-        });
+        throw new Error("GEOAPIFY_BOUNDING_BOX must use west,south,east,north coordinates");
       }
 
       try {
@@ -259,33 +324,29 @@ export async function registerRoutes(
               bounds &&
               (lng < bounds[0] || lng > bounds[2] || lat < bounds[1] || lat > bounds[3])
             ) {
-              return res.status(404).json({
-                message: "Address resolved outside the configured service area",
-              });
+              console.warn(`Geocoded "${address}" outside configured bounding box: ${lat},${lng}`);
+              return null;
             }
             if (!isInServiceArea(lat, lng)) {
-              return res.status(404).json({
-                message: "Address resolved outside Florida",
-              });
+              console.warn(`Geocoded "${address}" outside Florida: ${lat},${lng}`);
+              return null;
             }
-            return res.json({
+            return {
               lat,
               lng,
               display_name: result.properties?.formatted ?? address,
               provider: "geoapify",
-            });
+            };
           }
-          return res.status(404).json({ message: "Address not found in the configured service area" });
         } else {
           console.error("Geoapify geocoding failed:", geoapifyRes.status, await geoapifyRes.text());
-          return res.status(502).json({ message: "Geoapify geocoding service is unavailable" });
         }
       } catch (err) {
         console.error("Geoapify geocoding failed:", err);
-        return res.status(502).json({ message: "Geoapify geocoding service is unavailable" });
       }
     }
 
+    // 3. Fallback to Nominatim
     try {
       const nomRes = await fetch(
         `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`,
@@ -300,17 +361,35 @@ export async function registerRoutes(
         const lat = parseFloat(data[0].lat);
         const lng = parseFloat(data[0].lon);
         if (!isInServiceArea(lat, lng)) {
-          return res.status(404).json({ message: "Address resolved outside Florida" });
+          console.warn(`Geocoded "${address}" outside Florida: ${lat},${lng}`);
+          return null;
         }
-        res.json({
+        return {
           lat,
           lng,
           display_name: data[0].display_name,
           provider: "nominatim",
-        });
-      } else {
-        res.status(404).json({ message: "Address not found" });
+        };
       }
+    } catch (err) {
+      console.error("Nominatim geocoding failed:", err);
+    }
+
+    return null;
+  }
+
+  app.get("/api/geocode", async (req, res) => {
+    const address = req.query.q as string;
+    if (!address) {
+      return res.status(400).json({ message: "Address query parameter 'q' is required" });
+    }
+
+    try {
+      const result = await geocodeAddress(address);
+      if (!result) {
+        return res.status(404).json({ message: "Address not found or outside service area" });
+      }
+      res.json(result);
     } catch (err: any) {
       res.status(500).json({ message: "Geocoding failed: " + err.message });
     }
