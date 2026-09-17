@@ -16,6 +16,10 @@ interface TranscriptEntry {
   timestamp: number;
 }
 
+// Bound the live feed — an unbounded list grows for hours of capture and
+// Chrome kills the tab with "Error code: Out of Memory" (2026-09-17).
+const MAX_TRANSCRIPT_ENTRIES = 300;
+
 export interface DetectedEvent {
   transcript: string;
   keywords: { keyword: string; signalType: string }[];
@@ -97,6 +101,7 @@ export default function AudioPanel({
   const handleTranscript = useCallback((text: string, isFinal: boolean) => {
     const id = `entry-${entryIdRef.current++}`;
     setTranscriptEntries((prev) => {
+      let next: TranscriptEntry[];
       if (!isFinal && prev.length > 0 && !prev[prev.length - 1].isFinal) {
         const updated = [...prev];
         updated[updated.length - 1] = {
@@ -104,9 +109,13 @@ export default function AudioPanel({
           text,
           timestamp: Date.now(),
         };
-        return updated;
+        next = updated;
+      } else {
+        next = [...prev, { id, text, isFinal, timestamp: Date.now() }];
       }
-      return [...prev, { id, text, isFinal, timestamp: Date.now() }];
+      return next.length > MAX_TRANSCRIPT_ENTRIES
+        ? next.slice(next.length - MAX_TRANSCRIPT_ENTRIES)
+        : next;
     });
 
     if (isFinal) {
