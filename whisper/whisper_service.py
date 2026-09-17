@@ -33,7 +33,10 @@ def health() -> dict[str, str]:
 
 
 @app.post("/transcribe")
-async def transcribe(
+# Sync def on purpose: FastAPI runs it in a threadpool, so the CPU-heavy
+# transcription cannot block the event loop and starve /health (which made
+# the watchdog think Whisper was dead under load). Do not re-add "async".
+def transcribe(
     audio: UploadFile = File(...),
     prompt: str = Form(default=""),
 ) -> dict[str, object]:
@@ -43,18 +46,20 @@ async def transcribe(
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
             temp_path = temp_file.name
-            while chunk := await audio.read(1024 * 1024):
+            while chunk := audio.file.read(1024 * 1024):
                 temp_file.write(chunk)
 
         transcribe_call = functools.partial(
             model.transcribe,
             language="en",
-            beam_size=1,
-            best_of=1,
+            beam_size=5,
+            best_of=5,
+            temperature=(0.0, 0.2, 0.4),
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 400},
+            vad_parameters={"min_silence_duration_ms": 700},
             initial_prompt=prompt or None,
-            condition_on_previous_text=False,
+            condition_on_previous_text=True,
+            compression_ratio_threshold=2.4,
         )
         loop = asyncio.get_running_loop()
         segments, info = await loop.run_in_executor(None, transcribe_call, temp_path)

@@ -20,6 +20,7 @@ interface DispatchEventDocument {
   isManual: boolean;
   audioUrl: string | null;
   telegramMessageId: string | null;
+  geocodedRoad: string | null;
   createdAt: Date;
 }
 
@@ -44,8 +45,9 @@ function mapEvent(row: DispatchEventDocument): DispatchEvent {
     source: row.source,
     status: row.status,
     isManual: row.isManual,
-    audioUrl: row.audioUrl,
-    telegramMessageId: row.telegramMessageId,
+    audioUrl: row.audioUrl ?? null,
+    telegramMessageId: row.telegramMessageId ?? null,
+    geocodedRoad: row.geocodedRoad ?? null,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -55,16 +57,14 @@ function mapSetting(row: SettingDocument): Setting {
 }
 
 export interface IStorage {
-  // Dispatch events
-  getEvents(): Promise<DispatchEvent[]>;
+  getEvents(limit?: number): Promise<DispatchEvent[]>;
   getEvent(id: number): Promise<DispatchEvent | undefined>;
   createEvent(event: InsertDispatchEvent): Promise<DispatchEvent>;
   updateEventStatus(id: number, status: string): Promise<DispatchEvent | undefined>;
-  // Settings
+  updateEventTelegramMessageId(id: number, telegramMessageId: string): Promise<DispatchEvent | undefined>;
   getSetting(key: string): Promise<Setting | undefined>;
   upsertSetting(setting: InsertSettings): Promise<Setting>;
   getAllSettings(): Promise<Setting[]>;
-  // Keywords / homophones
   getKeywords(): Promise<KeywordEntry[]>;
   addKeyword(entry: KeywordEntry): Promise<KeywordEntry[]>;
   removeKeyword(pattern: string): Promise<KeywordEntry[]>;
@@ -82,11 +82,12 @@ export class DatabaseStorage implements IStorage {
     return counter.sequence;
   }
 
-  async getEvents(): Promise<DispatchEvent[]> {
+  async getEvents(limit = 500): Promise<DispatchEvent[]> {
     const database = await getDatabase();
     const events = await database.collection<DispatchEventDocument>("dispatchEvents")
       .find()
       .sort({ createdAt: -1 })
+      .limit(limit)
       .toArray();
     return events.map(mapEvent);
   }
@@ -115,6 +116,7 @@ export class DatabaseStorage implements IStorage {
       isManual: event.isManual ?? false,
       audioUrl: event.audioUrl ?? null,
       telegramMessageId: event.telegramMessageId ?? null,
+      geocodedRoad: event.geocodedRoad ?? null,
       createdAt: new Date(),
     };
     await database.collection<DispatchEventDocument>("dispatchEvents").insertOne(document);
@@ -126,6 +128,16 @@ export class DatabaseStorage implements IStorage {
     const event = await database.collection<DispatchEventDocument>("dispatchEvents").findOneAndUpdate(
       { id },
       { $set: { status } },
+      { returnDocument: "after" },
+    );
+    return event ? mapEvent(event) : undefined;
+  }
+
+  async updateEventTelegramMessageId(id: number, telegramMessageId: string): Promise<DispatchEvent | undefined> {
+    const database = await getDatabase();
+    const event = await database.collection<DispatchEventDocument>("dispatchEvents").findOneAndUpdate(
+      { id },
+      { $set: { telegramMessageId } },
       { returnDocument: "after" },
     );
     return event ? mapEvent(event) : undefined;
@@ -160,8 +172,6 @@ export class DatabaseStorage implements IStorage {
   async getKeywords(): Promise<KeywordEntry[]> {
     const existing = await this.getSetting(KEYWORD_LIST_SETTING_KEY);
     if (!existing) {
-      // First run — seed persistent storage with the built-in defaults so
-      // future add/remove edits have something concrete to operate on.
       await this.upsertSetting({ key: KEYWORD_LIST_SETTING_KEY, value: JSON.stringify(DEFAULT_KEYWORDS) });
       return DEFAULT_KEYWORDS;
     }

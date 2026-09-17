@@ -1,15 +1,17 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useTheme } from "@/hooks/use-theme";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Sun, Moon, Radio, Send, Settings, ExternalLink } from "lucide-react";
+import { Sun, Moon, Radio, Send, Settings, ExternalLink, Map } from "lucide-react";
 import AudioPanel, { type DetectedEvent } from "@/components/audio-panel";
+import DispatchMap from "@/components/dispatch-map";
 import EventLog from "@/components/event-log";
 import ManualDispatch from "@/components/manual-dispatch";
 import SettingsPanel from "@/components/settings-panel";
+import { useEventsStream } from "@/hooks/use-events-stream";
 
 interface DispatchEventRow {
   id: number;
@@ -25,6 +27,7 @@ interface DispatchEventRow {
   source: string;
   status: string;
   isManual: boolean;
+  geocodedRoad: string | null;
   createdAt: string;
 }
 
@@ -35,7 +38,26 @@ export default function DispatchPage() {
 
   const [district, setDistrict] = useState("District 1");
   const [sourceName, setSourceName] = useState("");
-  const [districts] = useState<string[]>(["District 1", "District 2", "District 3", "District 4", "District 5", "District 6", "District 7"]);
+  const [districts, setDistricts] = useState<string[]>(["District 1", "District 2", "District 3", "District 4", "District 5", "District 6", "District 7"]);
+
+  const { data: districtSettings } = useQuery({
+    queryKey: ["/api/settings"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/settings");
+      return res.json();
+    },
+  });
+
+  useEffect(() => {
+    if (!Array.isArray(districtSettings)) return;
+    const stored = districtSettings.find((s: any) => s.key === "districts");
+    if (stored && stored.value) {
+      try {
+        const parsed = JSON.parse(stored.value);
+        if (Array.isArray(parsed) && parsed.length > 0) setDistricts(parsed);
+      } catch {}
+    }
+  }, [districtSettings]);
 
   const { data: events = [] } = useQuery<DispatchEventRow[]>({
     queryKey: ["/api/events"],
@@ -43,8 +65,10 @@ export default function DispatchPage() {
       const res = await apiRequest("GET", "/api/events");
       return res.json();
     },
-    refetchInterval: 5000,
+    refetchInterval: 30_000,
   });
+
+  useEventsStream();
 
   const dispatchMutation = useMutation({
     mutationFn: async (data: any) => {
@@ -62,37 +86,14 @@ export default function DispatchPage() {
     },
   });
 
-  const geocodeMutation = useMutation({
-    mutationFn: async (address: string) => {
-      const res = await apiRequest("GET", `/api/geocode?q=${encodeURIComponent(address)}`);
-      return res.json();
-    },
-  });
-
   const handleDispatchDetected = useCallback(async (event: DetectedEvent) => {
-    let lat: number | null = null;
-    let lng: number | null = null;
-    const geocodeQuery = event.crossStreet
-      ? `${event.address} and ${event.crossStreet}`
-      : event.address;
-
-    if (geocodeQuery) {
-      try {
-        const geo = await geocodeMutation.mutateAsync(geocodeQuery);
-        lat = geo.lat;
-        lng = geo.lng;
-      } catch (err) {
-        console.error("Geocoding failed:", err);
-      }
-    }
-
     dispatchMutation.mutate({
       transcript: event.transcript,
       keywords: JSON.stringify(event.keywords),
       address: event.address || null,
       crossStreet: event.crossStreet || null,
-      lat,
-      lng,
+      lat: null,
+      lng: null,
       signalType: event.keywords[0]?.signalType || null,
       description: event.keywords.map((k) => k.signalType).join(", "),
       district: event.district,
@@ -100,17 +101,40 @@ export default function DispatchPage() {
       status: "active",
       isManual: false,
     });
-  }, [dispatchMutation, geocodeMutation]);
+  }, [dispatchMutation]);
 
   return (
     <div className="h-screen flex flex-col bg-background text-foreground">
+      <Tabs defaultValue="monitor" className="flex-1 flex flex-col min-h-0">
       {/* Header */}
-      <header className="flex items-center justify-between border-b border-border px-4 py-2 shrink-0">
+      <header className="relative flex items-center justify-between border-b border-border bg-card/80 px-4 py-2.5 shrink-0">
         <div className="flex items-center gap-2">
           <Radio className="h-5 w-5 text-primary animate-pulse-live" />
-          <h1 className="text-base font-bold tracking-tight">DISPATCH MONITOR</h1>
-          <span className="text-xs text-muted-foreground hidden sm:inline">Traffic Accident Detection System</span>
+          <div>
+            <h1 className="text-base font-bold tracking-tight">DISPATCH MONITOR</h1>
+            <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground hidden sm:inline">
+              Traffic Accident Detection System
+            </span>
+          </div>
+          <span className="ml-2 hidden items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-emerald-500 sm:inline-flex">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse-live" />
+            Live
+          </span>
         </div>
+        <TabsList className="absolute left-1/2 hidden h-auto w-auto -translate-x-1/2 grid-cols-4 gap-1 rounded-lg bg-muted/50 p-1 lg:grid">
+          <TabsTrigger value="monitor" className="px-4 py-2 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground" data-testid="tab-monitor">
+            <Radio className="mr-1 h-3 w-3" /> Live Monitor
+          </TabsTrigger>
+          <TabsTrigger value="manual" className="px-4 py-2 text-xs" data-testid="tab-manual">
+            <Send className="mr-1 h-3 w-3" /> Manual Dispatch
+          </TabsTrigger>
+          <TabsTrigger value="map" className="px-4 py-2 text-xs" data-testid="tab-map">
+            <Map className="mr-1 h-3 w-3" /> Map
+          </TabsTrigger>
+          <TabsTrigger value="settings" className="px-4 py-2 text-xs" data-testid="tab-settings">
+            <Settings className="mr-1 h-3 w-3" /> Settings
+          </TabsTrigger>
+        </TabsList>
         <div className="flex items-center gap-2">
           {typeof window !== "undefined" && window.self !== window.top && (
             <Button
@@ -140,14 +164,15 @@ export default function DispatchPage() {
         </div>
       </header>
 
-      {/* Tabs */}
-      <Tabs defaultValue="monitor" className="flex-1 flex flex-col min-h-0">
-        <TabsList className="grid w-full grid-cols-3 max-w-md mx-auto mt-2">
+        <TabsList className="mx-auto mt-2 grid w-full max-w-md grid-cols-4 lg:hidden">
           <TabsTrigger value="monitor" className="text-xs" data-testid="tab-monitor">
             <Radio className="h-3 w-3 mr-1" /> Live Monitor
           </TabsTrigger>
           <TabsTrigger value="manual" className="text-xs" data-testid="tab-manual">
-            <Send className="h-3 w-3 mr-1" /> Manual Dispatch
+            <Send className="h-3 w-3 mr-1" /> Manual
+          </TabsTrigger>
+          <TabsTrigger value="map" className="text-xs" data-testid="tab-map">
+            <Map className="h-3 w-3 mr-1" /> Map
           </TabsTrigger>
           <TabsTrigger value="settings" className="text-xs" data-testid="tab-settings">
             <Settings className="h-3 w-3 mr-1" /> Settings
@@ -155,10 +180,9 @@ export default function DispatchPage() {
         </TabsList>
 
         {/* Live Monitor Tab */}
-        <TabsContent value="monitor" className="flex-1 min-h-0 mt-2">
-          <div className="h-full grid grid-cols-1 lg:grid-cols-[360px_minmax(0,1fr)] gap-2 p-2 overflow-y-auto lg:overflow-hidden">
-            {/* Left: Audio Panel */}
-            <div className="min-h-0 flex flex-col rounded-md border border-border bg-card overflow-hidden max-h-[500px] lg:max-h-none">
+        <TabsContent value="monitor" className="flex-1 min-h-0 mt-2 lg:mt-0">
+          <div className="h-full grid grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[320px_minmax(0,1fr)] lg:gap-px lg:overflow-hidden lg:bg-border lg:p-0">
+            <div className="min-h-[520px] flex flex-col rounded-lg border border-border bg-card p-3 shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
               <AudioPanel
                 district={district}
                 sourceName={sourceName}
@@ -169,20 +193,16 @@ export default function DispatchPage() {
               />
             </div>
 
-            <section className="min-h-[360px] lg:min-h-0 flex flex-col gap-2">
-              <div className="flex items-center justify-between rounded-md border border-border bg-card px-3 py-2">
-                <div>
-                  <h2 className="text-sm font-semibold">Live incident queue</h2>
-                  <p className="text-xs text-muted-foreground">
-                    Address text is retained as received. Automated map placement is paused.
-                  </p>
-                </div>
-                <span className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[10px] font-medium text-primary">
-                  Location review
-                </span>
-              </div>
+            <section className="min-h-[360px] rounded-lg border border-border bg-card p-3 shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
               <EventLog />
             </section>
+          </div>
+        </TabsContent>
+
+        {/* Map Tab */}
+        <TabsContent value="map" className="flex-1 min-h-0 mt-2 lg:mt-0">
+          <div className="h-full p-3">
+            <DispatchMap markers={events} />
           </div>
         </TabsContent>
 

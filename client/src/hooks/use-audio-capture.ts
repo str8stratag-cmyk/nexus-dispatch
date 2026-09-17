@@ -17,7 +17,9 @@ interface UseAudioCaptureReturn {
   supported: boolean;
 }
 
-const CHUNK_DURATION_MS = 8_000;
+const CHUNK_DURATION_MS = 4_000;
+const WHISPER_SERVICE_URL = import.meta.env.VITE_WHISPER_SERVICE_URL || "http://127.0.0.1:8178";
+const WHISPER_API_KEY = import.meta.env.VITE_WHISPER_API_KEY;
 
 export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioCaptureReturn {
   const { deviceId, keywords = [], onTranscript } = options;
@@ -58,18 +60,23 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     refreshDevices();
   }, [refreshDevices]);
 
-  const transcribe = useCallback(async (audio: Blob) => {
+  const transcribe = useCallback(async (audio: Blob, isSilent: boolean) => {
     if (audio.size === 0) return;
+    if (isSilent) return;
 
     const form = new FormData();
     form.set("audio", audio, "dispatch.webm");
     form.set(
       "prompt",
-      keywords.length ? `Dispatch radio terminology: ${keywords.join(", ")}.` : "Dispatch radio terminology."
+      keywords.length
+        ? `Dispatch radio: Signal 4, MVA at Dale Mabry and Linebaugh. Unit responding. ${keywords.slice(0, 8).join(", ")}.`
+        : "Dispatch radio: Signal 4, MVA at Dale Mabry and Linebaugh. Unit responding."
     );
 
     try {
-      const response = await fetch("/api/audio/transcribe", { method: "POST", body: form });
+      const headers: Record<string, string> = {};
+      if (WHISPER_API_KEY) headers["X-Whisper-Key"] = WHISPER_API_KEY;
+      const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, { method: "POST", body: form, headers });
       const result = await response.json() as { text?: string; message?: string };
       if (!response.ok) {
         throw new Error(result.message || "Local Whisper transcription failed.");
@@ -90,7 +97,26 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
 
     const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
     const chunks: Blob[] = [];
+    let rmsSum = 0;
+    let rmsCount = 0;
     recorderRef.current = recorder;
+
+    const sampleRms = () => {
+      const currentRms = analyserRef.current ? (() => {
+        const data = new Uint8Array(analyserRef.current.fftSize);
+        analyserRef.current.getByteTimeDomainData(data);
+        const sumSquares = data.reduce((sum, value) => {
+          const normalized = (value - 128) / 128;
+          return sum + normalized * normalized;
+        }, 0);
+        return Math.sqrt(sumSquares / data.length);
+      })() : 0;
+      rmsSum += currentRms;
+      rmsCount++;
+      return currentRms;
+    };
+
+    const rmsInterval = window.setInterval(sampleRms, 200);
 
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) chunks.push(event.data);
@@ -98,7 +124,10 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     recorder.onstop = () => {
       recorderRef.current = null;
       recorderTimerRef.current = null;
-      void transcribe(new Blob(chunks, { type: "audio/webm" }));
+      clearInterval(rmsInterval);
+      const avgRms = rmsCount > 0 ? rmsSum / rmsCount : 0;
+      const isSilent = avgRms < 0.015;
+      void transcribe(new Blob(chunks, { type: "audio/webm" }), isSilent);
       if (isCapturingRef.current) startRecordingRef.current();
     };
     recorder.start();

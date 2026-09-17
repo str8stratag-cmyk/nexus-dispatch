@@ -26,4 +26,15 @@ $env:WHISPER_MODEL = $Model
 $env:WHISPER_DEVICE = "cpu"
 $env:WHISPER_COMPUTE_TYPE = "int8"
 $env:HF_HOME = Join-Path $repoRoot "models"
-& $python -m uvicorn whisper_service:app --app-dir (Join-Path $repoRoot "whisper") --host 0.0.0.0 --port $port
+
+# Launch with output redirected to log files. Inheriting a hidden console
+# window intermittently wedges the process on console writes (blocked at
+# startup, unkillable); a file sink avoids the console entirely. Start-Process
+# (not "&") so uvicorn's stderr can't hit $ErrorActionPreference="Stop".
+$logDir = Join-Path $repoRoot "logs"
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+Start-Process -FilePath $python `
+  -ArgumentList '-m','uvicorn','whisper_service:app','--app-dir',(Join-Path $repoRoot 'whisper'),'--host','0.0.0.0','--port',$port `
+  -RedirectStandardOutput (Join-Path $logDir "whisper-service.log") `
+  -RedirectStandardError (Join-Path $logDir "whisper-service.err.log") `
+  -WindowStyle Hidden
