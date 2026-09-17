@@ -147,7 +147,6 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       // Dropping a saturated chunk must NOT skip this — it schedules the
       // next recording chunk; returning early here silently kills capture.
       if (isCapturingRef.current) startRecordingRef.current();
-      if (isCapturingRef.current) startRecordingRef.current();
     };
     recorder.start();
     recorderTimerRef.current = window.setTimeout(() => {
