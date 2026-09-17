@@ -133,6 +133,21 @@ export default function AudioPanel({
 
   const [micBlocked, setMicBlocked] = useState(false);
 
+  // Self-reload before Chrome kills the tab with "Error code: Out of
+  // Memory" — the V8 heap only resets on navigation and capture
+  // auto-resumes after reload, so a preemptive reload beats a crashed tab.
+  useEffect(() => {
+    const perf = performance as Performance & { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } };
+    if (typeof perf.memory === "undefined") return;
+    const timer = window.setInterval(() => {
+      const { usedJSHeapSize, jsHeapSizeLimit } = perf.memory!;
+      if (jsHeapSizeLimit > 0 && usedJSHeapSize > 0.75 * jsHeapSizeLimit) {
+        window.location.reload();
+      }
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const handleStart = async () => {
     try {
       await start();
