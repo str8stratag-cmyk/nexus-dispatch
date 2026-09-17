@@ -136,13 +136,17 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       const avgRms = rmsCount > 0 ? rmsSum / rmsCount : 0;
       const isSilent = avgRms < 0.015;
       const blob = new Blob(chunks, { type: "audio/webm" });
-      if (transcribePendingRef.current >= 2) return; // saturated — drop chunk, don't pile up
-      transcribePendingRef.current += 1;
-      transcribeQueueRef.current = transcribeQueueRef.current
-        .then(() => transcribe(blob, isSilent))
-        .finally(() => {
-          transcribePendingRef.current -= 1;
-        });
+      if (transcribePendingRef.current < 2) {
+        transcribePendingRef.current += 1;
+        transcribeQueueRef.current = transcribeQueueRef.current
+          .then(() => transcribe(blob, isSilent))
+          .finally(() => {
+            transcribePendingRef.current -= 1;
+          });
+      }
+      // Dropping a saturated chunk must NOT skip this — it schedules the
+      // next recording chunk; returning early here silently kills capture.
+      if (isCapturingRef.current) startRecordingRef.current();
       if (isCapturingRef.current) startRecordingRef.current();
     };
     recorder.start();
