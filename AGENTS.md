@@ -171,11 +171,13 @@ DISP-3 box — do not mistake them for this machine's state. The Azure Maps acco
 Every time this box is fired up (especially after a reboot — the watchdog does
 NOT auto-start), work in this order:
 
-1. **Fire up the full stack.** Run the watchdog:
-   `powershell -ExecutionPolicy Bypass -File C:\Users\str8s\dispatch-monitor\scripts\watchdog.ps1`
-   (or `start-watchdog.bat`; run hidden). It starts Whisper, Dispatch Monitor
-   (5000), and Nexus Dispatch (5001). Verify: 8178/health, :5000/api/events,
-   :5001/api/events all responding before doing anything else.
+1. **Fire up the full stack.** ON THIS BOX the watchdog is intentionally
+   not the startup path — use `scripts\refresh-services.bat` (Desktop
+   shortcuts; Task Scheduler `Dispatch Services Autostart` covers logon).
+   It starts Whisper (8178), Dispatch Monitor (5000), Nexus Dispatch
+   (5001). Verify: 8178/health, :5000/api/events, :5001/api/events all
+   responding before doing anything else. Full ritual (calls review,
+   Whisper tuning order): see `KIMI_RESUME.md` → "Session Startup Ritual".
 2. **Review calls and tune Whisper** — listen to recent transcriptions/dispatch
    events, find recurring mis-transcriptions, and add homophone corrections to
    `HOMOPHONE_FIXES` in `whisper/whisper_service.py` (restarting Whisper after
