@@ -169,9 +169,9 @@ function Start-App($title, $directory, $port, $command, $log) {
 Start-Whisper
 $lastWhisperRestart = Get-Date
 $dmLog = Join-Path $dispatchMonitor "logs\dispatch-monitor.log"
-$ndLog = Join-Path $nexusDispatch "logs\nexus-dispatch.log"
+# Nexus Dispatch is dormant fleet-wide (user, 2026-09-17): repo keeps
+# pulling below so it stays current, but the app is not started/supervised.
 Start-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
-Start-App "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev" $ndLog
 
 Write-Host "Watchdog running. Whisper restart every $($whisperRestartInterval.TotalHours)h, git pull every $($gitPullInterval.TotalHours)h." -ForegroundColor Green
 
@@ -187,7 +187,6 @@ while ($true) {
 
     # Restart apps if their DB-backed endpoint stops responding
     Restart-AppIfDead "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
-    Restart-AppIfDead "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev" $ndLog
 
     # Pull git updates periodically
     if (($now - $lastGitPull) -gt $gitPullInterval) {
@@ -196,9 +195,6 @@ while ($true) {
 
         if ($dmUpdated) {
             Restart-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
-        }
-        if ($ndUpdated) {
-            Restart-App "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev" $ndLog
         }
 
         $lastGitPull = $now
