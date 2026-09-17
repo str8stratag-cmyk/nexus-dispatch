@@ -469,7 +469,13 @@ export async function registerRoutes(
   const INTERSECTION_SPLIT_RE = /\s+(?:and|&|@|n|s|e|w|north|south|east|west)\s+/i;
 
   function canonicalizeKnownRoads(address: string): string {
-    let normalized = address;
+    // Dispatch chatter the extractor can't reliably drop tails the query and
+    // breaks Azure intersections ("INTERSTATE 275 AND BUSCH BLVD SECTOR",
+    // "VICINITY OF 275", "30TH AT JUST ABOUT HILLSBOROUGH") — strip it first.
+    let normalized = address
+      .replace(/\b(?:sector|vicinity|just\s+about)\b\.?/gi, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim();
     for (const [pattern, replacement] of KNOWN_ROAD_CANONICAL) {
       normalized = normalized.replace(pattern, replacement);
     }
