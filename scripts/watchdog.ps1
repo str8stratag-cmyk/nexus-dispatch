@@ -12,6 +12,10 @@ $healthCheckInterval = [TimeSpan]::FromMinutes(1)
 $lastWhisperRestart = [DateTime]::MinValue
 $lastGitPull = [DateTime]::MinValue
 
+# Fail fast if git needs credentials — an interactive prompt in the watchdog's
+# hidden console wedges the entire health-check loop.
+$env:GIT_TERMINAL_PROMPT = "0"
+
 function Stop-ProcessOnPort($port) {
     $procIds = netstat -ano | Select-String ":$port\s+.*LISTENING" | ForEach-Object {
         ($_ -split '\s+')[-1]
@@ -80,7 +84,10 @@ $lastAppRestart = @{ "Dispatch Monitor" = [DateTime]::MinValue; "Nexus Dispatch"
 
 function Restart-AppIfDead($title, $directory, $port, $command, $log) {
     if (Test-AppAlive $port) { return }
-    $elapsed = Get-Date - $lastAppRestart[$title]
+    # NOTE: parenthesize Get-Date — "Get-Date - $x" parses '-' as a parameter
+    # token, $elapsed becomes $null, and the throttle below silently blocks
+    # every restart (this watchdog never recovered a dead app until 2026-09-17).
+    $elapsed = ([DateTime]::Now) - $lastAppRestart[$title]
     if ($elapsed -lt $minAppRestartGap) {
         Write-Host "$(Get-Date) $title is down but was restarted $([int]$elapsed.TotalSeconds)s ago; skipping this cycle." -ForegroundColor DarkYellow
         return

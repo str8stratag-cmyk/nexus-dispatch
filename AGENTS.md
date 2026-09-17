@@ -45,6 +45,12 @@ Every time this box is fired up, work in this order:
 - `scripts/watchdog.ps1`: app stdout/stderr redirected to log files. Apps
   inheriting the watchdog's hidden console intermittently wedged on console
   writes and never bound their port (same failure mode Whisper had).
+- `scripts/watchdog.ps1`: TWO dead-app-recovery bugs fixed 2026-09-17.
+  `Get-Date - $lastAppRestart[$title]` parsed `-` as a parameter, making the
+  restart throttle null-always-true — the watchdog could never restart a dead
+  app. Also `GIT_TERMINAL_PROMPT=0` so a credential prompt can't wedge the
+  loop. Watchdog's own output should be launched with redirection to
+  `logs\watchdog.log` for observability.
 2. **Review calls and tune Whisper** — listen to recent transcriptions/dispatch
    events, find recurring mis-transcriptions, and add homophone corrections to
    `HOMOPHONE_FIXES` in `whisper/whisper_service.py` (restarting Whisper after
