@@ -56,6 +56,20 @@ DISP-3 box — do not mistake them for this machine's state. The Azure Maps acco
   was squash-merged to both repos' `main` as PR #1 (dispatch-monitor
   `96da4cc`, nexus-dispatch `5782ff4`). First fleet-shared code from this
   box; everything else below remains local-only.
+- **EXCEPTION (merged 2026-09-16, user-approved):** fleet update squash-merged
+  to both repos' `main` (dispatch-monitor `edb8420`, nexus-dispatch
+  `ad86f2b`): quarantine + restore, road-mention second-signal gate,
+  whisperModel tagging, geocode suffix fix (both repos), nexus Azure-primary
+  geocoder + creation-time pinning, and `FLEET_PULL_2026-09-16.md` runbooks.
+  Fleet devices auto-apply via their watchdog pull/restart cycle. AGENT
+  NOTE: the user never runs git pulls on this box — sessions do. Never
+  blind-pull here: local main diverged from the rewritten origin/main (same
+  changes exist as local commits AND as uncommitted working-tree edits the
+  running services serve from). Commit working-tree changes first, then
+  `git merge origin/main`, resolve shared-code conflicts deliberately
+  (upstream side for squash-merged features, local side for intentional
+  adaptations like cross-env/LAN binds), then npm install + check + service
+  refresh. Full procedure in KIMI_RESUME.md (AGENT NOTE, 2026-09-16).
 - **Policy (user decision 2026-09-03):** turbo stays on DISP-2 as the tester.
   If it keeps getting good results, the user will share it with the other DISP
   devices. Until then: no pushes.
@@ -122,6 +136,22 @@ DISP-3 box — do not mistake them for this machine's state. The Azure Maps acco
      `/health` reports `"model":"turbo"`.
 - **Known quirk:** `/health` can time out mid-transcription (CPU-bound, single
   worker). Transcription is unaffected; retry the health check.
+- **Road Mentions (tuned 2026-09-12):** "Road Mention" events (major road
+  named, no crash keyword) were ~48% of all events. They now require a second
+  signal server-side (POST /api/dispatch, auto-dispatches only): dispatch
+  context in the same transmission (unit/responding/10-codes/etc., see
+  ROAD_MENTION_CONTEXT_RE) OR the same road active in an event within 45 min
+  (roadMentionedRecently). Context-free mentions are quarantined with reason
+  "road mention lacks corroborating signal" — reviewable via /api/quarantine,
+  recoverable via restore. Manual dispatches unaffected. MERGED to
+  origin/main 2026-09-16 (squash commit `edb8420`, user-approved).
+- **Geocoding (fixed 2026-09-16; MERGED to origin/main — fleet auto-rollout):** (1) `getGeocodeQuery` in BOTH repos suppressed the ", Tampa, FL" suffix whenever the address contained the substring "florida" — so every "Florida Ave" extract (from "Florida tag" phonetic chatter) geocoded bare, hit out-of-state Azure results, and got rejected by the FL bounds check (57% of missing pins fleet-wide). The FL/Florida match must now anchor to the END of the address (", FL" / ", Florida" / optional ZIP). (2) nexus-dispatch `/api/dispatch` never geocoded at creation — manual entries arrive lat/lng null and were stored coord-less; it now shares dispatch-monitor's `geocodeAddress` helper (Azure → Geoapify → Nominatim) wired into creation. Merged to origin/main 2026-09-16 as squash commits (dispatch `edb8420`, nexus `ad86f2b`, user-approved; fleet branches deleted after content-verified merge). Runbook the other boxes read on pull: `FLEET_PULL_2026-09-16.md` in both repo roots.
+- **Keywords (lesson 2026-09-12, from the DISP-4 fleet review):** never add
+  hallucination-prone strings as keywords. "nba"/"nbc" had been added to catch
+  MVA/MVC mishearings and Whisper invents them on squelch noise, so every
+  noise burst became an MVA dispatch trigger. Removed them (27→25 keywords;
+  keyword_list lives in shared Mongo). Fix mishearings via the homophone
+  table instead.
 - **Whisper initial_prompt (fixed 2026-09-08):** the transcription prompt sent by
   `server/whisper.ts` and `client/src/hooks/use-audio-capture.ts` must stay
   GENERIC (domain words only, no concrete call). A hardcoded example

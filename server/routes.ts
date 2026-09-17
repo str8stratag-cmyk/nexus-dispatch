@@ -110,9 +110,13 @@ const FLORIDA_BOUNDS: [number, number, number, number] = [-87.6, 24.5, -80.0, 31
 function getGeocodeQuery(address: string): string {
   const suffix = process.env.GEOCODE_SUFFIX?.trim() || DEFAULT_GEOCODE_SUFFIX;
   const normalized = address.trim();
-  // Don't double-append if the address already includes Tampa/FL context.
+  // Don't double-append if the address already includes Tampa/FL context. The
+  // FL/Florida match must anchor to the END of the address (", FL", ", Florida",
+  // optional ZIP) — a ROAD named Florida ("Florida Ave", "34th, Florida Ave")
+  // contains the substring but still needs the suffix, else Azure resolves
+  // out-of-state matches that the Florida bounds check then rejects.
   const lower = normalized.toLowerCase();
-  if (lower.includes("tampa") || lower.includes("florida") || lower.includes(", fl")) {
+  if (lower.includes("tampa") || /,\s*(fl|florida)(\s+\d{5})?\s*$/.test(lower)) {
     return normalized;
   }
   return `${normalized}, ${suffix}`;
@@ -460,6 +464,32 @@ function isLikelyRealDispatch(transcript: string, address: string | null | undef
   return hasSignal && hasRealAddress;
 }
 
+// Road Mentions (major road named, no crash keyword) are review prompts, not
+// dispatches — on their own they flood the feed (~half of all events). Tune
+// (2026-09-12): require a second signal — dispatch context in the same
+// transmission, or the same road already active in a recent event.
+// Anything else is quarantined for review, not dropped.
+const ROAD_MENTION_WINDOW_MS = 45 * 60 * 1000;
+const ROAD_MENTION_CONTEXT_RE =
+  /\b(units?|respond\w*|en route|copy(?: that)?|dispatch\w*|emergency|callers?|complainant|victims?|witness(?:es)?|suspects?|blocking|blocked|lanes?|10-?\d{1,2}|signal[- ]?\d{1,2}|shots? fired|smoke)\b/i;
+
+function normalizeRoadName(s: string | null | undefined): string {
+  return (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+async function roadMentionedRecently(address: string | null | undefined): Promise<boolean> {
+  const road = normalizeRoadName(address);
+  if (road.length < 4) return false;
+  const cutoff = Date.now() - ROAD_MENTION_WINDOW_MS;
+  const events = await storage.getEvents(500);
+  return events.some((e) => {
+    if (e.status !== "active" && e.status !== "accepted") return false;
+    if (new Date(e.createdAt).getTime() < cutoff) return false;
+    const eAddr = normalizeRoadName(e.address);
+    return eAddr === road || eAddr.includes(road) || road.includes(eAddr);
+  });
+}
+
 // Rejected auto-dispatches go to a quarantine collection instead of being
 // silently dropped, so a real call killed by a false-positive gate (spam
 // filter, address resolution) can be reviewed and recovered afterwards.
@@ -637,6 +667,13 @@ export async function registerRoutes(
         }
         if (isInvalidAutoAddress(parsed.address)) {
           return rejectAutoDispatch(res, parsed, "requires a resolved address");
+        }
+        // Road Mentions need a second signal (see roadMentionedRecently).
+        if (parsed.signalType === "Road Mention") {
+          const hasContext = ROAD_MENTION_CONTEXT_RE.test(parsed.transcript);
+          if (!hasContext && !(await roadMentionedRecently(parsed.address))) {
+            return rejectAutoDispatch(res, parsed, "road mention lacks corroborating signal");
+          }
         }
       }
 
@@ -844,8 +881,8 @@ export async function registerRoutes(
   }, 5 * 60 * 1000);
   roadMentionSweeper.unref();
 
-  // Geocode an address. Use Geoapify when configured, otherwise fall back to
-  // OpenStreetMap Nominatim.
+  // Geocode an address via geocodeAddress: Azure Maps (primary), then
+  // Geoapify, then OpenStreetMap Nominatim as final fallback.
   app.get("/api/geocode", async (req, res) => {
     const address = req.query.q as string;
     if (!address) {
