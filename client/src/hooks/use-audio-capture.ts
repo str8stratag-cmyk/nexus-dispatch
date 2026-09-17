@@ -34,6 +34,14 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recorderTimerRef = useRef<number | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  // Serialize transcriptions and bound the backlog — firing every 4s chunk
+  // without waiting piled concurrent /transcribe calls onto Whisper until
+  // its threadpool wedged and the browser showed "Failed to fetch"
+  // (2026-09-17 pileup on DISP-4). At ~7s CPU per chunk, sustained room
+  // audio outproduces the service, so drop the oldest new chunk rather than
+  // queue without bound; addresses get re-transmitted on later chunks.
+  const transcribeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const transcribePendingRef = useRef(0);
   const rafRef = useRef<number | null>(null);
   const onTranscriptRef = useRef(onTranscript);
   const isCapturingRef = useRef(false);
@@ -127,7 +135,14 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       clearInterval(rmsInterval);
       const avgRms = rmsCount > 0 ? rmsSum / rmsCount : 0;
       const isSilent = avgRms < 0.015;
-      void transcribe(new Blob(chunks, { type: "audio/webm" }), isSilent);
+      const blob = new Blob(chunks, { type: "audio/webm" });
+      if (transcribePendingRef.current >= 2) return; // saturated — drop chunk, don't pile up
+      transcribePendingRef.current += 1;
+      transcribeQueueRef.current = transcribeQueueRef.current
+        .then(() => transcribe(blob, isSilent))
+        .finally(() => {
+          transcribePendingRef.current -= 1;
+        });
       if (isCapturingRef.current) startRecordingRef.current();
     };
     recorder.start();

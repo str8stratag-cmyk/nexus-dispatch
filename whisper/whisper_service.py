@@ -1,5 +1,6 @@
 import os
 import tempfile
+import threading
 from hmac import compare_digest
 from pathlib import Path
 
@@ -20,6 +21,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
+
+# Serialize the CPU-bound transcription work. Parallel runs only contend for
+# the same cores (a 2s clip measured 100s under a 40-deep pileup on DISP-4)
+# and queued requests exhaust the threadpool until clients see connection
+# resets ("Failed to fetch"). One at a time keeps per-chunk latency flat;
+# /health stays responsive because this endpoint is a sync def (note below).
+TRANSCRIBE_LOCK = threading.Lock()
 
 
 @app.get("/health")
@@ -53,23 +61,24 @@ def transcribe(
             while chunk := audio.file.read(1024 * 1024):
                 temp_file.write(chunk)
 
-        segments, info = model.transcribe(
-            temp_path,
-            language="en",
-            beam_size=5,
-            best_of=5,
-            temperature=(0.0, 0.2, 0.4),
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 700},
-            initial_prompt=prompt or None,
-            condition_on_previous_text=True,
-            compression_ratio_threshold=2.4,
-        )
-        result_segments = [
-            {"start": segment.start, "end": segment.end, "text": segment.text.strip()}
-            for segment in segments
-            if segment.text.strip()
-        ]
+        with TRANSCRIBE_LOCK:
+            segments, info = model.transcribe(
+                temp_path,
+                language="en",
+                beam_size=5,
+                best_of=5,
+                temperature=(0.0, 0.2, 0.4),
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 700},
+                initial_prompt=prompt or None,
+                condition_on_previous_text=True,
+                compression_ratio_threshold=2.4,
+            )
+            result_segments = [
+                {"start": segment.start, "end": segment.end, "text": segment.text.strip()}
+                for segment in segments
+                if segment.text.strip()
+            ]
         return {
             "text": " ".join(segment["text"] for segment in result_segments),
             "language": info.language,
