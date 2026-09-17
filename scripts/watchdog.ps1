@@ -78,7 +78,7 @@ function Stop-StrayWhisper() {
 $minAppRestartGap = [TimeSpan]::FromMinutes(2)
 $lastAppRestart = @{ "Dispatch Monitor" = [DateTime]::MinValue; "Nexus Dispatch" = [DateTime]::MinValue }
 
-function Restart-AppIfDead($title, $directory, $port, $command) {
+function Restart-AppIfDead($title, $directory, $port, $command, $log) {
     if (Test-AppAlive $port) { return }
     $elapsed = Get-Date - $lastAppRestart[$title]
     if ($elapsed -lt $minAppRestartGap) {
@@ -86,7 +86,7 @@ function Restart-AppIfDead($title, $directory, $port, $command) {
         return
     }
     Write-Host "$(Get-Date) $title (port $port) is not responding; restarting..." -ForegroundColor Cyan
-    Restart-App $title $directory $port $command
+    Restart-App $title $directory $port $command $log
     $lastAppRestart[$title] = Get-Date
 }
 
@@ -139,25 +139,32 @@ function Pull-Repo($path) {
     return $false
 }
 
-function Restart-App($title, $directory, $port, $command) {
+# App output is redirected to a log file. Like Whisper (see
+# start-whisper.ps1), apps inheriting the watchdog's hidden console
+# intermittently wedge on console writes and never bind their port.
+function Restart-App($title, $directory, $port, $command, $log) {
     Write-Host "$(Get-Date) Restarting $title..." -ForegroundColor Cyan
     Stop-ProcessOnPort $port
     Stop-AppLauncher $title $directory
-    Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command" -WindowStyle Hidden
+    New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
+    Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command >> `"$log`" 2>&1" -WindowStyle Hidden
 }
 
-function Start-App($title, $directory, $port, $command) {
+function Start-App($title, $directory, $port, $command, $log) {
     Write-Host "$(Get-Date) Starting $title..." -ForegroundColor Cyan
     Stop-ProcessOnPort $port
     Stop-AppLauncher $title $directory
-    Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command" -WindowStyle Hidden
+    New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
+    Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command >> `"$log`" 2>&1" -WindowStyle Hidden
 }
 
 # Initial start
 Start-Whisper
 $lastWhisperRestart = Get-Date
-Start-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev"
-Start-App "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev"
+$dmLog = Join-Path $dispatchMonitor "logs\dispatch-monitor.log"
+$ndLog = Join-Path $nexusDispatch "logs\nexus-dispatch.log"
+Start-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
+Start-App "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev" $ndLog
 
 Write-Host "Watchdog running. Whisper restart every $($whisperRestartInterval.TotalHours)h, git pull every $($gitPullInterval.TotalHours)h." -ForegroundColor Green
 
@@ -172,8 +179,8 @@ while ($true) {
     }
 
     # Restart apps if their DB-backed endpoint stops responding
-    Restart-AppIfDead "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev"
-    Restart-AppIfDead "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev"
+    Restart-AppIfDead "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
+    Restart-AppIfDead "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev" $ndLog
 
     # Pull git updates periodically
     if (($now - $lastGitPull) -gt $gitPullInterval) {
@@ -181,10 +188,10 @@ while ($true) {
         $ndUpdated = Pull-Repo $nexusDispatch
 
         if ($dmUpdated) {
-            Restart-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev"
+            Restart-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
         }
         if ($ndUpdated) {
-            Restart-App "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev"
+            Restart-App "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev" $ndLog
         }
 
         $lastGitPull = $now

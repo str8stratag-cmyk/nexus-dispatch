@@ -16,14 +16,35 @@ A full-stack dispatch monitoring dashboard. It captures live audio, transcribes 
 
 ## Session startup priorities (standing order, 2026-09-17)
 
-Every time this box is fired up (especially after a reboot — the watchdog does
-NOT auto-start), work in this order:
+Every time this box is fired up, work in this order:
 
-1. **Fire up the full stack.** Run the watchdog:
+1. **Check the stack — don't blindly start it.** The watchdog auto-starts at
+   logon via `dispatch-watchdog.vbs` in the Startup folder (added 2026-09-14).
+   First check for a running watchdog (powershell processes with `watchdog.ps1`
+   in the command line) and verify 8178/health, :5000/api/events, and
+   :5001/api/events are all responding before doing anything else. Only if the
+   watchdog is missing, launch ONE, hidden:
    `powershell -ExecutionPolicy Bypass -File C:\Users\str8s\dispatch-monitor\scripts\watchdog.ps1`
-   (or `start-watchdog.bat`; run hidden). It starts Whisper, Dispatch Monitor
-   (5000), and Nexus Dispatch (5001). Verify: 8178/health, :5000/api/events,
-   :5001/api/events all responding before doing anything else.
+   NEVER start a second watchdog (e.g. `start-watchdog.bat`) while one is
+   running — two watchdogs race restarts and wedge the apps.
+   App output now goes to `dispatch-monitor\logs\dispatch-monitor.log` and
+   `nexus-dispatch\logs\nexus-dispatch.log` — if an app won't bind its port,
+   check those logs first. A healthy Whisper instance shows TWO python.exe
+   processes (the `.venv-whisper` launcher and the real interpreter it spawns)
+   — killing the launcher kills the service.
+
+## Recent changes (2026-09-17) — UNCOMMITTED, push pending
+
+- `server/routes.ts`: removed `dispatch radio terminology` from
+  `HARD_PRODUCTION_PHRASES`. It is the literal start of the Whisper
+  `initial_prompt`, so prompt-echo transcriptions tripped the production-audio
+  ban and got quarantined. Side effect: prompt echo can now create junk events
+  (echo carries "Local street names: Olla" + keyword patterns). The cleaner
+  lever is rewording the prompt in `client/src/hooks/use-audio-capture.ts` and
+  `server/whisper.ts`.
+- `scripts/watchdog.ps1`: app stdout/stderr redirected to log files. Apps
+  inheriting the watchdog's hidden console intermittently wedged on console
+  writes and never bound their port (same failure mode Whisper had).
 2. **Review calls and tune Whisper** — listen to recent transcriptions/dispatch
    events, find recurring mis-transcriptions, and add homophone corrections to
    `HOMOPHONE_FIXES` in `whisper/whisper_service.py` (restarting Whisper after

@@ -498,7 +498,9 @@ const HARD_PRODUCTION_PHRASES = [
   "thank you for your attention",
   "thanks for watching",
   "thank you for watching",
-  "dispatch radio terminology",
+  // Not banned: the Whisper initial_prompt itself starts with "Dispatch radio
+  // terminology", and Whisper echoes that prompt into noisy audio — banning it
+  // here quarantines prompt-echo false positives (seen 2026-09-17).
   "one, two, three",
 ];
 
