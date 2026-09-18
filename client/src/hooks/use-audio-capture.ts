@@ -17,8 +17,9 @@ interface UseAudioCaptureReturn {
   supported: boolean;
 }
 
-const CHUNK_DURATION_MS = 8_000;
+const CHUNK_DURATION_MS = 4_000;
 const WHISPER_SERVICE_URL = import.meta.env.VITE_WHISPER_SERVICE_URL || "http://127.0.0.1:8178";
+const WHISPER_API_KEY = import.meta.env.VITE_WHISPER_API_KEY;
 
 export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioCaptureReturn {
   const { deviceId, keywords = [], onTranscript } = options;
@@ -33,10 +34,23 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recorderTimerRef = useRef<number | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  // Serialize transcriptions and bound the backlog — firing every 4s chunk
+  // without waiting piled concurrent /transcribe calls onto Whisper until
+  // its threadpool wedged and the browser showed "Failed to fetch"
+  // (2026-09-17 pileup on DISP-4). At ~7s CPU per chunk, sustained room
+  // audio outproduces the service, so drop the oldest new chunk rather than
+  // queue without bound; addresses get re-transmitted on later chunks.
+  const transcribeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const transcribePendingRef = useRef(0);
+  // Consecutive /transcribe failures — 3+ in a row means the local Whisper
+  // service is down/wedged, not a transient blip (2026-09-18: DISP-1's
+  // Whisper hung for 16h before anyone noticed). Surface a persistent,
+  // unmistakable error so the operator fixes the box instead of trusting
+  // a silently dead capture.
+  const transcribeFailStreakRef = useRef(0);
   const rafRef = useRef<number | null>(null);
   const onTranscriptRef = useRef(onTranscript);
   const isCapturingRef = useRef(false);
-  const transcribingRef = useRef(false);
   const startRecordingRef = useRef<() => void>(() => undefined);
 
   useEffect(() => {
@@ -60,21 +74,21 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     refreshDevices();
   }, [refreshDevices]);
 
-  const transcribe = useCallback(async (audio: Blob) => {
+  const transcribe = useCallback(async (audio: Blob, isSilent: boolean) => {
     if (audio.size === 0) return;
-    if (transcribingRef.current) return; // previous clip still queued/transcribing — shed the chunk like the capture feed does
+    if (isSilent) return;
 
     const form = new FormData();
     form.set("audio", audio, "dispatch.webm");
     form.set(
       "prompt",
-      keywords.length ? `Dispatch radio terminology: ${keywords.join(", ")}.` : "Dispatch radio terminology."
+      keywords.length ? `Dispatch radio terminology: ${keywords.join(", ")}. Local street names: Olla.` : "Dispatch radio terminology. Local street names: Olla."
     );
 
-    transcribingRef.current = true;
-    setError(null);
     try {
-      const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, { method: "POST", body: form });
+      const headers: Record<string, string> = {};
+      if (WHISPER_API_KEY) headers["X-Whisper-Key"] = WHISPER_API_KEY;
+      const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, { method: "POST", body: form, headers });
       const result = await response.json() as { text?: string; message?: string };
       if (!response.ok) {
         throw new Error(result.message || "Local Whisper transcription failed.");
@@ -82,12 +96,19 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       if (result.text?.trim()) {
         onTranscriptRef.current?.(result.text.trim(), true);
       }
+      transcribeFailStreakRef.current = 0;
     } catch (err) {
       const message = err instanceof Error ? err.message : "Local Whisper transcription failed.";
       console.error(message);
-      setError(message);
-    } finally {
-      transcribingRef.current = false;
+      transcribeFailStreakRef.current += 1;
+      if (transcribeFailStreakRef.current >= 3) {
+        setError(
+          `Local Whisper is NOT RESPONDING (${transcribeFailStreakRef.current} consecutive failures) — ` +
+          "capture is running but nothing is being transcribed. Restart Whisper/the watchdog on this machine, then Stop+Start Capture."
+        );
+      } else {
+        setError(message);
+      }
     }
   }, [keywords]);
 
@@ -97,7 +118,26 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
 
     const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
     const chunks: Blob[] = [];
+    let rmsSum = 0;
+    let rmsCount = 0;
     recorderRef.current = recorder;
+
+    const sampleRms = () => {
+      const currentRms = analyserRef.current ? (() => {
+        const data = new Uint8Array(analyserRef.current.fftSize);
+        analyserRef.current.getByteTimeDomainData(data);
+        const sumSquares = data.reduce((sum, value) => {
+          const normalized = (value - 128) / 128;
+          return sum + normalized * normalized;
+        }, 0);
+        return Math.sqrt(sumSquares / data.length);
+      })() : 0;
+      rmsSum += currentRms;
+      rmsCount++;
+      return currentRms;
+    };
+
+    const rmsInterval = window.setInterval(sampleRms, 200);
 
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) chunks.push(event.data);
@@ -105,7 +145,20 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     recorder.onstop = () => {
       recorderRef.current = null;
       recorderTimerRef.current = null;
-      void transcribe(new Blob(chunks, { type: "audio/webm" }));
+      clearInterval(rmsInterval);
+      const avgRms = rmsCount > 0 ? rmsSum / rmsCount : 0;
+      const isSilent = avgRms < 0.015;
+      const blob = new Blob(chunks, { type: "audio/webm" });
+      if (transcribePendingRef.current < 2) {
+        transcribePendingRef.current += 1;
+        transcribeQueueRef.current = transcribeQueueRef.current
+          .then(() => transcribe(blob, isSilent))
+          .finally(() => {
+            transcribePendingRef.current -= 1;
+          });
+      }
+      // Dropping a saturated chunk must NOT skip this — it schedules the
+      // next recording chunk; returning early here silently kills capture.
       if (isCapturingRef.current) startRecordingRef.current();
     };
     recorder.start();
@@ -117,7 +170,6 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
 
   const start = useCallback(async () => {
     setError(null);
-    if (isCapturingRef.current) return;
     if (!supported) {
       const message = "Audio recording is not supported in this browser. Use Chrome or Edge.";
       setError(message);
@@ -133,7 +185,6 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
 
       const audioContext = new AudioContext();
       audioContextRef.current = audioContext;
-      try { await audioContext.resume(); } catch { /* suspended until first user gesture — recording still works */ }
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 2048;
@@ -189,26 +240,6 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
   }, []);
 
   useEffect(() => stop, [stop]);
-
-  // Auto-capture: start on mount instead of waiting for a manual toggle.
-  // If the browser blocks it (permission prompt pending / autoplay policy),
-  // retry once on the first user gesture anywhere on the page.
-  const autoStartRef = useRef(false);
-  useEffect(() => {
-    if (autoStartRef.current) return;
-    autoStartRef.current = true;
-    const tryStart = () => {
-      if (isCapturingRef.current) return;
-      start().catch(() => undefined);
-    };
-    void tryStart();
-    document.addEventListener("click", tryStart);
-    document.addEventListener("keydown", tryStart);
-    return () => {
-      document.removeEventListener("click", tryStart);
-      document.removeEventListener("keydown", tryStart);
-    };
-  }, [start]);
 
   return { isCapturing, rms, error, devices, start, stop, refreshDevices, supported };
 }

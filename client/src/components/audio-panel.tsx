@@ -16,6 +16,10 @@ interface TranscriptEntry {
   timestamp: number;
 }
 
+// Bound the live feed — an unbounded list grows for hours of capture and
+// Chrome kills the tab with "Error code: Out of Memory" (2026-09-17).
+const MAX_TRANSCRIPT_ENTRIES = 300;
+
 export interface DetectedEvent {
   transcript: string;
   keywords: { keyword: string; signalType: string }[];
@@ -44,7 +48,11 @@ export default function AudioPanel({
   districts,
   onDispatchDetected,
 }: AudioPanelProps) {
-  const [selectedDevice, setSelectedDevice] = useState<string>("");
+  const [selectedDevice, setSelectedDeviceState] = useState<string>(() => localStorage.getItem("dispatch.audioDevice") || "");
+  const setSelectedDevice = useCallback((value: string) => {
+    localStorage.setItem("dispatch.audioDevice", value);
+    setSelectedDeviceState(value);
+  }, []);
   const [transcriptEntries, setTranscriptEntries] = useState<TranscriptEntry[]>([]);
   const [lastDispatch, setLastDispatch] = useState<DetectedEvent | null>(null);
   const entryIdRef = useRef(0);
@@ -97,6 +105,7 @@ export default function AudioPanel({
   const handleTranscript = useCallback((text: string, isFinal: boolean) => {
     const id = `entry-${entryIdRef.current++}`;
     setTranscriptEntries((prev) => {
+      let next: TranscriptEntry[];
       if (!isFinal && prev.length > 0 && !prev[prev.length - 1].isFinal) {
         const updated = [...prev];
         updated[updated.length - 1] = {
@@ -104,9 +113,13 @@ export default function AudioPanel({
           text,
           timestamp: Date.now(),
         };
-        return updated;
+        next = updated;
+      } else {
+        next = [...prev, { id, text, isFinal, timestamp: Date.now() }];
       }
-      return [...prev, { id, text, isFinal, timestamp: Date.now() }];
+      return next.length > MAX_TRANSCRIPT_ENTRIES
+        ? next.slice(next.length - MAX_TRANSCRIPT_ENTRIES)
+        : next;
     });
 
     if (isFinal) {
@@ -123,6 +136,91 @@ export default function AudioPanel({
   });
 
   const [micBlocked, setMicBlocked] = useState(false);
+
+  // Self-reload before Chrome kills the tab with "Error code: Out of
+  // Memory" — the V8 heap only resets on navigation and capture
+  // auto-resumes after reload, so a preemptive reload beats a crashed tab.
+  // Crash dumps showed the RENDERER ballooning far beyond the JS heap, so
+  // reload periodically to bound any slow leak. A DOM-node guard was tried
+  // here and removed: EventLog legitimately renders ~30k+ nodes with the
+  // full collection, so the guard reload-looped the tab every 30s.
+  useEffect(() => {
+    const perf = performance as Performance & { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } };
+    const hasMem = typeof perf.memory !== "undefined";
+    const started = Date.now();
+    const timer = window.setInterval(() => {
+      if (hasMem) {
+        const { usedJSHeapSize, jsHeapSizeLimit } = perf.memory!;
+        if (jsHeapSizeLimit > 0 && usedJSHeapSize > 0.6 * jsHeapSizeLimit) {
+          window.location.reload();
+          return;
+        }
+      }
+      if (Date.now() - started > 2 * 60 * 60 * 1000) {
+        window.location.reload();
+      }
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // Auto-resume capture after restarts. getUserMedia can run without a user
+  // gesture once mic permission is granted for this origin; if permission is
+  // still 'prompt', we show a note and fall back to one manual Start press.
+  const autoStartTriedRef = useRef(false);
+  const [autoStartNote, setAutoStartNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (autoStartTriedRef.current || isInIframe || !supported) return;
+    autoStartTriedRef.current = true;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const perm = await navigator.permissions.query({ name: "microphone" as PermissionName });
+        if (perm.state !== "granted") {
+          if (!cancelled) {
+            setAutoStartNote("Microphone permission not granted yet — press Start Capture once to enable auto-start.");
+          }
+          return;
+        }
+      } catch {
+        // Permissions API unavailable — attempt start anyway.
+      }
+      if (cancelled) return;
+
+      // The app may still be booting after a watchdog restart — retry with backoff.
+      const attempt = async (triesLeft: number, delayMs: number) => {
+        if (cancelled) return;
+        try {
+          await start();
+          setMicBlocked(false);
+          setAutoStartNote(null);
+        } catch (err: any) {
+          const denied =
+            err?.name === "NotAllowedError" ||
+            err?.message?.includes("not allowed") ||
+            err?.message?.includes("permission");
+          if (denied) {
+            if (!cancelled) {
+              setMicBlocked(true);
+              setAutoStartNote("Microphone access denied — allow it in the browser site settings, then press Start Capture.");
+            }
+            return;
+          }
+          if (triesLeft > 0) {
+            window.setTimeout(() => attempt(triesLeft - 1, delayMs + 4000), delayMs);
+          } else if (!cancelled) {
+            setAutoStartNote("Auto-start failed — press Start Capture manually.");
+          }
+        }
+      };
+      attempt(4, 3000);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [supported, isInIframe, start]);
 
   const handleStart = async () => {
     try {
@@ -233,6 +331,12 @@ export default function AudioPanel({
       {isPending && (
         <div className="text-xs text-yellow-600 animate-pulse p-2 rounded bg-yellow-950/30 border border-yellow-900/40" data-testid="dispatch-pending">
           ⏳ Keyword detected. Waiting for address/details...
+        </div>
+      )}
+
+      {autoStartNote && !isCapturing && (
+        <div className="text-xs text-yellow-500 p-2 rounded bg-yellow-950/30 border border-yellow-900/40" data-testid="auto-start-note">
+          {autoStartNote}
         </div>
       )}
 

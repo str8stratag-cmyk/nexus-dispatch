@@ -1,35 +1,27 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useTheme } from "@/hooks/use-theme";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Sun, Moon, Radio, Send, Settings, ExternalLink, Map, ShieldAlert } from "lucide-react";
+import { Sun, Moon, Radio, Send, Settings, ExternalLink, ShieldAlert } from "lucide-react";
 import AudioPanel, { type DetectedEvent } from "@/components/audio-panel";
-import DispatchMap from "@/components/dispatch-map";
 import EventLog from "@/components/event-log";
 import ManualDispatch from "@/components/manual-dispatch";
 import SettingsPanel from "@/components/settings-panel";
 import QuarantinePanel from "@/components/quarantine-panel";
 import { useEventsStream } from "@/hooks/use-events-stream";
 
-interface DispatchEventRow {
-  id: number;
-  transcript: string;
-  keywords: string;
-  address: string | null;
-  crossStreet: string | null;
-  lat: number | null;
-  lng: number | null;
-  signalType: string | null;
-  description: string | null;
-  district: string;
-  source: string;
-  status: string;
-  isManual: boolean;
-  geocodedRoad: string | null;
-  createdAt: string;
+// Per-machine defaults from the server hostname: DISP-2 → District 2, source
+// "DISP-2". A manually entered district/source (persisted in localStorage)
+// always wins over these defaults.
+function defaultsFromHostname(hostname: string | null | undefined): { district: string; source: string } {
+  const match = hostname?.match(/disp(?:atch)?\s*-?\s*(\d+)/i);
+  if (match) {
+    return { district: `District ${match[1]}`, source: `DISP-${match[1]}` };
+  }
+  return { district: "District 1", source: hostname || "" };
 }
 
 export default function DispatchPage() {
@@ -37,18 +29,64 @@ export default function DispatchPage() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  const [district, setDistrict] = useState("District 1");
-  const [sourceName, setSourceName] = useState("");
-  const [districts] = useState<string[]>(["District 1", "District 2", "District 3", "District 4", "District 5", "District 6", "District 7"]);
+  const [district, setDistrictState] = useState(() => localStorage.getItem("dispatch.district") || "District 1");
+  const [sourceName, setSourceNameState] = useState(() => localStorage.getItem("dispatch.source") || "");
+  const [districts, setDistricts] = useState<string[]>(["District 1", "District 2", "District 3", "District 4", "District 5", "District 6", "District 7"]);
 
-  const { data: events = [] } = useQuery<DispatchEventRow[]>({
-    queryKey: ["/api/events"],
+  // Manual entries persist across restarts and always win over the
+  // machine-derived defaults below.
+  const setDistrict = useCallback((value: string) => {
+    localStorage.setItem("dispatch.district", value);
+    setDistrictState(value);
+  }, []);
+  const setSourceName = useCallback((value: string) => {
+    localStorage.setItem("dispatch.source", value);
+    setSourceNameState(value);
+  }, []);
+
+  const { data: machineConfig } = useQuery({
+    queryKey: ["/api/machine"],
     queryFn: async () => {
-      const res = await apiRequest("GET", "/api/events");
+      const res = await apiRequest("GET", "/api/machine");
+      return res.json() as Promise<{ hostname: string }>;
+    },
+    staleTime: Infinity,
+    retry: false,
+  });
+
+  // Fresh browsers (nothing manually entered) self-configure from the
+  // machine identity: DISP-N → District N, source "DISP-N".
+  useEffect(() => {
+    if (!machineConfig?.hostname) return;
+    const defaults = defaultsFromHostname(machineConfig.hostname);
+    if (!localStorage.getItem("dispatch.district")) {
+      setDistrictState(defaults.district);
+    }
+    if (!localStorage.getItem("dispatch.source")) {
+      setSourceNameState(defaults.source);
+    }
+  }, [machineConfig]);
+
+  const { data: districtSettings } = useQuery({
+    queryKey: ["/api/settings"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/settings");
       return res.json();
     },
-    refetchInterval: 5000,
   });
+
+  useEffect(() => {
+    if (!Array.isArray(districtSettings)) return;
+    const stored = districtSettings.find((s: any) => s.key === "districts");
+    if (stored && stored.value) {
+      try {
+        const parsed = JSON.parse(stored.value);
+        if (Array.isArray(parsed) && parsed.length > 0) setDistricts(parsed);
+      } catch {}
+    }
+  }, [districtSettings]);
+
+  useEventsStream();
 
   const dispatchMutation = useMutation({
     mutationFn: async (data: any) => {
@@ -108,9 +146,6 @@ export default function DispatchPage() {
           <TabsTrigger value="manual" className="px-4 py-2 text-xs" data-testid="tab-manual">
             <Send className="mr-1 h-3 w-3" /> Manual Dispatch
           </TabsTrigger>
-          <TabsTrigger value="map" className="px-4 py-2 text-xs" data-testid="tab-map">
-            <Map className="mr-1 h-3 w-3" /> Map
-          </TabsTrigger>
           <TabsTrigger value="quarantine" className="px-4 py-2 text-xs" data-testid="tab-quarantine">
             <ShieldAlert className="mr-1 h-3 w-3" /> Quarantine
           </TabsTrigger>
@@ -154,9 +189,6 @@ export default function DispatchPage() {
           <TabsTrigger value="manual" className="text-xs" data-testid="tab-manual">
             <Send className="h-3 w-3 mr-1" /> Manual
           </TabsTrigger>
-          <TabsTrigger value="map" className="text-xs" data-testid="tab-map">
-            <Map className="h-3 w-3 mr-1" /> Map
-          </TabsTrigger>
           <TabsTrigger value="quarantine" className="text-xs" data-testid="tab-quarantine">
             <ShieldAlert className="h-3 w-3 mr-1" /> Quarantine
           </TabsTrigger>
@@ -182,13 +214,6 @@ export default function DispatchPage() {
             <section className="min-h-[360px] rounded-lg border border-border bg-card p-3 shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
               <EventLog />
             </section>
-          </div>
-        </TabsContent>
-
-        {/* Map Tab */}
-        <TabsContent value="map" className="flex-1 min-h-0 mt-2 lg:mt-0">
-          <div className="h-full p-3">
-            <DispatchMap markers={events} />
           </div>
         </TabsContent>
 
