@@ -467,10 +467,11 @@ export async function registerRoutes(
   ];
 
   // Joiners that separate the two roads of an intersection. Directionals act
-  // as linkers in clipped radio speech ("north armenia west busch"). "amd" is
-  // Whisper's mis-hearing of "and" between street names ("AZEELE AMD
-  // TAMPANIA" — the junk token otherwise goes to Azure as one bogus street).
-  const INTERSECTION_SPLIT_RE = /\s+(?:and|amd|&|@|n|s|e|w|north|south|east|west)\s+/i;
+  // as linkers in clipped radio speech ("north armenia west busch"). "amd" and
+  // "an" are Whisper's mis-hearings of "and" between street names ("AZEELE AMD
+  // TAMPANIA", "30TH AN FOWLER"), "at" is plain dispatcher speech — all gated
+  // by the both-sides-must-name-a-road check below.
+  const INTERSECTION_SPLIT_RE = /\s+(?:and|amd|an|at|&|@|n|s|e|w|north|south|east|west)\s+/i;
 
   function canonicalizeKnownRoads(address: string): string {
     // Dispatch chatter the extractor can't reliably drop tails the query and
