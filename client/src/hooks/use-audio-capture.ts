@@ -42,6 +42,12 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
   // queue without bound; addresses get re-transmitted on later chunks.
   const transcribeQueueRef = useRef<Promise<void>>(Promise.resolve());
   const transcribePendingRef = useRef(0);
+  // Consecutive /transcribe failures — 3+ in a row means the local Whisper
+  // service is down/wedged, not a transient blip (2026-09-18: DISP-1's
+  // Whisper hung for 16h before anyone noticed). Surface a persistent,
+  // unmistakable error so the operator fixes the box instead of trusting
+  // a silently dead capture.
+  const transcribeFailStreakRef = useRef(0);
   const rafRef = useRef<number | null>(null);
   const onTranscriptRef = useRef(onTranscript);
   const isCapturingRef = useRef(false);
@@ -92,10 +98,19 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       if (result.text?.trim()) {
         onTranscriptRef.current?.(result.text.trim(), true);
       }
+      transcribeFailStreakRef.current = 0;
     } catch (err) {
       const message = err instanceof Error ? err.message : "Local Whisper transcription failed.";
       console.error(message);
-      setError(message);
+      transcribeFailStreakRef.current += 1;
+      if (transcribeFailStreakRef.current >= 3) {
+        setError(
+          `Local Whisper is NOT RESPONDING (${transcribeFailStreakRef.current} consecutive failures) — ` +
+          "capture is running but nothing is being transcribed. Restart Whisper/the watchdog on this machine, then Stop+Start Capture."
+        );
+      } else {
+        setError(message);
+      }
     }
   }, [keywords]);
 
