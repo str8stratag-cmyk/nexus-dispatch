@@ -17,9 +17,8 @@ interface UseAudioCaptureReturn {
   supported: boolean;
 }
 
-const CHUNK_DURATION_MS = 4_000;
+const CHUNK_DURATION_MS = 8_000;
 const WHISPER_SERVICE_URL = import.meta.env.VITE_WHISPER_SERVICE_URL || "http://127.0.0.1:8178";
-const WHISPER_API_KEY = import.meta.env.VITE_WHISPER_API_KEY;
 
 export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioCaptureReturn {
   const { deviceId, keywords = [], onTranscript } = options;
@@ -37,6 +36,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
   const rafRef = useRef<number | null>(null);
   const onTranscriptRef = useRef(onTranscript);
   const isCapturingRef = useRef(false);
+  const transcribingRef = useRef(false);
   const startRecordingRef = useRef<() => void>(() => undefined);
 
   useEffect(() => {
@@ -60,9 +60,9 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     refreshDevices();
   }, [refreshDevices]);
 
-  const transcribe = useCallback(async (audio: Blob, isSilent: boolean) => {
+  const transcribe = useCallback(async (audio: Blob) => {
     if (audio.size === 0) return;
-    if (isSilent) return;
+    if (transcribingRef.current) return; // previous clip still queued/transcribing — shed the chunk like the capture feed does
 
     const form = new FormData();
     form.set("audio", audio, "dispatch.webm");
@@ -71,10 +71,10 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       keywords.length ? `Dispatch radio terminology: ${keywords.join(", ")}.` : "Dispatch radio terminology."
     );
 
+    transcribingRef.current = true;
+    setError(null);
     try {
-      const headers: Record<string, string> = {};
-      if (WHISPER_API_KEY) headers["X-Whisper-Key"] = WHISPER_API_KEY;
-      const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, { method: "POST", body: form, headers });
+      const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, { method: "POST", body: form });
       const result = await response.json() as { text?: string; message?: string };
       if (!response.ok) {
         throw new Error(result.message || "Local Whisper transcription failed.");
@@ -86,6 +86,8 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       const message = err instanceof Error ? err.message : "Local Whisper transcription failed.";
       console.error(message);
       setError(message);
+    } finally {
+      transcribingRef.current = false;
     }
   }, [keywords]);
 
@@ -95,26 +97,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
 
     const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
     const chunks: Blob[] = [];
-    let rmsSum = 0;
-    let rmsCount = 0;
     recorderRef.current = recorder;
-
-    const sampleRms = () => {
-      const currentRms = analyserRef.current ? (() => {
-        const data = new Uint8Array(analyserRef.current.fftSize);
-        analyserRef.current.getByteTimeDomainData(data);
-        const sumSquares = data.reduce((sum, value) => {
-          const normalized = (value - 128) / 128;
-          return sum + normalized * normalized;
-        }, 0);
-        return Math.sqrt(sumSquares / data.length);
-      })() : 0;
-      rmsSum += currentRms;
-      rmsCount++;
-      return currentRms;
-    };
-
-    const rmsInterval = window.setInterval(sampleRms, 200);
 
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) chunks.push(event.data);
@@ -122,10 +105,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     recorder.onstop = () => {
       recorderRef.current = null;
       recorderTimerRef.current = null;
-      clearInterval(rmsInterval);
-      const avgRms = rmsCount > 0 ? rmsSum / rmsCount : 0;
-      const isSilent = avgRms < 0.015;
-      void transcribe(new Blob(chunks, { type: "audio/webm" }), isSilent);
+      void transcribe(new Blob(chunks, { type: "audio/webm" }));
       if (isCapturingRef.current) startRecordingRef.current();
     };
     recorder.start();
@@ -137,6 +117,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
 
   const start = useCallback(async () => {
     setError(null);
+    if (isCapturingRef.current) return;
     if (!supported) {
       const message = "Audio recording is not supported in this browser. Use Chrome or Edge.";
       setError(message);
@@ -152,6 +133,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
 
       const audioContext = new AudioContext();
       audioContextRef.current = audioContext;
+      try { await audioContext.resume(); } catch { /* suspended until first user gesture — recording still works */ }
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 2048;
@@ -207,6 +189,26 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
   }, []);
 
   useEffect(() => stop, [stop]);
+
+  // Auto-capture: start on mount instead of waiting for a manual toggle.
+  // If the browser blocks it (permission prompt pending / autoplay policy),
+  // retry once on the first user gesture anywhere on the page.
+  const autoStartRef = useRef(false);
+  useEffect(() => {
+    if (autoStartRef.current) return;
+    autoStartRef.current = true;
+    const tryStart = () => {
+      if (isCapturingRef.current) return;
+      start().catch(() => undefined);
+    };
+    void tryStart();
+    document.addEventListener("click", tryStart);
+    document.addEventListener("keydown", tryStart);
+    return () => {
+      document.removeEventListener("click", tryStart);
+      document.removeEventListener("keydown", tryStart);
+    };
+  }, [start]);
 
   return { isCapturing, rms, error, devices, start, stop, refreshDevices, supported };
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,8 +13,7 @@ export default function SettingsPanel() {
   const [botToken, setBotToken] = useState("");
   const [chatId, setChatId] = useState("");
   const [newDistrict, setNewDistrict] = useState("");
-  const [districts, setDistricts] = useState<string[]>([]);
-  const [districtsLoaded, setDistrictsLoaded] = useState(false);
+  const [districts, setDistricts] = useState<string[]>(["District 1", "District 2", "District 3", "District 4", "District 5", "District 6", "District 7"]);
   const [newPattern, setNewPattern] = useState("");
   const [newLabel, setNewLabel] = useState("");
   const [newSignalType, setNewSignalType] = useState("");
@@ -29,24 +28,6 @@ export default function SettingsPanel() {
       return res.json();
     },
   });
-
-  useEffect(() => {
-    if (districtsLoaded || !Array.isArray(settings)) return;
-    const stored = settings.find((s: any) => s.key === "districts");
-    if (stored && stored.value) {
-      try {
-        const parsed = JSON.parse(stored.value);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setDistricts(parsed);
-          setDistrictsLoaded(true);
-          return;
-        }
-      } catch {}
-    }
-    const defaults = ["District 1", "District 2", "District 3", "District 4", "District 5", "District 6", "District 7"];
-    setDistricts(defaults);
-    setDistrictsLoaded(true);
-  }, [settings, districtsLoaded]);
 
   const saveSettingMutation = useMutation({
     mutationFn: async ({ key, value }: { key: string; value: string }) => {
@@ -112,16 +93,12 @@ export default function SettingsPanel() {
       toast({ title: "Duplicate", description: "District already exists.", variant: "destructive" });
       return;
     }
-    const updated = [...districts, newDistrict.trim()];
-    setDistricts(updated);
+    setDistricts([...districts, newDistrict.trim()]);
     setNewDistrict("");
-    saveSettingMutation.mutate({ key: "districts", value: JSON.stringify(updated) });
   };
 
   const handleRemoveDistrict = (d: string) => {
-    const updated = districts.filter((dist) => dist !== d);
-    setDistricts(updated);
-    saveSettingMutation.mutate({ key: "districts", value: JSON.stringify(updated) });
+    setDistricts(districts.filter((dist) => dist !== d));
   };
 
   const handleAddKeyword = async () => {

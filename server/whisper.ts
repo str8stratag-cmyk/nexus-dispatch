@@ -1,5 +1,4 @@
 const WHISPER_SERVICE_URL = process.env.WHISPER_SERVICE_URL || "http://127.0.0.1:8178";
-const WHISPER_API_KEY = process.env.WHISPER_API_KEY;
 
 interface WhisperResponse {
   text: string;
@@ -13,12 +12,8 @@ export async function transcribeAudio(
   filename: string,
   keywords: string[]
 ): Promise<WhisperResponse> {
-  // Keep this prompt generic. Whisper treats initial_prompt as prior context and
-  // will hallucinate a concrete call example into unrelated audio — a hardcoded
-  // "Signal 4, MVA at Dale Mabry and Linebaugh" example caused ~330 bogus events
-  // over one weekend (see client hook fix in c16ffa2; 2026-09-08).
   const prompt = keywords.length
-    ? `Dispatch radio terminology: ${keywords.slice(0, 8).join(", ")}.`
+    ? `Dispatch radio terminology: ${keywords.join(", ")}.`
     : "Dispatch radio terminology.";
   const body = new FormData();
   body.set("audio", new Blob([audio]), filename);
@@ -29,7 +24,6 @@ export async function transcribeAudio(
     response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, {
       method: "POST",
       body,
-      headers: WHISPER_API_KEY ? { "X-Whisper-Key": WHISPER_API_KEY } : undefined,
       signal: AbortSignal.timeout(60_000),
     });
   } catch (error) {

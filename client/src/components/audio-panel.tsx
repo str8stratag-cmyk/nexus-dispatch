@@ -44,11 +44,7 @@ export default function AudioPanel({
   districts,
   onDispatchDetected,
 }: AudioPanelProps) {
-  const [selectedDevice, setSelectedDeviceState] = useState<string>(() => localStorage.getItem("dispatch.audioDevice") || "");
-  const setSelectedDevice = useCallback((value: string) => {
-    localStorage.setItem("dispatch.audioDevice", value);
-    setSelectedDeviceState(value);
-  }, []);
+  const [selectedDevice, setSelectedDevice] = useState<string>("");
   const [transcriptEntries, setTranscriptEntries] = useState<TranscriptEntry[]>([]);
   const [lastDispatch, setLastDispatch] = useState<DetectedEvent | null>(null);
   const entryIdRef = useRef(0);
@@ -127,65 +123,6 @@ export default function AudioPanel({
   });
 
   const [micBlocked, setMicBlocked] = useState(false);
-
-  // Auto-resume capture after restarts. getUserMedia can run without a user
-  // gesture once mic permission is granted for this origin; if permission is
-  // still 'prompt', we show a note and fall back to one manual Start press.
-  const autoStartTriedRef = useRef(false);
-  const [autoStartNote, setAutoStartNote] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (autoStartTriedRef.current || isInIframe || !supported) return;
-    autoStartTriedRef.current = true;
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const perm = await navigator.permissions.query({ name: "microphone" as PermissionName });
-        if (perm.state !== "granted") {
-          if (!cancelled) {
-            setAutoStartNote("Microphone permission not granted yet — press Start Capture once to enable auto-start.");
-          }
-          return;
-        }
-      } catch {
-        // Permissions API unavailable — attempt start anyway.
-      }
-      if (cancelled) return;
-
-      // The app may still be booting after a watchdog restart — retry with backoff.
-      const attempt = async (triesLeft: number, delayMs: number) => {
-        if (cancelled) return;
-        try {
-          await start();
-          setMicBlocked(false);
-          setAutoStartNote(null);
-        } catch (err: any) {
-          const denied =
-            err?.name === "NotAllowedError" ||
-            err?.message?.includes("not allowed") ||
-            err?.message?.includes("permission");
-          if (denied) {
-            if (!cancelled) {
-              setMicBlocked(true);
-              setAutoStartNote("Microphone access denied — allow it in the browser site settings, then press Start Capture.");
-            }
-            return;
-          }
-          if (triesLeft > 0) {
-            window.setTimeout(() => attempt(triesLeft - 1, delayMs + 4000), delayMs);
-          } else if (!cancelled) {
-            setAutoStartNote("Auto-start failed — press Start Capture manually.");
-          }
-        }
-      };
-      attempt(4, 3000);
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [supported, isInIframe, start]);
 
   const handleStart = async () => {
     try {
@@ -296,12 +233,6 @@ export default function AudioPanel({
       {isPending && (
         <div className="text-xs text-yellow-600 animate-pulse p-2 rounded bg-yellow-950/30 border border-yellow-900/40" data-testid="dispatch-pending">
           ⏳ Keyword detected. Waiting for address/details...
-        </div>
-      )}
-
-      {autoStartNote && !isCapturing && (
-        <div className="text-xs text-yellow-500 p-2 rounded bg-yellow-950/30 border border-yellow-900/40" data-testid="auto-start-note">
-          {autoStartNote}
         </div>
       )}
 
