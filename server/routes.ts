@@ -161,6 +161,8 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   [/\b(?:dr\s+)?martin\s+luther\s+king(?:\s+jr)?(?:\s+blvd|\s+boulevard)?\b/gi, "Martin Luther King Jr Blvd"],
   [/\bmlk\b/gi, "Martin Luther King Jr Blvd"],
   [/\bbusch(?:\s+blvd|\s+boulevard)?\b(?!\s+gardens)/gi, "Busch Blvd"],
+  // Whisper hears "Busch" as "e-brush" — map the mangling to the corridor.
+  [/\be[- ]brush\b(?!\s+gardens)/gi, "Busch Blvd"],
   [/\bsligh(?:\s+ave(?:nue)?)?\b/gi, "Sligh Ave"],
   [/\bkennedy(?:\s+blvd|\s+boulevard)?\b/gi, "Kennedy Blvd"],
   [/\bbroadway(?:\s+ave(?:nue)?)?\b/gi, "Broadway Ave"],
@@ -209,7 +211,7 @@ const STEM_DIR_RE = /^(?:n|s|e|w|ne|nw|se|sw|north|south|east|west)\s+/i;
 // Street numbers and dispatch chatter that leak into extracted addresses —
 // stripped before comparing the queried road name against the match so
 // "KENNEDY AND ALVA HONDA VS UNKNOWN" still validates against "Alva St".
-const STEM_NOISE_RE = /\b(?:\d+[a-z]?|car|cars|mvc|mva|vs|signal|signals|unknown|unkown|unknow|injury|injuries|involved|involving|invlving|rollover|airbags|deployed|block|with|minor|honda|toyota|ford|chevy|chevrolet|nissan|dodge|hyundai|mazda|jeep|bmw|audi|kia|tesla|lexus|acura|gmc|subaru|chrysler|ram)\b/gi;
+const STEM_NOISE_RE = /\b(?:\d+[a-z]?|car|cars|mvc|mva|vs|signal|signals|unknown|unkown|unknow|injury|injuries|involved|involving|invlving|rollover|airbags|deployed|block|with|minor|honda|toyota|ford|chevy|chevrolet|nissan|dodge|hyundai|mazda|jeep|bmw|audi|kia|tesla|lexus|acura|gmc|subaru|chrysler|ram|bridge)\b/gi;
 
 function roadNameStem(part: string): string {
   return part
@@ -222,7 +224,7 @@ function roadNameStem(part: string): string {
     .trim();
 }
 
-async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
+async function geocodeAddressWithQuery(address: string): Promise<GeocodeResult | null> {
   const azureKey = process.env.AZURE_MAPS_KEY?.trim();
   const geoapifyKey = process.env.GEOAPIFY_API_KEY?.trim();
   const boundingBox = process.env.GEOAPIFY_BOUNDING_BOX?.trim();
@@ -387,6 +389,29 @@ async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
     console.error("Nominatim geocoding failed:", err);
   }
 
+  return null;
+}
+
+// Corridors recognized in KNOWN_ROAD_CANONICAL that appear in the address,
+// reduced to a bare "Ave & Ave" query. Trailing radio chatter ("Busch Blvd 3,
+// bridge") makes providers fuzzy-match a centroid the validator then rejects;
+// the bare corridor still pins approximately. Unknown roads get no fallback.
+function knownRoadOnlyQuery(address: string): string | null {
+  const roads = new Set<string>();
+  for (const [pattern, replacement] of KNOWN_ROAD_CANONICAL) {
+    if (address.match(pattern)) roads.add(replacement);
+  }
+  if (roads.size === 0) return null;
+  return Array.from(roads).join(" & ");
+}
+
+async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
+  const direct = await geocodeAddressWithQuery(address);
+  if (direct) return direct;
+  const roadOnly = knownRoadOnlyQuery(address);
+  if (roadOnly && roadOnly !== address) {
+    return geocodeAddressWithQuery(roadOnly);
+  }
   return null;
 }
 
@@ -752,15 +777,18 @@ export async function registerRoutes(
   // Create a dispatch event (auto or manual)
   app.post("/api/dispatch", dispatchLimiter, async (req, res) => {    try {
       const parsed = insertDispatchEventSchema.parse(req.body);
-      // skipDedup is an intake-only flag (see schema) — keep it out of the
-      // stored event document.
-      const { skipDedup, ...eventFields } = parsed;
 
       // Stamp which Whisper model produced this event (fleet accuracy comparison).
+      // Must run BEFORE the eventFields destructure below — the stored event
+      // spreads eventFields, so a backfill afterwards never reaches it.
       if (!parsed.whisperModel) {
         const model = await getWhisperModel();
         if (model) parsed.whisperModel = model;
       }
+
+      // skipDedup is an intake-only flag (see schema) — keep it out of the
+      // stored event document.
+      const { skipDedup, ...eventFields } = parsed;
 
       // Auto-dispatches without a real address are usually TV/noise false positives.
       // Manual dispatches can still be created without an address.
