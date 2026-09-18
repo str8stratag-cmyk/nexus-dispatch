@@ -1,6 +1,9 @@
+param([switch]$NoInitialStart)
 # Watchdog: keep Whisper alive, pull GitHub updates, restart apps when code changes
 # Run from PowerShell: .\scripts\watchdog.ps1
 # Runs indefinitely until you close the window.
+# -NoInitialStart: skip the initial Whisper/app start (used when the updated
+# script spawns itself — services are already running).
 
 $dispatchMonitor = "C:\Users\str8s\dispatch-monitor"
 $nexusDispatch = "C:\Users\str8s\nexus-dispatch"
@@ -166,12 +169,18 @@ function Start-App($title, $directory, $port, $command, $log) {
 }
 
 # Initial start
-Start-Whisper
-$lastWhisperRestart = Get-Date
+if (-not $NoInitialStart) {
+    Start-Whisper
+    $dmLog = Join-Path $dispatchMonitor "logs\dispatch-monitor.log"
+    # Nexus Dispatch is dormant fleet-wide (user, 2026-09-17): repo keeps
+    # pulling below so it stays current, but the app is not started/supervised.
+    Start-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
+} else {
+    # Services are already running (self-update path) — stamp the timers so
+    # the loop does not immediately restart Whisper for looking "overdue".
+    $lastWhisperRestart = Get-Date
+}
 $dmLog = Join-Path $dispatchMonitor "logs\dispatch-monitor.log"
-# Nexus Dispatch is dormant fleet-wide (user, 2026-09-17): repo keeps
-# pulling below so it stays current, but the app is not started/supervised.
-Start-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
 
 Write-Host "Watchdog running. Whisper restart every $($whisperRestartInterval.TotalHours)h, git pull every $($gitPullInterval.TotalHours)h." -ForegroundColor Green
 
@@ -195,6 +204,25 @@ while ($true) {
 
         if ($dmUpdated) {
             Restart-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
+        }
+
+        # Self-update: pulling a new watchdog.ps1 does NOT fix the running
+        # loop — it keeps executing the old in-memory script until something
+        # restarts it (2026-09-18: DISP-1 silently ran a pre-fix watchdog and
+        # stayed dead for 16h). If the on-disk script differs from the one we
+        # are running, spawn the updated script (skipping initial starts) and
+        # exit. Brief overlap is safe: both loops health-check and restarts
+        # are port- and throttle-guarded.
+        $newWd = Join-Path $dispatchMonitor "scripts\watchdog.ps1"
+        if (Test-Path $newWd) {
+            $oldHash = (Get-FileHash $MyInvocation.MyCommand.Path -Algorithm SHA256).Hash
+            $newHash = (Get-FileHash $newWd -Algorithm SHA256).Hash
+            if ($oldHash -ne $newHash) {
+                Write-Host "$(Get-Date) Watchdog script updated on disk; spawning new instance and exiting." -ForegroundColor Cyan
+                Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $newWd, "-NoInitialStart" -WindowStyle Hidden
+                Start-Sleep -Seconds 5
+                exit
+            }
         }
 
         $lastGitPull = $now
