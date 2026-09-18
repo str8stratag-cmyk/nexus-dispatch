@@ -51,6 +51,21 @@ positives are rare and harmless), "McKinney/McKinvey/MCKINNELY" →
 interstte→Interstate, signaal→Signal, unkown→unknown). Verified with
 py_compile + a direct apply_homophone_fixes test.
 
+**Afternoon: "AZEELE AMD TAMPANIA" geocode miss diagnosed + fixed** (event
+862, Telegram alert with the approximate-location banner). Azure Maps was
+never asked a valid question: DISP-5's pipeline sent address "AZEELE AMD
+TAMPANIA" ("and" mis-heard as "amd"), `INTERSECTION_SPLIT_RE` didn't know
+"amd", so Azure got one fictitious street and returned nothing; both roads
+were also missing from `KNOWN_ROAD_CANONICAL`, and Azure's intersection
+matching wants a street-type suffix on at least one side anyway. Fixes in
+`server/routes.ts`: "amd" added to the joiner regex, canonical entries
+`Azeele St` / `Tampania Ave` (both real Tampa roads, 33606/33609 — Azure
+had them all along). Plus whisper `\bamd\b` → "and". E2E-verified on the
+live box: `/api/geocode?q=AZEELE AMD TAMPANIA` →
+"Azeele St & S Tampania Ave, Tampa, FL 33609" from Azure. Note there is NO
+local road dataset — every address is a live Azure→Geoapify→Nominatim
+query with ", Tampa, FL" appended.
+
 - **Elevation gotcha:** the logon watchdog and the Whisper it spawns run
   ELEVATED, so a non-elevated shell CANNOT kill the 8178 python
   (taskkill/Stop-Process = Access denied). To apply whisper_service.py
@@ -137,9 +152,17 @@ Commit `ce36bae`: "Add ffmpeg audio optimization for AI transcription"
 - Added `ffmpeg-static` dependency.
 
 ## Pending tasks / next steps
-- Push both repos — the 2026-09-18 homophone fixes are uncommitted in
-  dispatch-monitor (`whisper_service.py`, `AGENTS.md`), and nexus-dispatch
-  has the re-synced `whisper_service.py` uncommitted.
+- **nexus-dispatch `server/routes.ts` is a full server fork, massively
+  drifted** (found 2026-09-18): it predates the quarantine system, dedup,
+  `HARD_PRODUCTION_PHRASES`, road-mention tuning, whisperModel stamping,
+  the new `atlas.microsoft.com/geocode` API (still on 2023-06-01 reverse
+  endpoint), and the Telegram approximate-location banner. The nexus app on
+  :5001 runs this old code. Decision pending: full routes.ts parity swap
+  (risky-ish, it's the running :5001 app) vs leave as-is since nexus is not
+  production. The 2026-09-18 geocode fixes were applied to BOTH versions.
+- Refire technique that works from a non-elevated shell: write a kill-ports
+  ps1, launch it with `Start-Process -Verb RunAs` (UAC click), let the
+  watchdog do the rest. `schtasks /rl HIGHEST` is denied non-elevated.
 
 ## Key commands
 ```bash
