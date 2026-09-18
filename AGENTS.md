@@ -33,7 +33,13 @@ Every time this box is fired up, work in this order:
    processes (the `.venv-whisper` launcher and the real interpreter it spawns)
    — killing the launcher kills the service.
 
-## Recent changes (2026-09-18) — HOMOPHONE_FIXES tuned; UNCOMMITTED, push pending
+## Recent changes (2026-09-18) — HOMOPHONE_FIXES tuned; committed f2bebdb, pushed
+
+Also landed same day from another box (c34c790, rebased under f2bebdb):
+Whisper self-supervisor thread (probes /health every 30s, `os._exit(1)`
+after 5 min of transcribe-requested-but-never-completing — DISP-1 hung 16h
+serving TCP but never replying), watchdog self-update on pull, and a
+capture-failure banner in the client.
 
 Morning call review (last 500 events) added 12 corrections to
 `HOMOPHONE_FIXES` in `whisper/whisper_service.py`. Heavy hitters:
