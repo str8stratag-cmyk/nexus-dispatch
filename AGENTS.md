@@ -33,7 +33,35 @@ Every time this box is fired up, work in this order:
    processes (the `.venv-whisper` launcher and the real interpreter it spawns)
    — killing the launcher kills the service.
 
-## Recent changes (2026-09-17) — UNCOMMITTED, push pending
+## Recent changes (2026-09-18) — HOMOPHONE_FIXES tuned; UNCOMMITTED, push pending
+
+Morning call review (last 500 events) added 12 corrections to
+`HOMOPHONE_FIXES` in `whisper/whisper_service.py`. Heavy hitters:
+"florida tech"/"flirtag" → "Florida tag" (16 plate-read hits),
+"bush" → "Busch" (24 hits — Tampa's Busch Blvd; literal-shrubbery false
+positives are rare and harmless), "McKinney/McKinvey/MCKINNELY" →
+"McKinley", "McDill/McDILLL" → "MacDill", plus one-off street garbles
+(cyprus(s)→Cypress, osbourne→Osborne, arbenia→Armenia, ashely→Ashley,
+interstte→Interstate, signaal→Signal, unkown→unknown). Verified with
+py_compile + a direct apply_homophone_fixes test.
+
+- **Elevation gotcha:** the logon watchdog and the Whisper it spawns run
+  ELEVATED, so a non-elevated shell CANNOT kill the 8178 python
+  (taskkill/Stop-Process = Access denied). To apply whisper_service.py
+  edits before the watchdog's scheduled 4h restart, kill 8178 from an
+  ELEVATED prompt; otherwise edits load at the next scheduled restart.
+- **nexus-dispatch = push-only parity mirror, NOT live production** (user,
+  2026-09-18): all updates get pushed to it, but nothing pulls and runs it;
+  live production is dispatch-monitor only (this box's watchdog does run the
+  nexus APP on :5001 against the shared local Whisper, but no Whisper is ever
+  started from the nexus repo). Its `whisper_service.py` had drifted — missing
+  the 2026-09-16/17 robustness work entirely — so it was re-synced by copying
+  dispatch-monitor's file over it on 2026-09-18. `start-whisper.ps1`
+  intentionally differs there (shared-venv fallback to dispatch-monitor's
+  `.venv-whisper`, `WHISPER_PORT` env override) — keep those lines when
+  porting script changes.
+
+## Recent changes (2026-09-17) — committed 9ef465a, pushed
 
 - `server/routes.ts`: removed `dispatch radio terminology` from
   `HARD_PRODUCTION_PHRASES`. It is the literal start of the Whisper
@@ -57,9 +85,9 @@ Every time this box is fired up, work in this order:
    edits; the watchdog will do it if you kill the 8178 process).
 3. **Then any other tasks.**
 
-## Recent changes (2026-09-16) — TRIAL PASSED overnight; committed 2026-09-17, push pending
+## Recent changes (2026-09-16) — TRIAL PASSED overnight; committed 2026-09-17, pushed
 
-**Whisper robustness fixes (uncommitted, both dispatch-monitor and nexus-dispatch):**
+**Whisper robustness fixes (both dispatch-monitor and nexus-dispatch):**
 
 1. **`whisper/whisper_service.py` — `/transcribe` changed from `async def` to `def`.**
    Why: the CPU-heavy transcription ran on the event loop and starved `/health`
@@ -103,7 +131,9 @@ Commit `ce36bae`: "Add ffmpeg audio optimization for AI transcription"
 - Added `ffmpeg-static` dependency.
 
 ## Pending tasks / next steps
-(none — the Vercel-deployment tasks that lived here are obsolete; Vercel retired, app runs locally on the fleet against MongoDB Atlas)
+- Push both repos — the 2026-09-18 homophone fixes are uncommitted in
+  dispatch-monitor (`whisper_service.py`, `AGENTS.md`), and nexus-dispatch
+  has the re-synced `whisper_service.py` uncommitted.
 
 ## Key commands
 ```bash

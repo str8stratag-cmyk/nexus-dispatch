@@ -27,6 +27,23 @@ SAVE_AUDIO_MAX = int(os.getenv("WHISPER_SAVE_MAX", "200"))
 # by Men's World comes out as "alla").
 HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\balla\b", re.IGNORECASE), "Olla"),
+    # Plate reads: "Florida tag" comes out as "Florida Tech" / "Flirtag".
+    (re.compile(r"\bflorida tech\b", re.IGNORECASE), "Florida tag"),
+    (re.compile(r"\bflirtag\b", re.IGNORECASE), "Florida tag"),
+    # "bush" is nearly always Busch Blvd in Tampa road context; literal
+    # shrubbery mentions are rare and harmless if renamed.
+    (re.compile(r"\bbush\b", re.IGNORECASE), "Busch"),
+    # Street-name garbles (2026-09-18 call review, 500 events).
+    (re.compile(r"\bmckin\w*\b", re.IGNORECASE), "McKinley"),
+    (re.compile(r"\bmcdill+\b", re.IGNORECASE), "MacDill"),
+    (re.compile(r"\bunkown\b", re.IGNORECASE), "unknown"),
+    (re.compile(r"\bcyprus\b", re.IGNORECASE), "Cypress"),
+    (re.compile(r"\bcypruss\b", re.IGNORECASE), "Cypress"),
+    (re.compile(r"\bosbourne\b", re.IGNORECASE), "Osborne"),
+    (re.compile(r"\barbenia\b", re.IGNORECASE), "Armenia"),
+    (re.compile(r"\bashely\b", re.IGNORECASE), "Ashley"),
+    (re.compile(r"\binterstte\b", re.IGNORECASE), "Interstate"),
+    (re.compile(r"\bsignaal\b", re.IGNORECASE), "Signal"),
 ]
 
 
