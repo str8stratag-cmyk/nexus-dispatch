@@ -27,6 +27,9 @@ SAVE_AUDIO_MAX = int(os.getenv("WHISPER_SAVE_MAX", "200"))
 # by Men's World comes out as "alla").
 HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\balla\b", re.IGNORECASE), "Olla"),
+    # "amd" is Whisper's mis-hearing of "and" between street names; the junk
+    # token breaks intersection parsing ("AZEELE AMD TAMPANIA").
+    (re.compile(r"\bamd\b", re.IGNORECASE), "and"),
     # Plate reads: "Florida tag" comes out as "Florida Tech" / "Flirtag".
     (re.compile(r"\bflorida tech\b", re.IGNORECASE), "Florida tag"),
     (re.compile(r"\bflirtag\b", re.IGNORECASE), "Florida tag"),
