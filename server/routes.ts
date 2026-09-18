@@ -181,14 +181,24 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   [/\b40th(?:\s+st(?:reet)?)?\b/gi, "40th St"],
   [/\b50th(?:\s+st(?:reet)?)?\b/gi, "50th St"],
   [/\b56th(?:\s+st(?:reet)?)?\b/gi, "56th St"],
+  [/\bazeele(?:\s+st(?:reet)?)?\b/gi, "Azeele St"],
+  [/\btampania(?:\s+ave(?:nue)?)?\b/gi, "Tampania Ave"],
 ];
 
 // Joiners that separate the two roads of an intersection. Directionals act
-// as linkers in clipped radio speech ("north armenia west busch").
-const INTERSECTION_SPLIT_RE = /\s+(?:and|&|@|n|s|e|w|north|south|east|west)\s+/i;
+// as linkers in clipped radio speech ("north armenia west busch"). "amd" is
+// Whisper's mis-hearing of "and" between street names ("AZEELE AMD
+// TAMPANIA" — the junk token otherwise goes to Azure as one bogus street).
+const INTERSECTION_SPLIT_RE = /\s+(?:and|amd|&|@|n|s|e|w|north|south|east|west)\s+/i;
 
 function canonicalizeKnownRoads(address: string): string {
-  let normalized = address;
+  // Dispatch chatter the extractor can't reliably drop tails the query and
+  // breaks Azure intersections ("INTERSTATE 275 AND BUSCH BLVD SECTOR",
+  // "VICINITY OF 275", "30TH AT JUST ABOUT HILLSBOROUGH") — strip it first.
+  let normalized = address
+    .replace(/\b(?:sector|vicinity|just\s+about)\b\.?/gi, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
   for (const [pattern, replacement] of KNOWN_ROAD_CANONICAL) {
     normalized = normalized.replace(pattern, replacement);
   }
@@ -517,7 +527,9 @@ const HARD_PRODUCTION_PHRASES = [
   "thank you for your attention",
   "thanks for watching",
   "thank you for watching",
-  "dispatch radio terminology",
+  // Not banned: the Whisper initial_prompt itself starts with "Dispatch radio
+  // terminology", and Whisper echoes that prompt into noisy audio — banning it
+  // here quarantines prompt-echo false positives (seen 2026-09-17).
   "one, two, three",
 ];
 

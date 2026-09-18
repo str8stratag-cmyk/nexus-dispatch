@@ -18,8 +18,8 @@ export async function transcribeAudio(
   // "Signal 4, MVA at Dale Mabry and Linebaugh" example caused ~330 bogus events
   // over one weekend (see client hook fix in c16ffa2; 2026-09-08).
   const prompt = keywords.length
-    ? `Dispatch radio terminology: ${keywords.slice(0, 8).join(", ")}.`
-    : "Dispatch radio terminology.";
+    ? `Dispatch radio terminology: ${keywords.slice(0, 8).join(", ")}. Local street names: Olla.`
+    : "Dispatch radio terminology. Local street names: Olla.";
   const body = new FormData();
   body.set("audio", new Blob([audio]), filename);
   body.set("prompt", prompt);
