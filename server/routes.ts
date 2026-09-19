@@ -464,6 +464,10 @@ export async function registerRoutes(
     [/\b56th(?:\s+st(?:reet)?)?\b/gi, "56th St"],
     [/\bazeele(?:\s+st(?:reet)?)?\b/gi, "Azeele St"],
     [/\btampania(?:\s+ave(?:nue)?)?\b/gi, "Tampania Ave"],
+    // Spelling bridges to what providers actually hold: Whisper writes "amberley"
+    // but OSM has "Amberly" — the substring validation then rejects a real match.
+    [/\bamberl?ey(?:\s+dr(?:ive)?)?\b/gi, "Amberly Dr"],
+    [/\belmer(?:\s+st(?:reet)?)?\b/gi, "Elmer St"],
   ];
 
   // Joiners that separate the two roads of an intersection. Directionals act
