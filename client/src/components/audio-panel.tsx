@@ -16,6 +16,10 @@ interface TranscriptEntry {
   timestamp: number;
 }
 
+// Bound the live feed — an unbounded list grows for hours of capture and
+// Chrome kills the tab with "Error code: Out of Memory" (2026-09-17).
+const MAX_TRANSCRIPT_ENTRIES = 300;
+
 export interface DetectedEvent {
   transcript: string;
   keywords: { keyword: string; signalType: string }[];
@@ -97,6 +101,7 @@ export default function AudioPanel({
   const handleTranscript = useCallback((text: string, isFinal: boolean) => {
     const id = `entry-${entryIdRef.current++}`;
     setTranscriptEntries((prev) => {
+      let next: TranscriptEntry[];
       if (!isFinal && prev.length > 0 && !prev[prev.length - 1].isFinal) {
         const updated = [...prev];
         updated[updated.length - 1] = {
@@ -104,9 +109,13 @@ export default function AudioPanel({
           text,
           timestamp: Date.now(),
         };
-        return updated;
+        next = updated;
+      } else {
+        next = [...prev, { id, text, isFinal, timestamp: Date.now() }];
       }
-      return [...prev, { id, text, isFinal, timestamp: Date.now() }];
+      return next.length > MAX_TRANSCRIPT_ENTRIES
+        ? next.slice(next.length - MAX_TRANSCRIPT_ENTRIES)
+        : next;
     });
 
     if (isFinal) {
@@ -123,6 +132,32 @@ export default function AudioPanel({
   });
 
   const [micBlocked, setMicBlocked] = useState(false);
+
+  // Self-reload before Chrome kills the tab with "Error code: Out of
+  // Memory" — the V8 heap only resets on navigation and capture
+  // auto-resumes after reload, so a preemptive reload beats a crashed tab.
+  // Crash dumps showed the RENDERER ballooning far beyond the JS heap, so
+  // reload periodically to bound any slow leak. A DOM-node guard was tried
+  // here and removed: EventLog legitimately renders ~30k+ nodes with the
+  // full collection, so the guard reload-looped the tab every 30s.
+  useEffect(() => {
+    const perf = performance as Performance & { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } };
+    const hasMem = typeof perf.memory !== "undefined";
+    const started = Date.now();
+    const timer = window.setInterval(() => {
+      if (hasMem) {
+        const { usedJSHeapSize, jsHeapSizeLimit } = perf.memory!;
+        if (jsHeapSizeLimit > 0 && usedJSHeapSize > 0.6 * jsHeapSizeLimit) {
+          window.location.reload();
+          return;
+        }
+      }
+      if (Date.now() - started > 2 * 60 * 60 * 1000) {
+        window.location.reload();
+      }
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const handleStart = async () => {
     try {

@@ -463,14 +463,29 @@ export async function registerRoutes(
     [/\b40th(?:\s+st(?:reet)?)?\b/gi, "40th St"],
     [/\b50th(?:\s+st(?:reet)?)?\b/gi, "50th St"],
     [/\b56th(?:\s+st(?:reet)?)?\b/gi, "56th St"],
+    [/\bazeele(?:\s+st(?:reet)?)?\b/gi, "Azeele St"],
+    [/\btampania(?:\s+ave(?:nue)?)?\b/gi, "Tampania Ave"],
+    // Spelling bridges to what providers actually hold: Whisper writes "amberley"
+    // but OSM has "Amberly" — the substring validation then rejects a real match.
+    [/\bamberl?ey(?:\s+dr(?:ive)?)?\b/gi, "Amberly Dr"],
+    [/\belmer(?:\s+st(?:reet)?)?\b/gi, "Elmer St"],
   ];
 
   // Joiners that separate the two roads of an intersection. Directionals act
-  // as linkers in clipped radio speech ("north armenia west busch").
-  const INTERSECTION_SPLIT_RE = /\s+(?:and|&|@|n|s|e|w|north|south|east|west)\s+/i;
+  // as linkers in clipped radio speech ("north armenia west busch"). "amd" and
+  // "an" are Whisper's mis-hearings of "and" between street names ("AZEELE AMD
+  // TAMPANIA", "30TH AN FOWLER"), "at" is plain dispatcher speech — all gated
+  // by the both-sides-must-name-a-road check below.
+  const INTERSECTION_SPLIT_RE = /\s+(?:and|amd|an|at|&|@|n|s|e|w|north|south|east|west)\s+/i;
 
   function canonicalizeKnownRoads(address: string): string {
-    let normalized = address;
+    // Dispatch chatter the extractor can't reliably drop tails the query and
+    // breaks Azure intersections ("INTERSTATE 275 AND BUSCH BLVD SECTOR",
+    // "VICINITY OF 275", "30TH AT JUST ABOUT HILLSBOROUGH") — strip it first.
+    let normalized = address
+      .replace(/\b(?:sector|vicinity|just\s+about)\b\.?/gi, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim();
     for (const [pattern, replacement] of KNOWN_ROAD_CANONICAL) {
       normalized = normalized.replace(pattern, replacement);
     }

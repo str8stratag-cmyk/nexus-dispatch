@@ -34,6 +34,20 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recorderTimerRef = useRef<number | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  // Serialize transcriptions and bound the backlog — firing every 4s chunk
+  // without waiting piled concurrent /transcribe calls onto Whisper until
+  // its threadpool wedged and the browser showed "Failed to fetch"
+  // (2026-09-17 pileup on DISP-4). At ~7s CPU per chunk, sustained room
+  // audio outproduces the service, so drop the oldest new chunk rather than
+  // queue without bound; addresses get re-transmitted on later chunks.
+  const transcribeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const transcribePendingRef = useRef(0);
+  // Consecutive /transcribe failures — 3+ in a row means the local Whisper
+  // service is down/wedged, not a transient blip (2026-09-18: DISP-1's
+  // Whisper hung for 16h before anyone noticed). Surface a persistent,
+  // unmistakable error so the operator fixes the box instead of trusting
+  // a silently dead capture.
+  const transcribeFailStreakRef = useRef(0);
   const rafRef = useRef<number | null>(null);
   const onTranscriptRef = useRef(onTranscript);
   const isCapturingRef = useRef(false);
@@ -86,10 +100,19 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       if (result.text?.trim()) {
         onTranscriptRef.current?.(result.text.trim(), true);
       }
+      transcribeFailStreakRef.current = 0;
     } catch (err) {
       const message = err instanceof Error ? err.message : "Local Whisper transcription failed.";
       console.error(message);
-      setError(message);
+      transcribeFailStreakRef.current += 1;
+      if (transcribeFailStreakRef.current >= 3) {
+        setError(
+          `Local Whisper is NOT RESPONDING (${transcribeFailStreakRef.current} consecutive failures) — ` +
+          "capture is running but nothing is being transcribed. Restart Whisper/the watchdog on this machine, then Stop+Start Capture."
+        );
+      } else {
+        setError(message);
+      }
     }
   }, [keywords]);
 
@@ -129,7 +152,17 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       clearInterval(rmsInterval);
       const avgRms = rmsCount > 0 ? rmsSum / rmsCount : 0;
       const isSilent = avgRms < 0.015;
-      void transcribe(new Blob(chunks, { type: "audio/webm" }), isSilent);
+      const blob = new Blob(chunks, { type: "audio/webm" });
+      if (transcribePendingRef.current < 2) {
+        transcribePendingRef.current += 1;
+        transcribeQueueRef.current = transcribeQueueRef.current
+          .then(() => transcribe(blob, isSilent))
+          .finally(() => {
+            transcribePendingRef.current -= 1;
+          });
+      }
+      // Dropping a saturated chunk must NOT skip this — it schedules the
+      // next recording chunk; returning early here silently kills capture.
       if (isCapturingRef.current) startRecordingRef.current();
     };
     recorder.start();
