@@ -12,6 +12,18 @@ if (-not (Test-Path $python)) {
 }
 
 if (-not $Model) {
+  $configPath = Join-Path $repoRoot "whisper-model.local"
+  if (Test-Path $configPath) {
+    foreach ($line in Get-Content $configPath) {
+      if ($line -match '^\s*WHISPER_MODEL\s*=\s*(.+?)\s*$') {
+        $Model = $Matches[1]
+        break
+      }
+    }
+  }
+}
+
+if (-not $Model) {
   $Model = "medium.en"
 }
 

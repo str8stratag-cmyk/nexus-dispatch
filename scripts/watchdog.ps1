@@ -203,6 +203,13 @@ while ($true) {
         $ndUpdated = Pull-Repo $nexusDispatch
 
         if ($dmUpdated) {
+            # LOCAL CHANGE (2026-09-04, keep when pushing upstream): npm
+            # install BEFORE restarting the app on pull — prevents the
+            # missing-dependency crash (e.g. express-rate-limit) on
+            # post-pull restarts. Pull-Repo only installs when package.json
+            # changed; this catches everything else.
+            Write-Host "$(Get-Date) npm install (dispatch-monitor)..." -ForegroundColor Cyan
+            cmd /c "cd /d `"$dispatchMonitor`" && npm install" | Out-Null
             Restart-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
         }
 

@@ -80,9 +80,11 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
 
     const form = new FormData();
     form.set("audio", audio, "dispatch.webm");
+    // Keep this prompt generic. Whisper treats initial_prompt as prior context and
+    // will hallucinate a concrete call example into unrelated audio.
     form.set(
       "prompt",
-      keywords.length ? `Dispatch radio terminology: ${keywords.join(", ")}. Local street names: Olla.` : "Dispatch radio terminology. Local street names: Olla."
+      keywords.length ? `Dispatch radio terminology: ${keywords.join(", ")}.` : "Dispatch radio terminology."
     );
 
     try {

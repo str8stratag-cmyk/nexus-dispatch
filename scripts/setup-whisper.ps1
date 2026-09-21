@@ -1,11 +1,28 @@
 [CmdletBinding()]
 param(
-  [string]$Model = "medium.en",
+  [string]$Model = "",
   [switch]$Offline
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
+
+if (-not $Model) {
+  $configPath = Join-Path $repoRoot "whisper-model.local"
+  if (Test-Path $configPath) {
+    foreach ($line in Get-Content $configPath) {
+      if ($line -match '^\s*WHISPER_MODEL\s*=\s*(.+?)\s*$') {
+        $Model = $Matches[1]
+        break
+      }
+    }
+  }
+}
+
+if (-not $Model) {
+  $Model = "medium.en"
+}
+
 $venvPath = Join-Path $repoRoot ".venv-whisper"
 $env:HF_HOME = Join-Path $repoRoot "models"
 $pythonCandidates = @(@(

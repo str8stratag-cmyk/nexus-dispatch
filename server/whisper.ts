@@ -16,10 +16,10 @@ export async function transcribeAudio(
   // Keep this prompt generic. Whisper treats initial_prompt as prior context and
   // will hallucinate a concrete call example into unrelated audio — a hardcoded
   // "Signal 4, MVA at Dale Mabry and Linebaugh" example caused ~330 bogus events
-  // over one weekend (see client hook fix in c16ffa2; 2026-09-08).
+  // over one weekend (see client hook fix; 2026-09-08).
   const prompt = keywords.length
-    ? `Dispatch radio terminology: ${keywords.slice(0, 8).join(", ")}. Local street names: Olla.`
-    : "Dispatch radio terminology. Local street names: Olla.";
+    ? `Dispatch radio terminology: ${keywords.slice(0, 8).join(", ")}.`
+    : "Dispatch radio terminology.";
   const body = new FormData();
   body.set("audio", new Blob([audio]), filename);
   body.set("prompt", prompt);

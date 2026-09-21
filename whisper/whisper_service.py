@@ -1,3 +1,6 @@
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import functools
 import json
 import os
 import re
@@ -26,12 +29,10 @@ API_KEY = os.getenv("WHISPER_API_KEY")
 # (old fleet senders still transmit keyword lists; honoring them would
 # re-open the echo vector). If this prompt ever fabricates on silence,
 # set it to None — that was the winning arm of the 2026-09-18 A/B.
-CLEAN_PROMPT = (
-    "Tampa Police Department radio dispatch. The dispatcher and field "
-    "units speak in short transmissions using call signs, ten-codes, and "
-    "local street names. Transcribe only the radio traffic verbatim, and "
-    "omit music, television audio, and background conversation."
-)
+# FLIPPED TO None 2026-09-21: CLEAN_PROMPT fabricated verbatim into a live
+# DISP-2 event at 11:03 AM (prompt echo), so the service now transcribes
+# with no initial_prompt at all.
+CLEAN_PROMPT = None
 
 # Opt-in: set WHISPER_SAVE_AUDIO to a directory to retain incoming chunks
 # (audio + JSON sidecar with transcript and confidence) for tuning. Ring
@@ -41,10 +42,10 @@ SAVE_AUDIO_MAX = int(os.getenv("WHISPER_SAVE_MAX", "200"))
 
 # Known homophone corrections: word-boundary, case-insensitive; the
 # replacement always uses the intended casing. Add entries here when call
-# review surfaces a recurring mis-transcription (e.g. the street "Olla"
-# by Men's World comes out as "alla").
+# review surfaces a recurring mis-transcription (e.g. the street "Ola Ave"
+# comes out as "alla").
 HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\balla\b", re.IGNORECASE), "Olla"),
+    (re.compile(r"\balla\b", re.IGNORECASE), "Ola"),
     # "amd" is Whisper's mis-hearing of "and" between street names; the junk
     # token breaks intersection parsing ("AZEELE AMD TAMPANIA").
     (re.compile(r"\bamd\b", re.IGNORECASE), "and"),
@@ -60,11 +61,16 @@ HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bunkown\b", re.IGNORECASE), "unknown"),
     (re.compile(r"\bcyprus\b", re.IGNORECASE), "Cypress"),
     (re.compile(r"\bcypruss\b", re.IGNORECASE), "Cypress"),
+    (re.compile(r"\bcyprees\b", re.IGNORECASE), "Cypress"),
     (re.compile(r"\bosbourne\b", re.IGNORECASE), "Osborne"),
     (re.compile(r"\barbenia\b", re.IGNORECASE), "Armenia"),
     (re.compile(r"\bashely\b", re.IGNORECASE), "Ashley"),
     (re.compile(r"\binterstte\b", re.IGNORECASE), "Interstate"),
     (re.compile(r"\bsignaal\b", re.IGNORECASE), "Signal"),
+    # Local box call-review additions (2026-09-21): "Hale Ave" comes out as
+    # "hell ave/avenue"; "Morris Bridge" collapses to "slambridge".
+    (re.compile(r"\bhell\s+(?:ave|avenue)\b", re.IGNORECASE), "Hale Ave"),
+    (re.compile(r"\bslambridge\b", re.IGNORECASE), "Morris Bridge"),
 ]
 
 
@@ -106,11 +112,15 @@ model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
 # Serialize the CPU-bound transcription work. Parallel runs only contend for
 # the same cores (a 2s clip measured 100s under a 40-deep pileup on DISP-4)
 # and queued requests exhaust the threadpool until clients see connection
-# resets ("Failed to fetch"). One at a time keeps per-chunk latency flat;
-# /health stays responsive because this endpoint is a sync def (note above).
+# resets ("Failed to fetch"). One at a time keeps per-chunk latency flat.
+# This box keeps the async endpoint (sync-def uploads stalled at ~2KB/s
+# through the venv launcher chain here — see the note at /transcribe), so the
+# one-at-a-time guarantee comes from this dedicated single-worker executor:
+# same serialization as the upstream threading.Lock, without blocking the
+# event loop. Bump max_workers only on bigger boxes.
 # The client capture hook serializes too — this is the backstop for any
 # direct POSTer (fleet boxes POSTing here instead of their local Whisper).
-TRANSCRIBE_LOCK = threading.Lock()
+_transcribe_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="transcribe")
 
 # Self-supervision (2026-09-18, after DISP-1's Whisper hung for 16h — TCP
 # port LISTENING but /health never replying, zero events produced). A live
@@ -168,11 +178,11 @@ def health() -> dict[str, str]:
 
 
 @app.post("/transcribe")
-# Sync def on purpose: FastAPI runs it in a threadpool, so the CPU-heavy
-# transcription cannot block the event loop and starve /health (which made
-# the watchdog think Whisper was dead under load). Do not re-add "async"
-# without reading the 2026-09-16 note in AGENTS.md.
-def transcribe(
+# 2026-09-17 (DISP-2): async + executor transport restored; the sync-def
+# variant slowed large uploads to ~2KB/s through the venv launcher chain.
+# /health may time out mid-transcription again (known quirk; no watchdog
+# on this box).
+async def transcribe(
     audio: UploadFile = File(...),
     prompt: str = Form(default=""),
     whisper_key: str | None = Header(default=None, alias="X-Whisper-Key"),
@@ -187,55 +197,58 @@ def transcribe(
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
             temp_path = temp_file.name
-            while chunk := audio.file.read(1024 * 1024):
+            while chunk := await audio.read(1024 * 1024):
                 temp_file.write(chunk)
 
         try:
-            with TRANSCRIBE_LOCK:
-                segments, info = model.transcribe(
-                    temp_path,
-                    language="en",
-                    beam_size=5,
-                    best_of=5,
-                    temperature=(0.0, 0.2, 0.4),
-                    vad_filter=True,
-                    vad_parameters={"min_silence_duration_ms": 700},
-                    # 2026-09-21: single clean style-only prompt for all
-                    # requests (see CLEAN_PROMPT above); request-supplied
-                    # prompts are ignored on purpose.
-                    initial_prompt=CLEAN_PROMPT,
-                    condition_on_previous_text=False,
-                    compression_ratio_threshold=2.4,
-                )
-                # NOTE: `segments` is a lazy generator — the inference runs
-                # HERE, inside the loop below, not at the transcribe() call.
-                nsp_drop = float(os.getenv("WHISPER_NSP_THRESHOLD", "0.5"))
-                cr_drop = float(os.getenv("WHISPER_CR_THRESHOLD", "2.0"))
-                result_segments: list[dict[str, object]] = []
-                dropped_segments: list[dict[str, object]] = []
-                for segment in segments:
-                    if not segment.text.strip():
-                        continue
-                    text = trim_repetition_loops(apply_homophone_fixes(segment.text.strip()))
-                    if not text:
-                        # Segment was entirely a repetition loop.
-                        continue
-                    entry = {
-                        "start": segment.start,
-                        "end": segment.end,
-                        "text": text,
-                        "no_speech_prob": round(segment.no_speech_prob, 4),
-                        "avg_logprob": round(segment.avg_logprob, 4),
-                        "compression_ratio": round(segment.compression_ratio, 4),
-                    }
-                    # Hallucinated junk ("thanks for watching!", "one, two, three,
-                    # four.") clusters at high no_speech_prob; compression_ratio
-                    # catches counting loops. Calibrated on debug-audio sidecars:
-                    # keepers (real road mentions) sit at nsp <= 0.17.
-                    if segment.no_speech_prob > nsp_drop or segment.compression_ratio > cr_drop:
-                        dropped_segments.append(entry)
-                    else:
-                        result_segments.append(entry)
+            transcribe_call = functools.partial(
+                model.transcribe,
+                language="en",
+                beam_size=5,
+                best_of=5,
+                temperature=(0.0, 0.2, 0.4),
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 700},
+                # 2026-09-21: single clean style-only prompt for all
+                # requests (see CLEAN_PROMPT above); request-supplied
+                # prompts are ignored on purpose.
+                initial_prompt=CLEAN_PROMPT,
+                condition_on_previous_text=False,
+                compression_ratio_threshold=2.4,
+            )
+            loop = asyncio.get_running_loop()
+            _t0 = time.time()
+            segments, info = await loop.run_in_executor(_transcribe_executor, transcribe_call, temp_path)
+            print(f"[timing] transcribe={time.time()-_t0:.1f}s audio={info.duration:.1f}s", flush=True)
+            # NOTE: `segments` is a lazy generator — the inference runs
+            # HERE, inside the loop below, not at the transcribe() call.
+            nsp_drop = float(os.getenv("WHISPER_NSP_THRESHOLD", "0.5"))
+            cr_drop = float(os.getenv("WHISPER_CR_THRESHOLD", "2.0"))
+            result_segments: list[dict[str, object]] = []
+            dropped_segments: list[dict[str, object]] = []
+            for segment in segments:
+                if not segment.text.strip():
+                    continue
+                text = trim_repetition_loops(apply_homophone_fixes(segment.text.strip()))
+                if not text:
+                    # Segment was entirely a repetition loop.
+                    continue
+                entry = {
+                    "start": segment.start,
+                    "end": segment.end,
+                    "text": text,
+                    "no_speech_prob": round(segment.no_speech_prob, 4),
+                    "avg_logprob": round(segment.avg_logprob, 4),
+                    "compression_ratio": round(segment.compression_ratio, 4),
+                }
+                # Hallucinated junk ("thanks for watching!", "one, two, three,
+                # four.") clusters at high no_speech_prob; compression_ratio
+                # catches counting loops. Calibrated on debug-audio sidecars:
+                # keepers (real road mentions) sit at nsp <= 0.17.
+                if segment.no_speech_prob > nsp_drop or segment.compression_ratio > cr_drop:
+                    dropped_segments.append(entry)
+                else:
+                    result_segments.append(entry)
         finally:
             # Inference returned (success or handled error) — the service is
             # making progress; the supervisor must not count this as a wedge.

@@ -11,12 +11,13 @@ function Start-AppInWindow($title, $directory, $command) {
 
 # Kill anything already running
 Write-Host "Stopping any existing dispatch/whisper processes..." -ForegroundColor Cyan
-.\stop-all.ps1
+$stopScript = Join-Path $PSScriptRoot "stop-all.ps1"
+& $stopScript
 
 Start-Sleep -Seconds 2
 
-$dispatchMonitor = "C:\Users\str8s\dispatch-monitor"
-$nexusDispatch = "C:\Users\str8s\nexus-dispatch"
+$dispatchMonitor = Join-Path $env:USERPROFILE "dispatch-monitor"
+$nexusDispatch = Join-Path $env:USERPROFILE "nexus-dispatch"
 
 # Start Whisper
 Start-AppInWindow "Whisper" $dispatchMonitor "npm run whisper:start"

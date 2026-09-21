@@ -1,12 +1,169 @@
 # Dispatch Monitor — Project Context
 
+> **IDENTITY: THIS MACHINE IS DISP-2** (192.168.6.52). Work self-contained:
+> do NOT probe or depend on other DISP devices for config or shared services —
+> their DBs/services are localhost-bound and irrelevant here. When something is
+> missing (e.g. MongoDB URI), the fix comes from the user or this box, not from
+> poking DISP-3/Mac.
+
 ## Project overview
 A full-stack dispatch monitoring dashboard. It captures live audio, transcribes speech, detects emergency keywords, and creates dispatch events stored in MongoDB Atlas.
 
 - Repo: `str8stratag-cmyk/dispatch-monitor`
-- Local path: `C:\Users\str8s\dispatch-monitor` (DISP-4 master; fleet machines clone the same repo)
+- Local path: `C:\Users\str8s\dispatch-monitor`
 - Branch: `main`
 - Deployment: **Vercel retired** (switched to MongoDB Atlas + locally-run apps on the fleet, at agent advice) — see master `AGENTS.md`
+
+## Local runtime environment (this device)
+
+This Windows machine (**DISP-2**) is the **Whisper v3 Turbo tester** for the fleet.
+Other devices (Mac, DISP-1, DISP-3) run their own Whisper models but can send
+transcription to this box.
+
+**MongoDB (RESOLVED 2026-09-04):** the app is MongoDB-only (migrated from Supabase).
+Shared fleet cluster: **MongoDB Atlas** (`mongodb+srv`, host `nexus-disp.dndtjvg.
+mongodb.net`, db `str8stratag_db_user`) — the SAME database all DISP devices write
+to (that's how the reconciler dedups across devices). Credentials live ONLY in each
+repo's `.env` (gitignored) — NEVER commit them, never write them into this file.
+If `.env` ever loses them, ask the user; do not hunt for MongoDB on other devices.
+
+- **Whisper endpoint (LAN):** `http://192.168.6.52:8178` — THIS machine's wired IP on
+  the TL-SG608 switch (verified 2026-09-02; the earlier report claiming `.53` was
+  wrong). `192.168.6.53` is a DIFFERENT device (MAC 04-7b-cb-a3-6c-ed) running its own
+  Whisper on `medium.en` — devices pointed at `.53` are NOT using this box's turbo.
+  Old wireless IP `192.168.5.251` is retired.
+
+**Fleet map (confirmed 2026-09-03):**
+| Device | IP | Role |
+|--------|----|------|
+| **DISP-2 (this machine)** | 192.168.6.52 | Whisper v3 turbo tester, dispatch :5000 (nexus :5001 retired from runtime 2026-09-18) |
+| DISP-3 | 192.168.6.53 | Whisper medium.en, watchdog-managed (4h restart, 6h git pull), runs `trial/` reconciler every 3 min |
+
+Status reports mentioning "medium.en, watchdog-managed, reconciler, .53" come from the
+DISP-3 box — do not mistake them for this machine's state. The Azure Maps account
+(Client ID 65434727-…) is shared across the fleet; this machine uses the same key
+(stored in `.env`, gitignored).
+
+## Local vs shared (READ FIRST)
+
+**DO NOT `git push` from this machine without the user's explicit say-so.**
+
+- Unpushed local commits (as of 2026-09-03): dispatch-monitor **ahead 7**,
+  nexus-dispatch **ahead 4**.
+- **EXCEPTION (pushed 2026-09-10, user-approved):** the MongoDB
+  server-selection fix (clear the cached `getDatabase()` promise on failure
+  so one transient Atlas blip can't poison every DB request until restart)
+  was squash-merged to both repos' `main` as PR #1 (dispatch-monitor
+  `96da4cc`, nexus-dispatch `5782ff4`). First fleet-shared code from this
+  box; everything else below remains local-only.
+- **EXCEPTION (merged 2026-09-16, user-approved):** fleet update squash-merged
+  to both repos' `main` (dispatch-monitor `edb8420`, nexus-dispatch
+  `ad86f2b`): quarantine + restore, road-mention second-signal gate,
+  whisperModel tagging, geocode suffix fix (both repos), nexus Azure-primary
+  geocoder + creation-time pinning, and `FLEET_PULL_2026-09-16.md` runbooks.
+  Fleet devices auto-apply via their watchdog pull/restart cycle. AGENT
+  NOTE: the user never runs git pulls on this box — sessions do. Never
+  blind-pull here: local main diverged from the rewritten origin/main (same
+  changes exist as local commits AND as uncommitted working-tree edits the
+  running services serve from). Commit working-tree changes first, then
+  `git merge origin/main`, resolve shared-code conflicts deliberately
+  (upstream side for squash-merged features, local side for intentional
+  adaptations like cross-env/LAN binds), then npm install + check + service
+  refresh. Full procedure in KIMI_RESUME.md (AGENT NOTE, 2026-09-16).
+- **Policy (user decision 2026-09-03):** turbo stays on DISP-2 as the tester.
+  If it keeps getting good results, the user will share it with the other DISP
+  devices. Until then: no pushes.
+- When sharing IS approved, push ONLY: (1) the model-selection mechanism
+  (the `whisper-model.local` block in `scripts/start-whisper.ps1`), and (2) the
+  `whisperModel` event tagging (schema + storage + whisper.ts + routes stamp +
+  whisper_service.py response). Do NOT push: the helper bats / detached start
+  scripts (upstream deleted those on purpose), or this AGENTS.md (machine-specific).
+- **QA tooling (added 2026-09-04, local-only until push approved):**
+  - `node scripts/accuracy-by-source.mjs [hours]` — per-source event stats from
+    Atlas (count, avg transcript length, no-keyword %, no-coords %). First run
+    (72h): DISP-3/medium.en 74% no-keyword vs 0% for DISP2/turbo and others.
+  - `powershell -ExecutionPolicy Bypass -File scripts\regression-check.ps1` —
+    transcribes `test-audio.wav`, diffs vs `test-audio.expected.txt`. PASS = no
+    drift. Use `-UpdateBaseline` only after an intentional model/params change.
+  - Baseline 2026-09-04 (turbo, beam 5): "Unit 1 responding to emergency at Main
+    Street and Fifth Avenue. Suspect is fleeing northbound on foot."
+- **Autostart:** Task Scheduler task `Dispatch Services Autostart` runs
+  `scripts\refresh-services.bat` at user logon (registered 2026-09-04; refresh bat
+  starts/stops Whisper + Dispatch; Nexus :5001 was retired from this box's runtime
+  2026-09-18 per user decision — the script no longer starts it, though its kill
+  sweep still frees :5001). After a reboot, services
+  come up on login — verify with the health checks if anything seems down.
+- Never travels via git (gitignored): `whisper-model.local`, `.env` (Azure Maps
+  key), `KIMI_RESUME.md`, logs, `test-audio.wav`.
+- After ANY future `git pull`, run the post-pull checklist below — upstream
+  removed the `whisper-model.local` block once already.
+- **Model:** `turbo` (device-local, via `whisper-model.local`, gitignored). Do not
+  change to `medium.en` — that is only the fallback default in the start scripts.
+  This box IS DISP-2 and runs turbo; other devices run their own models. Note:
+  `nexus-dispatch/start-whisper-disp2.bat` (distil-large-v3, port 8179) came from the
+  fleet's shared repo — it is NOT this box's config and should not be run here.
+- **Whisper bind:** `0.0.0.0:8178` in BOTH `scripts/start-whisper.ps1` and
+  `scripts/start-whisper-detached.ps1` — keep them consistent or LAN access breaks.
+- **Firewall:** inbound TCP 8178 must be allowed (rule name `Whisper v3 Turbo (8178)`).
+  Adding it requires an elevated shell:
+  `netsh advfirewall firewall add rule name="Whisper v3 Turbo (8178)" dir=in action=allow protocol=TCP localport=8178`
+- **Services:** Whisper `:8178`, Dispatch Monitor `:5000`. Nexus Dispatch
+  (`:5001`) was retired from this box's runtime 2026-09-18 per user decision —
+  the nexus-dispatch repo stays as a clone/edit base for future apps, not run
+  in production here.
+  Start/stop via Desktop `Refresh Dispatch Services.bat` / `Kill Dispatch Services.bat`
+  or `scripts/refresh-services.bat` (Git-Bash safe) / `scripts/kill-services.bat`.
+  NOTE: `refresh-services.bat`/`kill-services.bat` and both `*-detached.ps1` scripts
+  are LOCAL-ONLY (upstream deleted them in favor of the watchdog flow — kept here
+  because the Desktop shortcuts depend on them). Their kill patterns match `:8178`/`:5000`
+  on ANY binding; if you edit the bind host, keep these patterns in sync.
+- **Watchdog:** upstream flow is `start-watchdog.bat` → `scripts/watchdog.ps1`
+  (starts all three services hidden, restarts Whisper every 4h, `git pull` every 6h).
+  NOT auto-started on this box. Health check is `GET /health` (30s timeout).
+  When active it starts Whisper via `start-whisper.ps1`, which reads
+  `whisper-model.local` → stays on turbo.
+  LOCAL CHANGE (2026-09-04): after a pull updates a repo, the watchdog runs
+  `npm install` for that repo BEFORE restarting its app — prevents the
+  missing-dependency crash (e.g. `express-rate-limit`) on post-pull restarts.
+  If pushing the watchdog upstream later, keep this addition.
+- **Geocoding (merged 2026-09-02):** Azure Maps is PRIMARY, Geoapify is FALLBACK.
+  `.env` needs `AZURE_MAPS_KEY`; `GEOAPIFY_API_KEY`+`GEOAPIFY_BOUNDING_BOX` optional
+  fallback; `GEOCODE_SUFFIX` defaults to "Tampa, FL". Optional: `ADMIN_SECRET`
+  (write-endpoint auth), `WHISPER_API_KEY`/`VITE_WHISPER_API_KEY` (protects Whisper
+  when LAN-exposed — if set, all fleet devices must send the `X-Whisper-Key` header).
+  DECISION (2026-09-02): `WHISPER_API_KEY` stays UNSET on this machine — Whisper is
+  our own local/LAN service, no key. Do not add one; fleet devices call it bare.
+- **Post-pull checklist (learned 2026-09-02):**
+  1. `npm install` if `package.json` changed, then `npm run check`.
+  2. Verify the `whisper-model.local` block survived in `scripts/start-whisper.ps1`
+     (upstream removed it once already — without it this box silently boots `medium.en`).
+  3. Restart services (`scripts/refresh-services.bat`) and confirm
+     `/health` reports `"model":"turbo"`.
+- **Known quirk:** `/health` can time out mid-transcription (CPU-bound, single
+  worker). Transcription is unaffected; retry the health check.
+- **Road Mentions (tuned 2026-09-12):** "Road Mention" events (major road
+  named, no crash keyword) were ~48% of all events. They now require a second
+  signal server-side (POST /api/dispatch, auto-dispatches only): dispatch
+  context in the same transmission (unit/responding/10-codes/etc., see
+  ROAD_MENTION_CONTEXT_RE) OR the same road active in an event within 45 min
+  (roadMentionedRecently). Context-free mentions are quarantined with reason
+  "road mention lacks corroborating signal" — reviewable via /api/quarantine,
+  recoverable via restore. Manual dispatches unaffected. MERGED to
+  origin/main 2026-09-16 (squash commit `edb8420`, user-approved).
+- **Geocoding (fixed 2026-09-16; MERGED to origin/main — fleet auto-rollout):** (1) `getGeocodeQuery` in BOTH repos suppressed the ", Tampa, FL" suffix whenever the address contained the substring "florida" — so every "Florida Ave" extract (from "Florida tag" phonetic chatter) geocoded bare, hit out-of-state Azure results, and got rejected by the FL bounds check (57% of missing pins fleet-wide). The FL/Florida match must now anchor to the END of the address (", FL" / ", Florida" / optional ZIP). (2) nexus-dispatch `/api/dispatch` never geocoded at creation — manual entries arrive lat/lng null and were stored coord-less; it now shares dispatch-monitor's `geocodeAddress` helper (Azure → Geoapify → Nominatim) wired into creation. Merged to origin/main 2026-09-16 as squash commits (dispatch `edb8420`, nexus `ad86f2b`, user-approved; fleet branches deleted after content-verified merge). Runbook the other boxes read on pull: `FLEET_PULL_2026-09-16.md` in both repo roots.
+- **Keywords (lesson 2026-09-12, from the DISP-4 fleet review):** never add
+  hallucination-prone strings as keywords. "nba"/"nbc" had been added to catch
+  MVA/MVC mishearings and Whisper invents them on squelch noise, so every
+  noise burst became an MVA dispatch trigger. Removed them (27→25 keywords;
+  keyword_list lives in shared Mongo). Fix mishearings via the homophone
+  table instead.
+- **Whisper initial_prompt (fixed 2026-09-08):** the transcription prompt sent by
+  `server/whisper.ts` and `client/src/hooks/use-audio-capture.ts` must stay
+  GENERIC (domain words only, no concrete call). A hardcoded example
+  ("Signal 4, MVA at Dale Mabry and Linebaugh") made Whisper hallucinate that
+  exact call into ~300 unrelated events over one weekend. Never put a specific
+  address/signal in the prompt. Upstream/fleet copies may still carry the bad
+  prompt — they need the same fix.
 
 ## Tech stack
 - Frontend: React + Vite + Tailwind + shadcn/ui
@@ -17,6 +174,23 @@ A full-stack dispatch monitoring dashboard. It captures live audio, transcribes 
 ## Session startup priorities (standing order, 2026-09-17)
 
 Every time this box is fired up, work in this order:
+
+1. **Fire up / check the full stack.** ON THIS BOX the watchdog is intentionally
+   not the startup path — use `scripts\refresh-services.bat` (Desktop
+   shortcuts; Task Scheduler `Dispatch Services Autostart` covers logon).
+   It starts Whisper (8178) and Dispatch Monitor (5000). Nexus :5001 was
+   retired from this box's runtime 2026-09-18 — push-only mirror, never run —
+   though the refresh bat's kill sweep still frees :5001. Verify 8178/health
+   and :5000/api/events are responding before doing anything else. Full
+   ritual (calls review, Whisper tuning order): see `KIMI_RESUME.md` →
+   "Session Startup Ritual". NEVER start a second watchdog (e.g.
+   `start-watchdog.bat`) while one is running — two watchdogs race restarts
+   and wedge the apps. App output goes to
+   `dispatch-monitor\logs\dispatch-monitor.log` and
+   `nexus-dispatch\logs\nexus-dispatch.log` — if an app won't bind its port,
+   check those logs first. A healthy Whisper instance shows TWO python.exe
+   processes (the `.venv-whisper` launcher and the real interpreter it
+   spawns) — killing the launcher kills the service.
 
 ### NEXT FIRE-UP — OFFICE RETURN (2026-09-21 AM)
 
@@ -41,20 +215,11 @@ block removed, FEED=DISP-3), capture on JOUNIVO, whisper :8178 and app
 :5000 both on new code and 200. Old quarantine echo junk (~200 items)
 not yet purged — purge on request.
 
-1. **Check the stack — don't blindly start it.** The watchdog auto-starts at
-   logon via `dispatch-watchdog.vbs` in the Startup folder (added 2026-09-14).
-   First check for a running watchdog (powershell processes with `watchdog.ps1`
-   in the command line) and verify 8178/health and :5000/api/events are
-   responding before doing anything else (nexus :5001 RETIRED 2026-09-18 —
-   push-only mirror, never run). Only if the watchdog is missing, launch ONE, hidden:
-   `powershell -ExecutionPolicy Bypass -File C:\Users\str8s\dispatch-monitor\scripts\watchdog.ps1`
-   NEVER start a second watchdog (e.g. `start-watchdog.bat`) while one is
-   running — two watchdogs race restarts and wedge the apps.
-   App output now goes to `dispatch-monitor\logs\dispatch-monitor.log` and
-   `nexus-dispatch\logs\nexus-dispatch.log` — if an app won't bind its port,
-   check those logs first. A healthy Whisper instance shows TWO python.exe
-   processes (the `.venv-whisper` launcher and the real interpreter it spawns)
-   — killing the launcher kills the service.
+2. **Review calls and tune Whisper** — listen to recent transcriptions/dispatch
+   events, find recurring mis-transcriptions, and add homophone corrections to
+   `HOMOPHONE_FIXES` in `whisper/whisper_service.py` (restarting Whisper after
+   edits; the watchdog will do it if you kill the 8178 process).
+3. **Then any other tasks.**
 
 ## Recent changes (2026-09-18) — HOMOPHONE_FIXES tuned; committed f2bebdb, pushed
 
@@ -124,11 +289,6 @@ query with ", Tampa, FL" appended.
   app. Also `GIT_TERMINAL_PROMPT=0` so a credential prompt can't wedge the
   loop. Watchdog's own output should be launched with redirection to
   `logs\watchdog.log` for observability.
-2. **Review calls and tune Whisper** — listen to recent transcriptions/dispatch
-   events, find recurring mis-transcriptions, and add homophone corrections to
-   `HOMOPHONE_FIXES` in `whisper/whisper_service.py` (restarting Whisper after
-   edits; the watchdog will do it if you kill the 8178 process).
-3. **Then any other tasks.**
 
 ## Recent changes (2026-09-16) — TRIAL PASSED overnight; committed 2026-09-17, pushed
 

@@ -1,0 +1,4 @@
+# Device-local Whisper model selection.
+# Copy this file to whisper-model.local and set the model for this device.
+# Common values: medium.en, large-v3, turbo, large-v3-turbo
+WHISPER_MODEL=medium.en

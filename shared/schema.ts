@@ -17,8 +17,8 @@ export interface DispatchEvent {
   audioUrl: string | null;
   telegramMessageId: string | null;
   geocodedRoad: string | null;
-  locationApprox: boolean;
   whisperModel: string | null;
+  locationApprox: boolean;
   createdAt: string;
 }
 
@@ -44,12 +44,12 @@ export const insertDispatchEventSchema = z.object({
   audioUrl: z.string().nullable().optional(),
   telegramMessageId: z.string().nullable().optional(),
   geocodedRoad: z.string().nullable().optional(),
+  whisperModel: z.string().nullable().optional(),
   locationApprox: z.boolean().default(false),
   // Intake-only flag: when true, skip the near-duplicate suppression below.
   // Used by the manual entry form so dispatchers can always log a call.
   // Stripped before the event is stored.
   skipDedup: z.boolean().optional(),
-  whisperModel: z.string().nullable().optional(),
 });
 
 export const insertSettingsSchema = z.object({

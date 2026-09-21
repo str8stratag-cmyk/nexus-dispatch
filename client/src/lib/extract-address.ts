@@ -370,6 +370,51 @@ export interface ExtractedAddress {
   crossStreet: string | null;
 }
 
+// Known Tampa corridors heard WITHOUT their suffix in clipped radio audio
+// ("signal 4 Hillsborough and Florida", "MVA on Dale Mabry"). Suffix-based
+// extraction finds nothing for these; the geocoder still resolves them with the
+// city suffix. Order: multi-word / longest first so specific names win.
+const KNOWN_STREET_FALLBACK: [RegExp, string][] = [
+  [/\bbruce\s+b\s+downs\b/i, "Bruce B Downs Blvd"],
+  [/\b(university\s+)?center\b/i, "University Center"],
+  [/\bboy\s+scout\b/i, "Boy Scout Blvd"],
+  [/\bhigh\s+park\b/i, "Hyde Park"],
+  [/\bhyde\s+park\b/i, "Hyde Park"],
+  [/\bdale\s+mabry\b/i, "Dale Mabry"],
+  [/\bwest\s*shore\b/i, "Westshore Blvd"],
+  [/\bhillsborough\b|\bhillsboro\b/i, "Hillsborough Ave"],
+  [/\bfloribraska\b/i, "Floribraska Ave"],
+  [/\bflorida\b/i, "N Florida Ave"],
+  [/\bnebraska\b/i, "Nebraska Ave"],
+  [/\bkennedy\b/i, "Kennedy Blvd"],
+  [/\bfowler\b/i, "Fowler Ave"],
+  [/\bcolumbus\b/i, "Columbus Dr"],
+  [/\bhoward\b/i, "N Howard Ave"],
+  [/\bsligh\b/i, "Sligh Ave"],
+  [/\bbusch\b/i, "Busch Blvd"],
+  [/\bgandy\b/i, "Gandy Blvd"],
+  [/\badamo\b/i, "Adamo Dr"],
+  [/\bmemorial\b/i, "Memorial Hwy"],
+  [/\blois\b/i, "Lois Ave"],
+  [/\bhimes\b|\bhines\b/i, "Himes Ave"],
+  [/\bselmon\b/i, "Selmon Expy"],
+  [/\bcurtis\b/i, "Curtis St"],
+  [/\bmlk\b|\bmartin\s+luther\s+king\b/i, "MLK Blvd"],
+  [/\bi\s*-\s*275\b/i, "I-275"],
+  [/\bi\s*-\s*75\b/i, "I-75"],
+  [/\bi\s*-\s*4\b/i, "I-4"],
+];
+
+function matchKnownStreets(text: string): string[] {
+  const found: string[] = [];
+  for (const [pattern, canonical] of KNOWN_STREET_FALLBACK) {
+    if (pattern.test(text) && !found.includes(canonical)) {
+      found.push(canonical);
+    }
+  }
+  return found;
+}
+
 export function applyAddressHomophones(text: string): string {
   let corrected = text;
   for (const [pattern, replacement] of ADDRESS_HOMOPHONES) {
@@ -394,7 +439,15 @@ export function extractAddress(transcript: string): ExtractedAddress {
 
   const text = normalizeWhitespace(applyAddressHomophones(transcript));
   const candidates = findStreetCandidates(text);
-  if (candidates.length === 0) return { address: null, crossStreet: null };
+  if (candidates.length === 0) {
+    // Suffix-less known streets ("Hillsborough and Florida", "on Dale Mabry"):
+    // first match becomes the address, the second the cross street.
+    const known = matchKnownStreets(text);
+    if (known.length > 0) {
+      return { address: known[0], crossStreet: known[1] ?? null };
+    }
+    return { address: null, crossStreet: null };
+  }
 
   // Prefer numbered addresses. If multiple numbered candidates exist, prefer the
   // longest/most specific one (handles "200 E Dr" vs "200 E Dr Martin Luther King Jr Blvd").
