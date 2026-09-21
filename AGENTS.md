@@ -36,7 +36,7 @@ If `.env` ever loses them, ask the user; do not hunt for MongoDB on other device
 **Fleet map (confirmed 2026-09-03):**
 | Device | IP | Role |
 |--------|----|------|
-| **DISP-2 (this machine)** | 192.168.6.52 | Whisper v3 turbo tester, dispatch :5000, nexus :5001 |
+| **DISP-2 (this machine)** | 192.168.6.52 | Whisper v3 turbo tester, dispatch :5000 (nexus :5001 retired from runtime 2026-09-18) |
 | DISP-3 | 192.168.6.53 | Whisper medium.en, watchdog-managed (4h restart, 6h git pull), runs `trial/` reconciler every 3 min |
 
 Status reports mentioning "medium.en, watchdog-managed, reconciler, .53" come from the
@@ -89,7 +89,9 @@ DISP-3 box — do not mistake them for this machine's state. The Azure Maps acco
     Street and Fifth Avenue. Suspect is fleeing northbound on foot."
 - **Autostart:** Task Scheduler task `Dispatch Services Autostart` runs
   `scripts\refresh-services.bat` at user logon (registered 2026-09-04; refresh bat
-  now starts/stops all three services incl. Nexus :5001). After a reboot, services
+  starts/stops Whisper + Dispatch; Nexus :5001 was retired from this box's runtime
+  2026-09-18 per user decision — the script no longer starts it, though its kill
+  sweep still frees :5001). After a reboot, services
   come up on login — verify with the health checks if anything seems down.
 - Never travels via git (gitignored): `whisper-model.local`, `.env` (Azure Maps
   key), `KIMI_RESUME.md`, logs, `test-audio.wav`.
@@ -105,7 +107,10 @@ DISP-3 box — do not mistake them for this machine's state. The Azure Maps acco
 - **Firewall:** inbound TCP 8178 must be allowed (rule name `Whisper v3 Turbo (8178)`).
   Adding it requires an elevated shell:
   `netsh advfirewall firewall add rule name="Whisper v3 Turbo (8178)" dir=in action=allow protocol=TCP localport=8178`
-- **Services:** Whisper `:8178`, Dispatch Monitor `:5000`, Nexus Dispatch `:5001`.
+- **Services:** Whisper `:8178`, Dispatch Monitor `:5000`. Nexus Dispatch
+  (`:5001`) was retired from this box's runtime 2026-09-18 per user decision —
+  the nexus-dispatch repo stays as a clone/edit base for future apps, not run
+  in production here.
   Start/stop via Desktop `Refresh Dispatch Services.bat` / `Kill Dispatch Services.bat`
   or `scripts/refresh-services.bat` (Git-Bash safe) / `scripts/kill-services.bat`.
   NOTE: `refresh-services.bat`/`kill-services.bat` and both `*-detached.ps1` scripts

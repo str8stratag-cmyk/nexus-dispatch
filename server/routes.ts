@@ -140,6 +140,7 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   [/\bfletcher(?:\s+ave(?:nue)?)?\b/gi, "Fletcher Ave"],
   [/\bwaters(?:\s+ave(?:nue)?)?\b/gi, "Waters Ave"],
   [/\bhimes(?:\s+ave(?:nue)?)?\b/gi, "Himes Ave"],
+  [/\bhale(?:\s+ave(?:nue)?)?\b/gi, "Hale Ave"],
   [/\bdale\s+mabry(?:\s+hwy|\s+highway)?\b/gi, "Dale Mabry Hwy"],
   [/\bcolumbus(?:\s+ave(?:nue)?)?\b/gi, "Columbus Ave"],
   [/\barmenia(?:\s+ave(?:nue)?)?\b/gi, "Armenia Ave"],
@@ -155,12 +156,15 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   [/\behrlich(?:\s+rd|\s+road)?\b/gi, "Ehrlich Rd"],
   [/\bosborne(?:\s+ave(?:nue)?)?\b/gi, "Osborne Ave"],
   [/\bcomanche(?:\s+ave(?:nue)?)?\b/gi, "Comanche Ave"],
+  [/\bol+a\b/gi, "Ola Ave"],
   [/\bwilder(?:\s+ave(?:nue)?)?\b/gi, "Wilder Ave"],
   [/\blivingston(?:\s+ave(?:nue)?)?\b/gi, "Livingston Ave"],
   [/\bmemorial(?:\s+hwy|\s+highway)?\b(?!\s+parkway)/gi, "Memorial Highway"],
+  [/\bmorris\s+bridge(?:\s+rd|\s+road)?\b/gi, "Morris Bridge Rd"],
   [/\b(?:dr\s+)?martin\s+luther\s+king(?:\s+jr)?(?:\s+blvd|\s+boulevard)?\b/gi, "Martin Luther King Jr Blvd"],
   [/\bmlk\b/gi, "Martin Luther King Jr Blvd"],
   [/\bbusch(?:\s+blvd|\s+boulevard)?\b(?!\s+gardens)/gi, "Busch Blvd"],
+  [/\bbush\b/gi, "Busch Blvd"],
   [/\bsligh(?:\s+ave(?:nue)?)?\b/gi, "Sligh Ave"],
   [/\bkennedy(?:\s+blvd|\s+boulevard)?\b/gi, "Kennedy Blvd"],
   [/\bbroadway(?:\s+ave(?:nue)?)?\b/gi, "Broadway Ave"],
@@ -555,6 +559,21 @@ function isInvalidAutoAddress(address: string | null | undefined): boolean {
   return false;
 }
 
+// True when the address names at least one road from KNOWN_ROAD_CANONICAL.
+// Hardening for the auto-dispatch gate: an address that FAILED to geocode and
+// names no known road is usually Whisper fabricating a street on noise
+// ("4808 North Hell Avenue") — quarantine it instead of publishing a
+// coord-less event. Real calls on minor streets are recoverable via
+// /api/quarantine restore. Global regexes are stateful; reset per test.
+function mentionsKnownRoad(address: string | null | undefined): boolean {
+  const a = address || "";
+  if (!a.trim()) return false;
+  return KNOWN_ROAD_CANONICAL.some(([pattern]) => {
+    pattern.lastIndex = 0;
+    return pattern.test(a);
+  });
+}
+
 // A bare road name (e.g. "Dale Mabry") has no block number and no cross
 // street, so geocoding can only pin the road centroid — the marker is
 // approximate and dispatch may need to search for the exact location.
@@ -819,6 +838,13 @@ export async function registerRoutes(
       // Cross-reference the resolved coordinates against the actual road name.
       if (lat && lng) {
         geocodedRoad = await reverseGeocodeRoad(lat, lng);
+      }
+
+      // Hardening: geocoding failed AND the address names no known road —
+      // almost always Whisper inventing a street on noise. Quarantine for
+      // review rather than publish a coord-less event.
+      if (!parsed.isManual && parsed.address && !lat && !lng && !mentionsKnownRoad(parsed.address)) {
+        return rejectAutoDispatch(res, parsed, "unrecognized street (geocode failed)");
       }
 
       // Suppress near-duplicate dispatches. The same incident gets

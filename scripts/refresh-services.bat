@@ -18,8 +18,9 @@ powershell.exe -ExecutionPolicy Bypass -File "%repoRoot%\scripts\start-whisper-d
 echo Starting app dev server...
 powershell.exe -ExecutionPolicy Bypass -File "%repoRoot%\scripts\start-app-detached.ps1"
 
-echo Starting Nexus Dispatch dev server...
-powershell.exe -ExecutionPolicy Bypass -File "C:\Users\str8s\nexus-dispatch\scripts\start-app-detached.ps1"
+REM Nexus Dispatch retired from runtime on DISP-2 (user decision 2026-09-18):
+REM repo stays as a clone/edit source only, not started here anymore. The kill
+REM loop above still sweeps port 5001 if anything ever starts it.
 
 echo.
 echo Waiting for services to start...
@@ -29,7 +30,8 @@ echo.
 curl -s http://127.0.0.1:8178/health
 echo.
 curl -s -o nul -w "App HTTP status: %%{http_code}\n" http://127.0.0.1:5000/
-curl -s -o nul -w "Nexus HTTP status: %%{http_code}\n" http://127.0.0.1:5001/
+REM Nexus retired — no :5001 check.
+REM curl -s -o nul -w "Nexus HTTP status: %%{http_code}\n" http://127.0.0.1:5001/
 
 echo.
 echo Refresh complete.

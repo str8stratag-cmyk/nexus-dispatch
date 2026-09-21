@@ -25,10 +25,18 @@ SAVE_AUDIO_MAX = int(os.getenv("WHISPER_SAVE_MAX", "200"))
 
 # Known homophone corrections: word-boundary, case-insensitive; the
 # replacement always uses the intended casing. Add entries here when call
-# review surfaces a recurring mis-transcription (e.g. the street "Olla"
-# by Men's World comes out as "alla").
+# review surfaces a recurring mis-transcription (e.g. the street "Ola Ave"
+# comes out as "alla").
 HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\balla\b", re.IGNORECASE), "Olla"),
+    (re.compile(r"\balla\b", re.IGNORECASE), "Ola"),
+    (re.compile(r"\bcypruss\b", re.IGNORECASE), "Cypress"),
+    (re.compile(r"\bcyprees\b", re.IGNORECASE), "Cypress"),
+    (re.compile(r"\bsignaal\b", re.IGNORECASE), "Signal"),
+    (re.compile(r"\binterstte\b", re.IGNORECASE), "Interstate"),
+    (re.compile(r"\bamd\b", re.IGNORECASE), "and"),
+    (re.compile(r"\btampania\b", re.IGNORECASE), "Tampa"),
+    (re.compile(r"\bhell\s+(?:ave|avenue)\b", re.IGNORECASE), "Hale Ave"),
+    (re.compile(r"\bslambridge\b", re.IGNORECASE), "Morris Bridge"),
 ]
 
 

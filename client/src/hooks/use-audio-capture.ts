@@ -70,7 +70,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     // will hallucinate a concrete call example into unrelated audio.
     form.set(
       "prompt",
-      keywords.length ? `Dispatch radio terminology: ${keywords.join(", ")}. Local street names: Olla.` : "Dispatch radio terminology. Local street names: Olla."
+      keywords.length ? `Dispatch radio terminology: ${keywords.join(", ")}.` : "Dispatch radio terminology."
     );
 
     try {
