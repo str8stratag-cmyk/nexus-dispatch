@@ -445,6 +445,7 @@ export async function registerRoutes(
     [/\b(?:dr\s+)?martin\s+luther\s+king(?:\s+jr)?(?:\s+blvd|\s+boulevard)?\b/gi, "Martin Luther King Jr Blvd"],
     [/\bmlk\b/gi, "Martin Luther King Jr Blvd"],
     [/\bbusch(?:\s+blvd|\s+boulevard)?\b(?!\s+gardens)/gi, "Busch Blvd"],
+  [/\bbush\b/gi, "Busch Blvd"],
     [/\bsligh(?:\s+ave(?:nue)?)?\b/gi, "Sligh Ave"],
     [/\bkennedy(?:\s+blvd|\s+boulevard)?\b/gi, "Kennedy Blvd"],
     [/\bbroadway(?:\s+ave(?:nue)?)?\b/gi, "Broadway Ave"],
