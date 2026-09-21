@@ -17,7 +17,7 @@ export function getDatabase(): Promise<Db> {
       serverSelectionTimeoutMS: 8000,
       connectTimeoutMS: 10000,
       socketTimeoutMS: 30000,
-      maxPoolSize: 1,
+      maxPoolSize: 10,
       minPoolSize: 0,
       retryWrites: true,
       w: "majority",
