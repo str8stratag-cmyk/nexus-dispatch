@@ -18,6 +18,29 @@ A full-stack dispatch monitoring dashboard. It captures live audio, transcribes 
 
 Every time this box is fired up, work in this order:
 
+### NEXT FIRE-UP — OFFICE RETURN (2026-09-21 AM)
+
+This box spent the weekend at the user's home (no radio feed — silence
+was expected). Back in the office, THE task is the live radio test:
+
+1. Scanner on. Ear-check that the capture feed hears SCANNER audio, not
+   room noise — at home it only heard room chatter (weekend at home).
+2. Watch `APPS\capture-disp3.log` for `INGEST 200` lines and Mongo for
+   `source=DISP-3` events. This device pushed ~nothing for a week+
+   before the weekend; this test proves the JOUNIVO path end to end.
+3. Watch `CAPTURE\drops\` — if it floods, beam 2 is still too slow for
+   the i3. beam_size=2 is a LOCAL UNCOMMITTED edit in
+   `whisper\whisper_service.py` — decide commit/push only after this test.
+4. Clean initial_prompt (commit 3d746b8) is live — check transcripts for
+   fabrications on garble; flip CLEAN_PROMPT to None if it fabricates.
+5. Feed must target "Microphone (JOUNIVO JV610)". "Microphone (USB
+   Composite Device)" is a DIFFERENT mic — do not point the feed at it.
+
+State at shutdown (2026-09-21 ~06:30): watchdog single instance (nexus
+block removed, FEED=DISP-3), capture on JOUNIVO, whisper :8178 and app
+:5000 both on new code and 200. Old quarantine echo junk (~200 items)
+not yet purged — purge on request.
+
 1. **Check the stack — don't blindly start it.** The watchdog auto-starts at
    logon via `dispatch-watchdog.vbs` in the Startup folder (added 2026-09-14).
    First check for a running watchdog (powershell processes with `watchdog.ps1`
