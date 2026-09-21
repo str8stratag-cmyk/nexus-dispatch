@@ -665,11 +665,24 @@ function normalizeRoadName(s: string | null | undefined): string {
   return (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+// Dedup decisions only concern recent still-open events. Query just those
+// (createdAt is indexed) instead of storage.getEvents(), whose full-collection
+// fetch measured ~7s on Atlas M0 — with the old single-connection pool it
+// stalled every concurrent request and "locked the app up".
+async function recentActiveEvents(sinceMs: number): Promise<DispatchEvent[]> {
+  const db = await getDatabase();
+  const docs = await db
+    .collection("dispatchEvents")
+    .find({ createdAt: { $gte: new Date(sinceMs) }, status: { $in: ["active", "accepted"] } })
+    .toArray();
+  return docs as unknown as DispatchEvent[];
+}
+
 async function roadMentionedRecently(address: string | null | undefined): Promise<boolean> {
   const road = normalizeRoadName(address);
   if (road.length < 4) return false;
   const cutoff = Date.now() - ROAD_MENTION_WINDOW_MS;
-  const events = await storage.getEvents(500);
+  const events = await recentActiveEvents(cutoff);
   return events.some((e) => {
     if (e.status !== "active" && e.status !== "accepted") return false;
     if (new Date(e.createdAt).getTime() < cutoff) return false;
@@ -812,6 +825,25 @@ export async function registerRoutes(
 
   // Create a dispatch event (auto or manual)
   app.post("/api/dispatch", dispatchLimiter, async (req, res) => {    try {
+      // Some fleet tooling re-posts stored events fetched from /api/events
+      // (full documents, _id included) on a loop. Short-circuit those: it's
+      // the same event, and running them through geocode/dedup burned 4-8s
+      // of provider calls per cycle on junk addresses.
+      const echoId = (req.body as { _id?: unknown })?._id;
+      if (echoId) {
+        try {
+          const db = await getDatabase();
+          const existing = await db
+            .collection("dispatchEvents")
+            .findOne({ _id: new ObjectId(String(echoId)) });
+          if (existing) {
+            return res.status(200).json({ duplicate: true, event: existing });
+          }
+        } catch {
+          // Not a valid ObjectId / not found — fall through to normal intake.
+        }
+      }
+
       const parsed = insertDispatchEventSchema.parse(req.body);
 
       // Stamp which Whisper model produced this event (fleet accuracy comparison).
@@ -914,7 +946,7 @@ export async function registerRoutes(
           const roadKey = norm(parsed.address || "") || norm(parsed.crossStreet || "");
           const roadCutoff = Date.now() - ROAD_MENTION_COOLDOWN_MS;
           if (roadKey) {
-            const recentSameRoad = (await storage.getEvents()).find((e) => {
+            const recentSameRoad = (await recentActiveEvents(roadCutoff)).find((e) => {
               if (e.signalType !== "Road Mention") return false;
               if (e.status !== "active" && e.status !== "accepted") return false;
               if (new Date(e.createdAt).getTime() < roadCutoff) return false;
@@ -976,7 +1008,7 @@ export async function registerRoutes(
         const cutoff = Date.now() - DEDUP_WINDOW_MS;
         const newAddr = norm(parsed.address);
         const newTranscript = norm(parsed.transcript);
-        const existing = (await storage.getEvents()).find((e) => {
+        const existing = (await recentActiveEvents(cutoff)).find((e) => {
           if (e.status !== "active" && e.status !== "accepted") return false;
           if (new Date(e.createdAt).getTime() < cutoff) return false;
           // Identical transcript in the window = the same broadcast reposted
@@ -1063,15 +1095,17 @@ export async function registerRoutes(
   const roadMentionSweeper = setInterval(async () => {
     try {
       const staleBefore = new Date(Date.now() - 90 * 60 * 1000);
-      for (const e of await storage.getEvents()) {
-        if (
-          e.signalType === "Road Mention" &&
-          e.status === "active" &&
-          new Date(e.createdAt) < staleBefore
-        ) {
-          const updated = await storage.updateEventStatus(e.id, "resolved");
-          if (updated) broadcastEvent(updated);
-        }
+      const db = await getDatabase();
+      // Query only the stale prompts. storage.getEvents() full-scan measured
+      // ~7s on Atlas M0 (per-doc wire cost ~7ms x every doc in the
+      // collection) and stalled other requests back when the pool was 1.
+      const stale = await db
+        .collection("dispatchEvents")
+        .find({ signalType: "Road Mention", status: "active", createdAt: { $lt: staleBefore } })
+        .toArray();
+      for (const e of stale) {
+        const updated = await storage.updateEventStatus((e as unknown as DispatchEvent).id, "resolved");
+        if (updated) broadcastEvent(updated);
       }
     } catch (err) {
       console.error("road mention sweeper failed:", err);

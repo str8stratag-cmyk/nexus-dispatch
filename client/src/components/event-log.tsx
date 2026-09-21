@@ -105,10 +105,13 @@ export default function EventLog() {
   const { data: events = [], isLoading } = useQuery({
     queryKey: ["/api/events"],
     queryFn: async () => {
-      const res = await apiRequest("GET", "/api/events");
+      // Cap the poll payload — the server costs ~7ms per returned doc on
+      // Atlas M0, so the old unbounded fetch was 3.3s every 30s. SSE pushes
+      // live updates; this poll is just a slow catch-up safety net.
+      const res = await apiRequest("GET", "/api/events?limit=200");
       return res.json() as Promise<DispatchEventRow[]>;
     },
-    refetchInterval: 30_000,
+    refetchInterval: 120_000,
   });
 
   useEventsStream();
