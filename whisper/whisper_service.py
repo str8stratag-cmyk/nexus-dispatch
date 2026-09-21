@@ -15,6 +15,24 @@ MODEL_NAME = os.getenv("WHISPER_MODEL", "medium.en")
 DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 API_KEY = os.getenv("WHISPER_API_KEY")
+
+# Clean style-only initial prompt — NO keyword lists, street lists, or call
+# examples. The old prompt ("Dispatch radio terminology: <keywords>. Local
+# street names: Olla.") was echoed verbatim into transcripts on garble, and
+# each echoed keyword fired the event pipeline (junk events + quarantine
+# noise). A concrete call example in the prompt fabricated ~330 bogus events
+# one weekend (2026-09-08, client fix c16ffa2). 2026-09-21: single clean
+# prompt owned here; request-supplied prompts are deliberately IGNORED
+# (old fleet senders still transmit keyword lists; honoring them would
+# re-open the echo vector). If this prompt ever fabricates on silence,
+# set it to None — that was the winning arm of the 2026-09-18 A/B.
+CLEAN_PROMPT = (
+    "Tampa Police Department radio dispatch. The dispatcher and field "
+    "units speak in short transmissions using call signs, ten-codes, and "
+    "local street names. Transcribe only the radio traffic verbatim, and "
+    "omit music, television audio, and background conversation."
+)
+
 # Opt-in: set WHISPER_SAVE_AUDIO to a directory to retain incoming chunks
 # (audio + JSON sidecar with transcript and confidence) for tuning. Ring
 # buffer — oldest files are deleted past WHISPER_SAVE_MAX files.
@@ -182,11 +200,10 @@ def transcribe(
                     temperature=(0.0, 0.2, 0.4),
                     vad_filter=True,
                     vad_parameters={"min_silence_duration_ms": 700},
-                    # 2026-09-18 DISP-3 overnight A/B test: initial_prompt
-                    # disabled — prompt priming was fabricating dispatch
-                    # vocabulary on garble. Revisit 2026-09-19 AM; fleet
-                    # decision pending test results.
-                    initial_prompt=None,
+                    # 2026-09-21: single clean style-only prompt for all
+                    # requests (see CLEAN_PROMPT above); request-supplied
+                    # prompts are ignored on purpose.
+                    initial_prompt=CLEAN_PROMPT,
                     condition_on_previous_text=False,
                     compression_ratio_threshold=2.4,
                 )
