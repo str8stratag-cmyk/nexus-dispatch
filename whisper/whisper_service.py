@@ -29,12 +29,10 @@ API_KEY = os.getenv("WHISPER_API_KEY")
 # (old fleet senders still transmit keyword lists; honoring them would
 # re-open the echo vector). If this prompt ever fabricates on silence,
 # set it to None — that was the winning arm of the 2026-09-18 A/B.
-CLEAN_PROMPT = (
-    "Tampa Police Department radio dispatch. The dispatcher and field "
-    "units speak in short transmissions using call signs, ten-codes, and "
-    "local street names. Transcribe only the radio traffic verbatim, and "
-    "omit music, television audio, and background conversation."
-)
+# FLIPPED TO None 2026-09-21: CLEAN_PROMPT fabricated verbatim into a live
+# DISP-2 event at 11:03 AM (prompt echo), so the service now transcribes
+# with no initial_prompt at all.
+CLEAN_PROMPT = None
 
 # Opt-in: set WHISPER_SAVE_AUDIO to a directory to retain incoming chunks
 # (audio + JSON sidecar with transcript and confidence) for tuning. Ring
