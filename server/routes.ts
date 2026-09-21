@@ -869,7 +869,7 @@ export async function registerRoutes(
       // Suppress near-duplicate dispatches. The same incident gets
       // re-broadcast on the radio for hours; without this, each broadcast
       // creates a fresh event and Telegram alert for the same call.
-      // Applies to feed events and reconciler (DISP 3) output. The manual
+      // Applies to feed events and reconciler (DISP-3) output. The manual
       // entry form sets skipDedup so dispatchers can always log a call.
       if (!skipDedup) {
         const DEDUP_WINDOW_MS = 30 * 60 * 1000;

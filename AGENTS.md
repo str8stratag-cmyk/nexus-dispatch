@@ -21,9 +21,9 @@ Every time this box is fired up, work in this order:
 1. **Check the stack — don't blindly start it.** The watchdog auto-starts at
    logon via `dispatch-watchdog.vbs` in the Startup folder (added 2026-09-14).
    First check for a running watchdog (powershell processes with `watchdog.ps1`
-   in the command line) and verify 8178/health, :5000/api/events, and
-   :5001/api/events are all responding before doing anything else. Only if the
-   watchdog is missing, launch ONE, hidden:
+   in the command line) and verify 8178/health and :5000/api/events are
+   responding before doing anything else (nexus :5001 RETIRED 2026-09-18 —
+   push-only mirror, never run). Only if the watchdog is missing, launch ONE, hidden:
    `powershell -ExecutionPolicy Bypass -File C:\Users\str8s\dispatch-monitor\scripts\watchdog.ps1`
    NEVER start a second watchdog (e.g. `start-watchdog.bat`) while one is
    running — two watchdogs race restarts and wedge the apps.
@@ -71,11 +71,12 @@ query with ", Tampa, FL" appended.
   (taskkill/Stop-Process = Access denied). To apply whisper_service.py
   edits before the watchdog's scheduled 4h restart, kill 8178 from an
   ELEVATED prompt; otherwise edits load at the next scheduled restart.
-- **nexus-dispatch = push-only parity mirror, NOT live production** (user,
+- **nexus-dispatch = push-only parity mirror, NOT run anywhere** (user,
   2026-09-18): all updates get pushed to it, but nothing pulls and runs it;
-  live production is dispatch-monitor only (this box's watchdog does run the
-  nexus APP on :5001 against the shared local Whisper, but no Whisper is ever
-  started from the nexus repo). Its `whisper_service.py` had drifted — missing
+  live production is dispatch-monitor only. Later the same day the user
+  clarified nexus is never run on any box: the :5001 restart block was
+  removed from `watchdog-disp3.ps1` and RUNBOOK/AGENTS startup checks no
+  longer verify :5001. Its `whisper_service.py` had drifted — missing
   the 2026-09-16/17 robustness work entirely — so it was re-synced by copying
   dispatch-monitor's file over it on 2026-09-18. `start-whisper.ps1`
   intentionally differs there (shared-venv fallback to dispatch-monitor's

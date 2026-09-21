@@ -3,7 +3,7 @@
  * Rule-based Dispatch Call Reconciler (Trial)
  *
  * Pulls recent events from all dispatch feeds, clusters them by time/location,
- * picks the best transcript/address/signal, and emits a single DISP 3 event.
+ * picks the best transcript/address/signal, and emits a single DISP-3 event.
  */
 
 import { MongoClient } from "mongodb";
@@ -12,7 +12,7 @@ import "dotenv/config";
 const API_URL = process.env.RECONCILER_API_URL || "http://127.0.0.1:5000";
 const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.MONGODB_DB_NAME || "dispatch_monitor";
-const SOURCE_OUTPUT = "DISP 3";
+const SOURCE_OUTPUT = "DISP-3";
 
 // Look back window for reconciliation (events newer than this).
 const LOOKBACK_MS = parseInt(process.env.RECONCILER_LOOKBACK_MS || "900000", 10); // 15 min
@@ -20,7 +20,7 @@ const LOOKBACK_MS = parseInt(process.env.RECONCILER_LOOKBACK_MS || "900000", 10)
 const TIME_WINDOW_MS = parseInt(process.env.RECONCILER_TIME_WINDOW_MS || "600000", 10); // 10 min
 // Max distance (km) for events to be considered the same location.
 const MAX_DISTANCE_KM = parseFloat(process.env.RECONCILER_MAX_DISTANCE_KM || "1.0");
-// Minimum score improvement required to emit a DISP 3 event over existing feeds.
+// Minimum score improvement required to emit a DISP-3 event over existing feeds.
 const MIN_SCORE_THRESHOLD = parseInt(process.env.RECONCILER_MIN_SCORE_THRESHOLD || "20", 10);
 // How often to run the reconciler loop.
 const INTERVAL_MS = parseInt(process.env.RECONCILER_INTERVAL_MS || "180000", 10); // 3 min
@@ -376,7 +376,7 @@ async function reconcile() {
         continue;
       }
 
-      // Check if we already emitted a DISP 3 for this cluster recently.
+      // Check if we already emitted a DISP-3 for this cluster recently.
       const firstTime = cluster[0].createdAt;
       const lastTime = cluster[cluster.length - 1].createdAt;
       const existing = await eventsCol.findOne({
@@ -387,7 +387,7 @@ async function reconcile() {
         },
       });
       if (existing) {
-        console.log(`Cluster around ${firstTime.toISOString()} already has DISP 3 event #${existing.id}; skipping.`);
+        console.log(`Cluster around ${firstTime.toISOString()} already has DISP-3 event #${existing.id}; skipping.`);
         skipped++;
         continue;
       }
@@ -422,27 +422,27 @@ async function reconcile() {
         });
         if (!res.ok) {
           const err = await res.text();
-          console.error(`Failed to create DISP 3 event: ${res.status} ${err}`);
+          console.error(`Failed to create DISP-3 event: ${res.status} ${err}`);
           continue;
         }
         const result = await res.json();
         created++;
         console.log(
-          `Created DISP 3 event #${result.id} from cluster of ${cluster.length} (score ${bestScore})`
+          `Created DISP-3 event #${result.id} from cluster of ${cluster.length} (score ${bestScore})`
         );
       } catch (err) {
         console.error("API call failed:", err.message);
       }
     }
 
-    console.log(`\nDone. Created ${created} DISP 3 events. Skipped ${skipped}.`);
+    console.log(`\nDone. Created ${created} DISP-3 events. Skipped ${skipped}.`);
   } finally {
     await client.close();
   }
 }
 
 async function main() {
-  console.log(`DISP 3 reconciler starting. Interval: ${INTERVAL_MS / 1000}s`);
+  console.log(`DISP-3 reconciler starting. Interval: ${INTERVAL_MS / 1000}s`);
   while (true) {
     try {
       await reconcile();

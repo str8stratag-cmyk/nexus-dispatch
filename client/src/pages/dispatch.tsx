@@ -55,14 +55,23 @@ export default function DispatchPage() {
   });
 
   // Fresh browsers (nothing manually entered) self-configure from the
-  // machine identity: DISP-N → District N, source "DISP-N".
+  // machine identity: DISP-N → District N, source "DISP-N". On a canonical
+  // DISP-N machine the source is always "DISP-N": a stale or typo'd
+  // localStorage value ("disp 3", "DISP3") is normalized instead of winning
+  // forever — one box fed MongoDB variant spellings for a week because a
+  // typed localStorage value always beat the hostname default.
   useEffect(() => {
     if (!machineConfig?.hostname) return;
     const defaults = defaultsFromHostname(machineConfig.hostname);
     if (!localStorage.getItem("dispatch.district")) {
       setDistrictState(defaults.district);
     }
-    if (!localStorage.getItem("dispatch.source")) {
+    if (/^DISP-\d+$/.test(defaults.source)) {
+      const stored = localStorage.getItem("dispatch.source");
+      if (stored !== defaults.source) {
+        setSourceName(defaults.source);
+      }
+    } else if (!localStorage.getItem("dispatch.source")) {
       setSourceNameState(defaults.source);
     }
   }, [machineConfig]);
