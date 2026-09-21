@@ -1,6 +1,9 @@
+param([switch]$NoInitialStart)
 # Watchdog: keep Whisper alive, pull GitHub updates, restart apps when code changes
 # Run from PowerShell: .\scripts\watchdog.ps1
 # Runs indefinitely until you close the window.
+# -NoInitialStart: skip the initial Whisper/app start (used when the updated
+# script spawns itself — services are already running).
 
 $dispatchMonitor = "C:\Users\str8s\dispatch-monitor"
 $nexusDispatch = "C:\Users\str8s\nexus-dispatch"
@@ -11,6 +14,10 @@ $healthCheckInterval = [TimeSpan]::FromMinutes(1)
 
 $lastWhisperRestart = [DateTime]::MinValue
 $lastGitPull = [DateTime]::MinValue
+
+# Fail fast if git needs credentials — an interactive prompt in the watchdog's
+# hidden console wedges the entire health-check loop.
+$env:GIT_TERMINAL_PROMPT = "0"
 
 function Stop-ProcessOnPort($port) {
     $procIds = netstat -ano | Select-String ":$port\s+.*LISTENING" | ForEach-Object {
@@ -78,15 +85,18 @@ function Stop-StrayWhisper() {
 $minAppRestartGap = [TimeSpan]::FromMinutes(2)
 $lastAppRestart = @{ "Dispatch Monitor" = [DateTime]::MinValue; "Nexus Dispatch" = [DateTime]::MinValue }
 
-function Restart-AppIfDead($title, $directory, $port, $command) {
+function Restart-AppIfDead($title, $directory, $port, $command, $log) {
     if (Test-AppAlive $port) { return }
-    $elapsed = Get-Date - $lastAppRestart[$title]
+    # NOTE: parenthesize Get-Date — "Get-Date - $x" parses '-' as a parameter
+    # token, $elapsed becomes $null, and the throttle below silently blocks
+    # every restart (this watchdog never recovered a dead app until 2026-09-17).
+    $elapsed = ([DateTime]::Now) - $lastAppRestart[$title]
     if ($elapsed -lt $minAppRestartGap) {
         Write-Host "$(Get-Date) $title is down but was restarted $([int]$elapsed.TotalSeconds)s ago; skipping this cycle." -ForegroundColor DarkYellow
         return
     }
     Write-Host "$(Get-Date) $title (port $port) is not responding; restarting..." -ForegroundColor Cyan
-    Restart-App $title $directory $port $command
+    Restart-App $title $directory $port $command $log
     $lastAppRestart[$title] = Get-Date
 }
 
@@ -139,25 +149,38 @@ function Pull-Repo($path) {
     return $false
 }
 
-function Restart-App($title, $directory, $port, $command) {
+# App output is redirected to a log file. Like Whisper (see
+# start-whisper.ps1), apps inheriting the watchdog's hidden console
+# intermittently wedge on console writes and never bind their port.
+function Restart-App($title, $directory, $port, $command, $log) {
     Write-Host "$(Get-Date) Restarting $title..." -ForegroundColor Cyan
     Stop-ProcessOnPort $port
     Stop-AppLauncher $title $directory
-    Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command" -WindowStyle Hidden
+    New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
+    Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command >> `"$log`" 2>&1" -WindowStyle Hidden
 }
 
-function Start-App($title, $directory, $port, $command) {
+function Start-App($title, $directory, $port, $command, $log) {
     Write-Host "$(Get-Date) Starting $title..." -ForegroundColor Cyan
     Stop-ProcessOnPort $port
     Stop-AppLauncher $title $directory
-    Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command" -WindowStyle Hidden
+    New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
+    Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command >> `"$log`" 2>&1" -WindowStyle Hidden
 }
 
 # Initial start
-Start-Whisper
-$lastWhisperRestart = Get-Date
-Start-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev"
-Start-App "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev"
+if (-not $NoInitialStart) {
+    Start-Whisper
+    $dmLog = Join-Path $dispatchMonitor "logs\dispatch-monitor.log"
+    # Nexus Dispatch is dormant fleet-wide (user, 2026-09-17): repo keeps
+    # pulling below so it stays current, but the app is not started/supervised.
+    Start-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
+} else {
+    # Services are already running (self-update path) — stamp the timers so
+    # the loop does not immediately restart Whisper for looking "overdue".
+    $lastWhisperRestart = Get-Date
+}
+$dmLog = Join-Path $dispatchMonitor "logs\dispatch-monitor.log"
 
 Write-Host "Watchdog running. Whisper restart every $($whisperRestartInterval.TotalHours)h, git pull every $($gitPullInterval.TotalHours)h." -ForegroundColor Green
 
@@ -172,8 +195,7 @@ while ($true) {
     }
 
     # Restart apps if their DB-backed endpoint stops responding
-    Restart-AppIfDead "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev"
-    Restart-AppIfDead "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev"
+    Restart-AppIfDead "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
 
     # Pull git updates periodically
     if (($now - $lastGitPull) -gt $gitPullInterval) {
@@ -181,14 +203,33 @@ while ($true) {
         $ndUpdated = Pull-Repo $nexusDispatch
 
         if ($dmUpdated) {
+            # LOCAL CHANGE (2026-09-04, keep when pushing upstream): npm
+            # install BEFORE restarting the app on pull — prevents the
+            # missing-dependency crash (e.g. express-rate-limit) on
+            # post-pull restarts. Pull-Repo only installs when package.json
+            # changed; this catches everything else.
             Write-Host "$(Get-Date) npm install (dispatch-monitor)..." -ForegroundColor Cyan
             cmd /c "cd /d `"$dispatchMonitor`" && npm install" | Out-Null
-            Restart-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev"
+            Restart-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
         }
-        if ($ndUpdated) {
-            Write-Host "$(Get-Date) npm install (nexus-dispatch)..." -ForegroundColor Cyan
-            cmd /c "cd /d `"$nexusDispatch`" && npm install" | Out-Null
-            Restart-App "Nexus Dispatch" $nexusDispatch 5001 "set PORT=5001 && npm run dev"
+
+        # Self-update: pulling a new watchdog.ps1 does NOT fix the running
+        # loop — it keeps executing the old in-memory script until something
+        # restarts it (2026-09-18: DISP-1 silently ran a pre-fix watchdog and
+        # stayed dead for 16h). If the on-disk script differs from the one we
+        # are running, spawn the updated script (skipping initial starts) and
+        # exit. Brief overlap is safe: both loops health-check and restarts
+        # are port- and throttle-guarded.
+        $newWd = Join-Path $dispatchMonitor "scripts\watchdog.ps1"
+        if (Test-Path $newWd) {
+            $oldHash = (Get-FileHash $MyInvocation.MyCommand.Path -Algorithm SHA256).Hash
+            $newHash = (Get-FileHash $newWd -Algorithm SHA256).Hash
+            if ($oldHash -ne $newHash) {
+                Write-Host "$(Get-Date) Watchdog script updated on disk; spawning new instance and exiting." -ForegroundColor Cyan
+                Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $newWd, "-NoInitialStart" -WindowStyle Hidden
+                Start-Sleep -Seconds 5
+                exit
+            }
         }
 
         $lastGitPull = $now

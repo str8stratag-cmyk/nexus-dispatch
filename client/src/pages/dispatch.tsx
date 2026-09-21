@@ -5,32 +5,13 @@ import { useTheme } from "@/hooks/use-theme";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Sun, Moon, Radio, Send, Settings, ExternalLink, Map, ShieldAlert } from "lucide-react";
+import { Sun, Moon, Radio, Send, Settings, ExternalLink, ShieldAlert } from "lucide-react";
 import AudioPanel, { type DetectedEvent } from "@/components/audio-panel";
-import DispatchMap from "@/components/dispatch-map";
 import EventLog from "@/components/event-log";
 import ManualDispatch from "@/components/manual-dispatch";
 import SettingsPanel from "@/components/settings-panel";
 import QuarantinePanel from "@/components/quarantine-panel";
 import { useEventsStream } from "@/hooks/use-events-stream";
-
-interface DispatchEventRow {
-  id: number;
-  transcript: string;
-  keywords: string;
-  address: string | null;
-  crossStreet: string | null;
-  lat: number | null;
-  lng: number | null;
-  signalType: string | null;
-  description: string | null;
-  district: string;
-  source: string;
-  status: string;
-  isManual: boolean;
-  geocodedRoad: string | null;
-  createdAt: string;
-}
 
 // Per-machine defaults from the server hostname: DISP-2 → District 2, source
 // "DISP-2". A manually entered district/source (persisted in localStorage)
@@ -74,14 +55,23 @@ export default function DispatchPage() {
   });
 
   // Fresh browsers (nothing manually entered) self-configure from the
-  // machine identity: DISP-N → District N, source "DISP-N".
+  // machine identity: DISP-N → District N, source "DISP-N". On a canonical
+  // DISP-N machine the source is always "DISP-N": a stale or typo'd
+  // localStorage value ("disp 3", "DISP3") is normalized instead of winning
+  // forever — one box fed MongoDB variant spellings for a week because a
+  // typed localStorage value always beat the hostname default.
   useEffect(() => {
     if (!machineConfig?.hostname) return;
     const defaults = defaultsFromHostname(machineConfig.hostname);
     if (!localStorage.getItem("dispatch.district")) {
       setDistrictState(defaults.district);
     }
-    if (!localStorage.getItem("dispatch.source")) {
+    if (/^DISP-\d+$/.test(defaults.source)) {
+      const stored = localStorage.getItem("dispatch.source");
+      if (stored !== defaults.source) {
+        setSourceName(defaults.source);
+      }
+    } else if (!localStorage.getItem("dispatch.source")) {
       setSourceNameState(defaults.source);
     }
   }, [machineConfig]);
@@ -104,15 +94,6 @@ export default function DispatchPage() {
       } catch {}
     }
   }, [districtSettings]);
-
-  const { data: events = [] } = useQuery<DispatchEventRow[]>({
-    queryKey: ["/api/events"],
-    queryFn: async () => {
-      const res = await apiRequest("GET", "/api/events");
-      return res.json();
-    },
-    refetchInterval: 30_000,
-  });
 
   useEventsStream();
 
@@ -174,9 +155,6 @@ export default function DispatchPage() {
           <TabsTrigger value="manual" className="px-4 py-2 text-xs" data-testid="tab-manual">
             <Send className="mr-1 h-3 w-3" /> Manual Dispatch
           </TabsTrigger>
-          <TabsTrigger value="map" className="px-4 py-2 text-xs" data-testid="tab-map">
-            <Map className="mr-1 h-3 w-3" /> Map
-          </TabsTrigger>
           <TabsTrigger value="quarantine" className="px-4 py-2 text-xs" data-testid="tab-quarantine">
             <ShieldAlert className="mr-1 h-3 w-3" /> Quarantine
           </TabsTrigger>
@@ -220,9 +198,6 @@ export default function DispatchPage() {
           <TabsTrigger value="manual" className="text-xs" data-testid="tab-manual">
             <Send className="h-3 w-3 mr-1" /> Manual
           </TabsTrigger>
-          <TabsTrigger value="map" className="text-xs" data-testid="tab-map">
-            <Map className="h-3 w-3 mr-1" /> Map
-          </TabsTrigger>
           <TabsTrigger value="quarantine" className="text-xs" data-testid="tab-quarantine">
             <ShieldAlert className="h-3 w-3 mr-1" /> Quarantine
           </TabsTrigger>
@@ -248,13 +223,6 @@ export default function DispatchPage() {
             <section className="min-h-[360px] rounded-lg border border-border bg-card p-3 shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
               <EventLog />
             </section>
-          </div>
-        </TabsContent>
-
-        {/* Map Tab */}
-        <TabsContent value="map" className="flex-1 min-h-0 mt-2 lg:mt-0">
-          <div className="h-full p-3">
-            <DispatchMap markers={events} />
           </div>
         </TabsContent>
 

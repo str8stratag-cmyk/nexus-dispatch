@@ -25,12 +25,12 @@ Start-AppInWindow "Whisper" $dispatchMonitor "npm run whisper:start"
 # Wait for Whisper to be ready
 Write-Host "Waiting for Whisper on port 8178..." -ForegroundColor Cyan
 $ready = $false
-for ($i = 0; $i -lt 60; $i++) {
+for ($i = 0; $i -lt 30; $i++) {
     try {
-        $res = Invoke-WebRequest -Uri "http://127.0.0.1:8178/health" -Method GET -TimeoutSec 5 -UseBasicParsing
+        $res = Invoke-WebRequest -Uri "http://127.0.0.1:8178" -Method POST -Body '{}' -TimeoutSec 2
         if ($res.StatusCode -eq 200) { $ready = $true; break }
     } catch {}
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
 }
 if (-not $ready) {
     Write-Warning "Whisper did not respond in time; starting apps anyway..."

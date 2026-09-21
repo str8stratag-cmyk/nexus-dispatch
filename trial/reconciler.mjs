@@ -3,18 +3,16 @@
  * Rule-based Dispatch Call Reconciler (Trial)
  *
  * Pulls recent events from all dispatch feeds, clusters them by time/location,
- * picks the best transcript/address/signal, and emits a single DISP 3 event.
+ * picks the best transcript/address/signal, and emits a single DISP-3 event.
  */
 
 import { MongoClient } from "mongodb";
 import "dotenv/config";
-import { resolve } from "path";
-import { fileURLToPath } from "url";
 
 const API_URL = process.env.RECONCILER_API_URL || "http://127.0.0.1:5000";
 const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.MONGODB_DB_NAME || "dispatch_monitor";
-const SOURCE_OUTPUT = "DISP 3";
+const SOURCE_OUTPUT = "DISP-3";
 
 // Look back window for reconciliation (events newer than this).
 const LOOKBACK_MS = parseInt(process.env.RECONCILER_LOOKBACK_MS || "900000", 10); // 15 min
@@ -22,7 +20,7 @@ const LOOKBACK_MS = parseInt(process.env.RECONCILER_LOOKBACK_MS || "900000", 10)
 const TIME_WINDOW_MS = parseInt(process.env.RECONCILER_TIME_WINDOW_MS || "600000", 10); // 10 min
 // Max distance (km) for events to be considered the same location.
 const MAX_DISTANCE_KM = parseFloat(process.env.RECONCILER_MAX_DISTANCE_KM || "1.0");
-// Minimum score improvement required to emit a DISP 3 event over existing feeds.
+// Minimum score improvement required to emit a DISP-3 event over existing feeds.
 const MIN_SCORE_THRESHOLD = parseInt(process.env.RECONCILER_MIN_SCORE_THRESHOLD || "20", 10);
 // How often to run the reconciler loop.
 const INTERVAL_MS = parseInt(process.env.RECONCILER_INTERVAL_MS || "180000", 10); // 3 min
@@ -56,13 +54,11 @@ const GENERIC_JUNK_ADDRESSES = new Set([
 ]);
 
 const TAMPA_STREETS = [
-  "hillsborough", "hillsboro", "westshore", "west shore", "kennedy", "dale mabry",
-  "fowler", "mlk", "martin luther king", "adamo", "memorial", "curtis", "osbourne",
-  "bristol", "copeland", "prairie", "mcdill", "macdill", "hyde park", "high park",
-  "university center", "lois", "gandy", "selmon", "brittany", "northdale",
-  "schultenberg", "himes", "boy scout", "floribraska", "nebraska", "san miguel",
-  "san miquel", "bruce b downs", "bush", "tampa", "i 4", "i 275", "i 75",
-  "busch", "del ray", "delray", "del rey",
+  "hillsborough", "westshore", "kennedy", "dale mabry", "fowler", "mlk",
+  "martin luther king", "adamo", "memorial", "curtis", "osbourne", "bristol",
+  "copeland", "prairie", "mcdill", "hyde park", "university center", "lois",
+  "brittany", "northdale", "schultenberg", "himes", "boy scout", "floribraska",
+  "nebraska", "san miguel", "san miquel",
 ];
 
 // Whisper/common transcription misspellings -> corrected Tampa street names.
@@ -71,61 +67,18 @@ const TAMPA_STREETS = [
 // correct either one.
 const ADDRESS_CORRECTIONS = {
   "mcdill": "McDill Blvd",
-  "mcdill avenue": "McDill Blvd",
-  "mcdill ave": "McDill Blvd",
   "mcdull": "McDill Blvd",
-  "mcdull avenue": "McDill Blvd",
   "macdill": "MacDill Blvd",
   "high park": "Hyde Park",
-  "lowest avenue": "Lois Ave",
   "lowest ave": "Lois Ave",
-  "loess avenue": "Lois Ave",
-  "loess": "Lois Ave",
-  "luis avenue": "Lois Ave",
-  "mlk blvd": "MLK Blvd",
+  "lowest avenue": "Lois Ave",
   "mlk": "MLK",
-  "luthergene king boulevard": "MLK Blvd",
-  "luther james king boulevard": "MLK Blvd",
-  "west shore": "Westshore",
-  "southwest shore": "Westshore",
+  "mlk blvd": "MLK Blvd",
   "westshore": "Westshore",
   "hillsborough": "Hillsborough",
-  "hillsboro avenue": "Hillsborough Ave",
-  "hillsboro": "Hillsborough",
-  "hines": "Himes Ave",
-  "hives": "Himes Ave",
+  "hines": "Himes",
   "boy scout": "Boy Scout Rd",
-  "boyscout": "Boy Scout Rd",
-  "boyscama": "Boy Scout Rd",
   "san miquel": "San Miguel",
-  "nabraska": "Nebraska Ave",
-  "braska": "Nebraska Ave",
-  "selmon expressway": "Selmon Expressway",
-  "selman expressway": "Selmon Expressway",
-  "salman expressway": "Selmon Expressway",
-  "selma expressway": "Selmon Expressway",
-  "cellman expressway": "Selmon Expressway",
-  "selmon": "Selmon Expressway",
-  "selman": "Selmon Expressway",
-  "salman": "Selmon Expressway",
-  "selma": "Selmon Expressway",
-  "cellman": "Selmon Expressway",
-  "salmon expressway": "Selmon Expressway",
-  "salmon": "Selmon Expressway",
-  "gandy boulevard": "Gandy Blvd",
-  "gandy": "Gandy Blvd",
-  "dandy boulevard": "Gandy Blvd",
-  "busha boulevard": "Bruce B Downs Blvd",
-  "bush boulevard": "Bush Blvd",
-  "john o'mishal": "Dona Michelle Dr",
-  "john o mishal": "Dona Michelle Dr",
-  "mishal": "Michelle",
-  "del ray": "Del Rey Ct",
-  "del rey": "Del Rey Ct",
-  "del rey ct": "Del Rey Ct",
-  "del ray ct": "Del Rey Ct",
-  "delray": "Delray Dr",
-  "del ray dr": "Delray Dr",
 };
 
 function normalize(text) {
@@ -137,9 +90,11 @@ function normalize(text) {
 // ---------------------------------------------------------------------------
 
 const SIGNAL_PREFIXES = [
-  /signal\s*(?:4|four)?/gi,
-  /signal\s*(?:3|three)?/gi,
-  /signal\s*(?:16|sixteen)?/gi,
+  /signal\s*4?/gi,
+  /signal\s*four/gi,
+  /signal\s*3?/gi,
+  /signal\s*three/gi,
+  /signal\s*16/gi,
   /mva/gi,
   /mvc/gi,
   /wreck/gi,
@@ -156,153 +111,42 @@ const INJURY_PHRASES = [
   /no\s+injuries/gi,
 ];
 
-const JUNK_PHRASES = [
-  "is unknown",
-  "unknown",
-  "exact location",
-  "location unknown",
-  "i don't know",
-  "not sure",
-  "thank you",
-  "thanks for watching",
-  "please",
-  "copy",
-  "10-8",
-  "10 8",
-  "10-4",
-  "10 4",
-  "10-9",
-  "10 9",
-  "10-7",
-  "10 7",
-  "10-20",
-  "10 20",
-  "5-4",
-  "5 4",
-  "4 1",
-  "4 6",
-  "4 12",
-];
-
-function truncateAtJunk(text) {
-  if (!text) return "";
-  let t = text;
-  const lower = t.toLowerCase();
-  for (const phrase of JUNK_PHRASES) {
-    const idx = lower.indexOf(phrase);
-    if (idx >= 0) {
-      t = t.slice(0, idx);
-    }
-  }
-  return t.trim();
-}
-
 function stripNoise(text) {
-  if (!text) return "";
   let cleaned = text;
   for (const re of SIGNAL_PREFIXES) cleaned = cleaned.replace(re, " ");
   for (const re of INJURY_PHRASES) cleaned = cleaned.replace(re, " ");
   // Manual dispatch prefix
   cleaned = cleaned.replace(/manual dispatch\s*:?/gi, " ");
-  // Trim leading/trailing conjunctions/prepositions left after signal removal
-  cleaned = cleaned.replace(/^(?:and|&|@|at|be|it|its|it's|on|in|to)\s+/gi, " ");
-  cleaned = cleaned.replace(/\s+(?:and|&|@|at|be|it|its|it's|on|in|to)$/gi, " ");
   cleaned = cleaned.replace(/[-—–]+/g, " ");
   return cleaned.replace(/\s+/g, " ").trim();
 }
 
-function isJunkOnly(text) {
-  const t = normalize(text);
-  if (!t) return true;
-  if (/^\d+$/.test(t)) return true;
-  const words = t.split(/\s+/).filter(Boolean);
-  if (words.length === 0) return true;
-  // Pure short numeric codes like "5 4" or "10 8" are not addresses.
-  if (words.every((w) => /^\d{1,2}$/.test(w))) return true;
-  // If every word is a generic suffix or filler, it's junk
-  const fillers = new Set(["the", "a", "an", "at", "be", "it", "its", "it's", "and", "or", "in", "on", "of", "to", "for", "with", "no", "yes", "ok", "okay"]);
-  if (words.every((w) => fillers.has(w))) return true;
-  return false;
-}
-
-function hasKnownStreet(text) {
-  const t = normalize(text);
-  return TAMPA_STREETS.some((s) => t.includes(s));
-}
-
-function scoreAddressCandidate(text, transcript) {
-  const t = normalize(text);
-  let score = 0;
-  if (/\d{3,}/.test(t)) score += 30;
-  else if (/\d{1,2}/.test(t)) score += 10;
-  if (hasKnownStreet(text)) score += 25;
-  // Penalize very short and generic-only candidates
-  const words = t.split(/\s+/).filter(Boolean);
-  if (words.length >= 3) score += 5;
-  if (words.length < 2) score -= 15;
-  // Bonus if candidate is near a signal keyword in the transcript
-  const signalIdx = SIGNAL_KEYWORDS.findIndex((kw) => normalize(transcript).includes(kw));
-  if (signalIdx >= 0) {
-    const kw = SIGNAL_KEYWORDS[signalIdx];
-    const idx = transcript.toLowerCase().indexOf(kw);
-    const candIdx = transcript.toLowerCase().indexOf(text.toLowerCase().split(/\s+/)[0]);
-    if (idx >= 0 && candIdx >= 0 && Math.abs(candIdx - idx) < 80) score += 10;
-  }
-  return score;
-}
-
 function extractAddressFromTranscript(transcript) {
-  const raw = transcript || "";
-  if (!raw) return null;
+  const t = transcript || "";
 
-  // Clean the whole transcript first so signal keywords don't leak into candidates.
-  const t = stripNoise(raw);
-  const candidates = [];
-
-  function addCandidate(cand) {
-    cand = truncateAtJunk(stripNoise(cand));
-    if (!isJunkOnly(cand)) candidates.push(cand);
+  // Pattern: "at 1234 Street" or "it's 1234 Street" or "be 1234 Street"
+  const atMatch = t.match(/(?:\bat\b|\bit'?s\b|\bbe\b)\s+([^,.;]+)/i);
+  if (atMatch) {
+    const candidate = stripNoise(atMatch[1]);
+    if (candidate.length > 3 && !/^\d+$/.test(candidate)) return candidate;
   }
 
-  // Collect all "at/it's/be" candidates
-  const atRe = /(?:\bat\b|\bit'?s\b|\bbe\b)\s+([^,.;]+)/gi;
-  let m;
-  while ((m = atRe.exec(t)) !== null) {
-    addCandidate(m[1]);
+  // Pattern: "Street & Avenue" or "Street and Avenue" or "Street @ Avenue"
+  const intersectionMatch = t.match(/([a-z0-9]+(?:\s+[a-z0-9]+){0,5})\s+(?:&|and|@)\s+([a-z0-9]+(?:\s+[a-z0-9]+){0,5})/i);
+  if (intersectionMatch) {
+    const left = stripNoise(intersectionMatch[1]);
+    const right = stripNoise(intersectionMatch[2]);
+    if (left && right) return `${left} & ${right}`;
   }
 
-  // Collect all intersection candidates. Require at least one side to have a known street or number.
-  const intersectionRe = /([a-z0-9]+(?:\s+[a-z0-9]+){0,5})\s+(?:&|and|@)\s+([a-z0-9]+(?:\s+[a-z0-9]+){0,5})/gi;
-  while ((m = intersectionRe.exec(t)) !== null) {
-    const left = correctAddressSpelling(stripNoise(m[1]));
-    const right = correctAddressSpelling(stripNoise(m[2]));
-    const leftReal = hasKnownStreet(left) || /\d/.test(left);
-    const rightReal = hasKnownStreet(right) || /\d/.test(right);
-    if (!isJunkOnly(left) && !isJunkOnly(right) && (leftReal || rightReal)) {
-      addCandidate(`${left} & ${right}`);
-    }
+  // Pattern: numeric address (1234 Street Name)
+  const numericMatch = t.match(/(\d{1,5}\s+[a-z0-9]+(?:\s+[a-z0-9]+){1,5})/i);
+  if (numericMatch) {
+    const candidate = stripNoise(numericMatch[1]);
+    if (candidate.length > 3) return candidate;
   }
 
-  // Collect numeric candidates (1234 Street Name ...). Reject sequences of single digits.
-  const numericRe = /(\d{1,5}\s+[a-z0-9]+(?:\s+[a-z0-9]+){0,6})/gi;
-  while ((m = numericRe.exec(t)) !== null) {
-    const cand = m[1].trim();
-    const digits = cand.split(/\s+/).filter((w) => /^\d$/.test(w));
-    if (digits.length >= 4) continue; // likely a code like "4 1 4 1 2 9 8"
-    addCandidate(cand);
-  }
-
-  // Collect known-street candidates: "on/around/near [Street Name]"
-  const streetRe = new RegExp(`(?:\\b(?:on|around|near|by|off)\\b)\\s+([a-z0-9]+(?:\\s+[a-z0-9]+){0,5}(?:\\s+(?:st|ave|rd|blvd|dr|ln|ct|cir|way|pkwy|hwy|boulevard|street|avenue|road|drive|lane|court|circle|parkway|highway))?)`, "gi");
-  while ((m = streetRe.exec(t)) !== null) {
-    addCandidate(m[1]);
-  }
-
-  if (candidates.length === 0) return null;
-
-  // Score and pick best
-  candidates.sort((a, b) => scoreAddressCandidate(b, t) - scoreAddressCandidate(a, t));
-  return candidates[0];
+  return null;
 }
 
 function cleanAddress(address, transcript) {
@@ -331,34 +175,15 @@ function splitAddressAndCrossStreet(fullAddress) {
   return { address: fullAddress, crossStreet: null };
 }
 
-function collapseDuplicateSuffixes(address) {
-  if (!address) return address;
-  return address
-    .replace(/\b(blvd|blvd\.?|boulevard)\s+(blvd|blvd\.?|boulevard)\b/gi, "Blvd")
-    .replace(/\b(ave|ave\.?|avenue)\s+(ave|ave\.?|avenue)\b/gi, "Ave")
-    .replace(/\b(rd|rd\.?|road)\s+(rd|rd\.?|road)\b/gi, "Rd")
-    .replace(/\b(st|st\.?|street)\s+(st|st\.?|street)\b/gi, "St")
-    .replace(/\b(dr|dr\.?|drive)\s+(dr|dr\.?|drive)\b/gi, "Dr")
-    .replace(/\b(ln|ln\.?|lane)\s+(ln|ln\.?|lane)\b/gi, "Ln")
-    .replace(/\b(ct|ct\.?|court)\s+(ct|ct\.?|court)\b/gi, "Ct")
-    .replace(/\b(cir|cir\.?|circle)\s+(cir|cir\.?|circle)\b/gi, "Cir")
-    .replace(/\b(pkwy|pkwy\.?|parkway)\s+(pkwy|pkwy\.?|parkway)\b/gi, "Pkwy")
-    .replace(/\b(hwy|hwy\.?|highway)\s+(hwy|hwy\.?|highway)\b/gi, "Hwy")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function correctAddressSpelling(address) {
   if (!address) return address;
   let corrected = address;
   const lower = normalize(address);
-  // Apply longer phrases first to avoid partial replacements.
-  const entries = Object.entries(ADDRESS_CORRECTIONS).sort((a, b) => b[0].length - a[0].length);
-  for (const [bad, good] of entries) {
+  for (const [bad, good] of Object.entries(ADDRESS_CORRECTIONS)) {
     const re = new RegExp(`\\b${bad.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi");
     corrected = corrected.replace(re, good);
   }
-  return collapseDuplicateSuffixes(corrected);
+  return corrected;
 }
 
 function scoreTranscript(event) {
@@ -526,10 +351,7 @@ async function reconcile() {
     const events = await eventsCol
       .find({
         createdAt: { $gte: since },
-        source: {
-          $ne: SOURCE_OUTPUT, // don't re-process our own output
-          $ne: "Manual Dispatch", // don't re-emit manually-fired events as DISP 3
-        },
+        source: { $ne: SOURCE_OUTPUT }, // don't re-process our own output
       })
       .sort({ createdAt: 1 })
       .toArray();
@@ -554,7 +376,7 @@ async function reconcile() {
         continue;
       }
 
-      // Check if we already emitted a DISP 3 for this cluster recently.
+      // Check if we already emitted a DISP-3 for this cluster recently.
       const firstTime = cluster[0].createdAt;
       const lastTime = cluster[cluster.length - 1].createdAt;
       const existing = await eventsCol.findOne({
@@ -565,7 +387,7 @@ async function reconcile() {
         },
       });
       if (existing) {
-        console.log(`Cluster around ${firstTime.toISOString()} already has DISP 3 event #${existing.id}; skipping.`);
+        console.log(`Cluster around ${firstTime.toISOString()} already has DISP-3 event #${existing.id}; skipping.`);
         skipped++;
         continue;
       }
@@ -600,27 +422,27 @@ async function reconcile() {
         });
         if (!res.ok) {
           const err = await res.text();
-          console.error(`Failed to create DISP 3 event: ${res.status} ${err}`);
+          console.error(`Failed to create DISP-3 event: ${res.status} ${err}`);
           continue;
         }
         const result = await res.json();
         created++;
         console.log(
-          `Created DISP 3 event #${result.id} from cluster of ${cluster.length} (score ${bestScore})`
+          `Created DISP-3 event #${result.id} from cluster of ${cluster.length} (score ${bestScore})`
         );
       } catch (err) {
         console.error("API call failed:", err.message);
       }
     }
 
-    console.log(`\nDone. Created ${created} DISP 3 events. Skipped ${skipped}.`);
+    console.log(`\nDone. Created ${created} DISP-3 events. Skipped ${skipped}.`);
   } finally {
     await client.close();
   }
 }
 
 async function main() {
-  console.log(`DISP 3 reconciler starting. Interval: ${INTERVAL_MS / 1000}s`);
+  console.log(`DISP-3 reconciler starting. Interval: ${INTERVAL_MS / 1000}s`);
   while (true) {
     try {
       await reconcile();
@@ -632,13 +454,7 @@ async function main() {
   }
 }
 
-// Exports for unit testing / offline tuning.
-export { extractAddressFromTranscript, cleanAddress, correctAddressSpelling, scoreTranscript, normalize };
-
-const isMainModule = fileURLToPath(import.meta.url).toLowerCase() === resolve(process.argv[1] || "").toLowerCase();
-if (isMainModule) {
-  main().catch((err) => {
-    console.error(err);
-    process.exit(1);
-  });
-}
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
