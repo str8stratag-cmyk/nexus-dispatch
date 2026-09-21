@@ -50,10 +50,12 @@ app.use((req, res, next) => {
     const duration = Date.now() - start;
     if (path.startsWith("/api")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      if (capturedJsonResponse) {
-        // Truncate: full event arrays poll the log every few seconds and bloat it fast.
+      // GET bodies (the polled /api/events feed) are not logged: each one
+      // stringified the full event array, grew the log to 1GB in days, and
+      // the multi-MB sync stringify/writes wedged the app (2026-09-21).
+      if (capturedJsonResponse && req.method !== "GET") {
         const body = JSON.stringify(capturedJsonResponse);
-        logLine += ` :: ${body.length > 300 ? `${body.slice(0, 300)}…(${body.length}b)` : body}`;
+        logLine += ` :: ${body.length > 400 ? `${body.slice(0, 400)}…(${body.length}b)` : body}`;
       }
 
       log(logLine);
@@ -94,6 +96,25 @@ app.use((req, res, next) => {
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
+
+  // Crash forensics: the 2026-09-21 wedge/death left nothing in the log.
+  process.on("uncaughtException", (err) => {
+    log(`uncaughtException: ${err.stack || err} — exiting for watchdog restart`, "process");
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    log(`unhandledRejection: ${reason instanceof Error ? (reason.stack || reason) : JSON.stringify(reason)}`, "process");
+  });
+
+  // 5-minute heartbeat: RSS + event-loop lag, so the next wedge/death has context.
+  let lastBeat = Date.now();
+  setInterval(() => {
+    const now = Date.now();
+    const lag = now - lastBeat - 5 * 60 * 1000;
+    lastBeat = now;
+    log(`heartbeat rss=${Math.round(process.memoryUsage().rss / 1048576)}MB loopLag=${lag}ms`, "process");
+  }, 5 * 60 * 1000).unref();
+
   httpServer.listen(
     {
       port,
