@@ -28,7 +28,12 @@ const DIRECTIONALS = new Set([
 // Includes generic suffix abbreviations so consecutive street names don't
 // fuse ("Fowler Ave Fletcher Ave") and dispatch jargon that precedes roads.
 const STOP_WORDS = new Set([
-  "at", "and", "near", "by", "of", "on", "to", "the", "a", "an", "in", "with",
+  // "amd" is Whisper's mis-hearing of "and" between street names (event 862,
+  // "AZEELE AMD TAMPANIA") — server/routes.ts's INTERSECTION_SPLIT_RE and
+  // whisper_service.py both treat it as "and"; this client-side extractor
+  // hadn't, so it fused "amd" into the street name instead of splitting on
+  // it (found 2026-09-22).
+  "at", "and", "amd", "near", "by", "of", "on", "to", "the", "a", "an", "in", "with",
   "from", "for", "is", "are", "was", "were", "be", "been", "being", "have", "has",
   "had", "do", "does", "did", "will", "would", "could", "should", "may", "might",
   "must", "can", "shall", "we", "you", "they", "he", "she", "it", "i", "me", "my",
@@ -52,7 +57,7 @@ const STOP_WORDS = new Set([
 const CANDIDATE_BLOCKLIST = new Set(["busch gardens", "great way"]);
 
 // Conjunctions/prepositions that often precede a cross street.
-const CROSS_LINKERS = new Set(["and", "at", "in", "near", "by", "/", "between", "intersection", "corner"]);
+const CROSS_LINKERS = new Set(["and", "amd", "at", "in", "near", "by", "/", "between", "intersection", "corner"]);
 
 // Common Whisper mishearings for Hillsborough County street/neighborhood names.
 // These are corrected BEFORE street extraction so "mcdull and mlk" becomes

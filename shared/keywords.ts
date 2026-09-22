@@ -65,6 +65,12 @@ export const VALID_SIGNAL_TYPES = new Set([
   "Tow",
   "Flatbed Needed",
   "Flatbed",
+  // Bare major-road mentions (no crash keyword) — server/routes.ts gates
+  // these behind a corroboration check and 15-min per-road cooldown. Was
+  // missing here, which silently blocked every path that could produce it
+  // (detectKeywords dropped it, normalizeKeywordEntry rejected it), making
+  // that whole corroboration system unreachable dead code (found 2026-09-22).
+  "Road Mention",
 ]);
 
 // Detects which keywords (from the given list, defaulting to the built-in
@@ -84,9 +90,14 @@ export function detectKeywords(
     if (!VALID_SIGNAL_TYPES.has(kw.signalType)) continue;
 
     const escapedPattern = kw.pattern.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    // Negative lookahead prevents "tow" from matching "tower".
-    const boundary = kw.pattern === "tow" ? "(?![er])" : "";
-    const wholePattern = new RegExp(`(?:^|[^a-z0-9])${escapedPattern}${boundary}(?=$|[^a-z0-9])`, "i");
+    // The standard trailing boundary below already keeps "tow" from matching
+    // inside "tower" (next char 'e' isn't a boundary) — but it also blocked
+    // "towed"/"towing", legitimate inflections that should count (found
+    // 2026-09-22). Allow those specific suffixes explicitly instead of
+    // trying to exclude "tower" with a lookahead (redundant and did nothing
+    // to stop the over-blocking).
+    const suffix = kw.pattern === "tow" ? "(?:s|ed|ing)?" : "";
+    const wholePattern = new RegExp(`(?:^|[^a-z0-9])${escapedPattern}${suffix}(?=$|[^a-z0-9])`, "i");
     if (wholePattern.test(transcript) && !seen.has(kw.signalType)) {
       seen.add(kw.signalType);
       found.push({ keyword: kw.label, signalType: kw.signalType });

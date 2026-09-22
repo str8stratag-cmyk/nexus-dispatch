@@ -61,7 +61,13 @@ export function useDispatchBuffer({
       // 3. Reset the silence timer
       clearTimer();
       timerRef.current = setTimeout(async () => {
+        // Snapshot + clear BEFORE the await below, not after: a final
+        // transcript arriving while onDispatch is in flight used to push
+        // into this same still-shared array and could schedule a second
+        // overlapping cycle that later read content from both cycles,
+        // producing a duplicate/garbled dispatch (found 2026-09-22).
         const finalChunks = bufferRef.current;
+        bufferRef.current = [];
         const { transcript, keywords, address, crossStreet } = buildPayload(finalChunks);
 
         if (keywords.length > 0) {
@@ -72,8 +78,6 @@ export function useDispatchBuffer({
           }
         }
 
-        // 4. Reset state
-        bufferRef.current = [];
         setIsPending(false);
       }, silenceMs);
     }
@@ -86,6 +90,7 @@ export function useDispatchBuffer({
     timerRef.current = null;
 
     const finalChunks = bufferRef.current;
+    bufferRef.current = [];
     const { transcript, keywords, address, crossStreet } = buildPayload(finalChunks);
 
     if (keywords.length > 0) {
@@ -96,7 +101,6 @@ export function useDispatchBuffer({
       }
     }
 
-    bufferRef.current = [];
     setIsPending(false);
   }, [isPending, buildPayload, onDispatch, clearTimer]);
 

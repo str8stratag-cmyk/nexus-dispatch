@@ -70,6 +70,13 @@ export function getWhisperModel(): Promise<string | undefined> {
       cachedWhisperModel = typeof health?.model === "string" ? health.model : undefined;
       return cachedWhisperModel;
     })
-    .catch(() => undefined);
+    .catch(() => undefined)
+    .finally(() => {
+      // Don't cache a failed/empty lookup — otherwise one /health timeout
+      // (known to happen mid-transcription) poisons whisperModel on every
+      // event for the rest of the process's life. Match getDatabase()'s
+      // reset-on-failure pattern in mongodb.ts.
+      if (!cachedWhisperModel) whisperModelPromise = undefined;
+    });
   return whisperModelPromise;
 }

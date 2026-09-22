@@ -52,7 +52,12 @@ function Stop-AppLauncher($titleHint, $directory) {
 
 function Test-WhisperAlive() {
     try {
-        $res = Invoke-WebRequest -Uri "http://127.0.0.1:8178/health" -Method GET -TimeoutSec 30 -UseBasicParsing
+        # 60s (not 30s): under CPU contention a live process can take 45-50s
+        # to answer a trivial GET /health (measured 2026-09-22). A shorter
+        # timeout here kills a working process mid-response, forcing a full
+        # model reload that adds even more CPU load — self-reinforcing
+        # restart loop, never actually recovers.
+        $res = Invoke-WebRequest -Uri "http://127.0.0.1:8178/health" -Method GET -TimeoutSec 60 -UseBasicParsing
         return $res.StatusCode -eq 200
     } catch {
         return $false
@@ -152,11 +157,23 @@ function Pull-Repo($path) {
 # App output is redirected to a log file. Like Whisper (see
 # start-whisper.ps1), apps inheriting the watchdog's hidden console
 # intermittently wedge on console writes and never bind their port.
+# The app log is opened in append mode (>>) and never rotated by anything
+# else, so it grows forever across restarts — hit 4.25GB on 2026-09-22.
+# Cap it here, at the one place new appends begin.
+$maxLogBytes = 50MB
+function Limit-LogSize($log) {
+    if ((Test-Path $log) -and (Get-Item $log).Length -gt $maxLogBytes) {
+        $archived = "$log.previous"
+        Move-Item -Force $log $archived -ErrorAction SilentlyContinue
+    }
+}
+
 function Restart-App($title, $directory, $port, $command, $log) {
     Write-Host "$(Get-Date) Restarting $title..." -ForegroundColor Cyan
     Stop-ProcessOnPort $port
     Stop-AppLauncher $title $directory
     New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
+    Limit-LogSize $log
     Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command >> `"$log`" 2>&1" -WindowStyle Hidden
 }
 
@@ -165,6 +182,7 @@ function Start-App($title, $directory, $port, $command, $log) {
     Stop-ProcessOnPort $port
     Stop-AppLauncher $title $directory
     New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
+    Limit-LogSize $log
     Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command >> `"$log`" 2>&1" -WindowStyle Hidden
 }
 
@@ -184,13 +202,27 @@ $dmLog = Join-Path $dispatchMonitor "logs\dispatch-monitor.log"
 
 Write-Host "Watchdog running. Whisper restart every $($whisperRestartInterval.TotalHours)h, git pull every $($gitPullInterval.TotalHours)h." -ForegroundColor Green
 
+# Consecutive-failure debounce (2026-09-22): a single slow/timed-out health
+# check under CPU contention is not "dead" — restarting on one miss forces a
+# model reload that adds more load, causing the next check to miss too.
+# Require 2 consecutive misses (~2 health-check cycles) before restarting.
+$whisperFailStreak = 0
+
 while ($true) {
     Start-Sleep -Seconds $healthCheckInterval.TotalSeconds
 
     $now = Get-Date
 
-    # Restart Whisper periodically or if dead
-    if (($now - $lastWhisperRestart) -gt $whisperRestartInterval -or -not (Test-WhisperAlive)) {
+    $whisperScheduled = ($now - $lastWhisperRestart) -gt $whisperRestartInterval
+    $whisperAlive = Test-WhisperAlive
+    if ($whisperAlive) { $whisperFailStreak = 0 } else { $whisperFailStreak++ }
+
+    # Restart Whisper periodically or if confirmed dead (2+ consecutive misses)
+    if ($whisperScheduled -or $whisperFailStreak -ge 2) {
+        if (-not $whisperScheduled) {
+            Write-Host "$(Get-Date) Whisper failed $whisperFailStreak consecutive health checks; restarting..." -ForegroundColor Yellow
+        }
+        $whisperFailStreak = 0
         Restart-Whisper
     }
 

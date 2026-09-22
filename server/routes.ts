@@ -116,7 +116,12 @@ function getGeocodeQuery(address: string): string {
   // contains the substring but still needs the suffix, else Azure resolves
   // out-of-state matches that the Florida bounds check then rejects.
   const lower = normalized.toLowerCase();
-  if (lower.includes("tampa") || /,\s*(fl|florida)(\s+\d{5})?\s*$/.test(lower)) {
+  // "tampa" must be anchored as city context (comma before it, e.g. "..., Tampa"
+  // or "..., Tampa, FL") — a bare substring check also matched roads whose name
+  // CONTAINS "tampa" (e.g. "Tampania Ave"), silently skipping the suffix and
+  // reproducing the exact out-of-state-mismatch bug the FL/Florida anchor
+  // below was written to close (found 2026-09-22).
+  if (/,\s*tampa\b/.test(lower) || /,\s*(fl|florida)(\s+\d{5})?\s*$/.test(lower)) {
     return normalized;
   }
   return `${normalized}, ${suffix}`;
@@ -776,7 +781,12 @@ export async function registerRoutes(
   app.get("/api/quarantine", async (req, res) => {
     try {
       const limit = Math.min(parseInt(req.query.limit as string) || 200, 1000);
-      const reason = (req.query.reason as string) || "";
+      // Express's qs parser turns ?reason[$ne]=x into an object, not a
+      // string — "as string" is a compile-time-only cast that doesn't
+      // change that, so an unvalidated value here let a caller inject
+      // Mongo query operators through this field (found 2026-09-22).
+      const reasonRaw = req.query.reason;
+      const reason = typeof reasonRaw === "string" ? reasonRaw : "";
       const db = await getDatabase();
       const filter = reason ? { reason } : {};
       const items = await db
@@ -794,26 +804,47 @@ export async function registerRoutes(
   // Promote a quarantined item to a real dispatch event. It was rejected by
   // the gates once, so create it as manual to bypass the auto-dispatch
   // filters; a human pressing "restore" is the override.
-  app.post("/api/quarantine/:id/restore", async (req, res) => {
+  app.post("/api/quarantine/:id/restore", requireAuth, writeLimiter, async (req, res) => {
     try {
       const db = await getDatabase();
       const doc = await db
         .collection("quarantinedDispatches")
-        .findOne({ _id: new ObjectId(req.params.id) });
+        .findOne({ _id: new ObjectId(String(req.params.id)) });
       if (!doc) {
         return res.status(404).json({ message: "Quarantined item not found" });
+      }
+      const address: string | null = doc.address ?? null;
+      // Quarantined items were rejected BEFORE the geocoding step in
+      // /api/dispatch ever ran (spam/TV/address gates), so they carry no
+      // lat/lng — restoring straight from the doc left every restored event
+      // with a null map pin (found 2026-09-22). Geocode here the same way.
+      let lat: number | null = null;
+      let lng: number | null = null;
+      let geocodedRoad: string | null = null;
+      if (address) {
+        const geo = await geocodeAddress(address);
+        if (geo) {
+          lat = geo.lat;
+          lng = geo.lng;
+        }
+      }
+      if (lat && lng) {
+        geocodedRoad = await reverseGeocodeRoad(lat, lng);
       }
       const event = await storage.createEvent({
         transcript: String(doc.transcript ?? ""),
         keywords: String(doc.keywords ?? "[]"),
-        address: doc.address ?? null,
+        address,
         signalType: doc.signalType ?? null,
         district: "Unknown",
         source: doc.source ?? "Unknown",
         status: "active",
         isManual: true,
         whisperModel: doc.whisperModel ?? null,
-        locationApprox: false,
+        lat,
+        lng,
+        geocodedRoad,
+        locationApprox: isBareRoadName(address),
       });
       await db.collection("quarantinedDispatches").deleteOne({ _id: doc._id });
       broadcastEvent(event);
@@ -1074,9 +1105,9 @@ export async function registerRoutes(
   });
 
   // Update event status
-  app.patch("/api/events/:id/status", async (req, res) => {
+  app.patch("/api/events/:id/status", requireAuth, writeLimiter, async (req, res) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(String(req.params.id), 10);
       const { status } = req.body;
       const event = await storage.updateEventStatus(id, status);
       if (!event) {

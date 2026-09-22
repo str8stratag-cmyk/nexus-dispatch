@@ -426,10 +426,24 @@ async function reconcile() {
           continue;
         }
         const result = await res.json();
-        created++;
-        console.log(
-          `Created DISP-3 event #${result.id} from cluster of ${cluster.length} (score ${bestScore})`
-        );
+        // The server's own dedup (server/routes.ts) can silently match this
+        // cluster's transcript against the ORIGINAL source event within its
+        // 30-min window, returning { duplicate: true, event: existing } with
+        // no DISP-3 event created at all — result.id is only set on a real
+        // create (201). Logging every 200 OK as "Created" misreported these
+        // as new events every 3-min cycle when nothing was actually written
+        // (2026-09-22).
+        if (result.duplicate) {
+          skipped++;
+          console.log(
+            `Cluster of ${cluster.length} (score ${bestScore}) matched an existing event #${result.event?.id}; server deduped, nothing created.`
+          );
+        } else {
+          created++;
+          console.log(
+            `Created DISP-3 event #${result.id} from cluster of ${cluster.length} (score ${bestScore})`
+          );
+        }
       } catch (err) {
         console.error("API call failed:", err.message);
       }
