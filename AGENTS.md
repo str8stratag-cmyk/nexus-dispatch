@@ -1,5 +1,10 @@
 # Dispatch Monitor — Project Context
 
+> **Also read `CLAUDE.md`** — a separate, Claude-Code-auto-loaded running log
+> of session-by-session changes (what broke, what changed, why). This file
+> (`AGENTS.md`) stays focused on fleet/device/ops context; `CLAUDE.md` is the
+> detailed incident-by-incident history.
+
 > **IDENTITY: THIS MACHINE IS DISP-2** (192.168.6.52). Work self-contained:
 > do NOT probe or depend on other DISP devices for config or shared services —
 > their DBs/services are localhost-bound and irrelevant here. When something is
@@ -220,6 +225,35 @@ not yet purged — purge on request.
    `HOMOPHONE_FIXES` in `whisper/whisper_service.py` (restarting Whisper after
    edits; the watchdog will do it if you kill the 8178 process).
 3. **Then any other tasks.**
+
+## Recent changes (2026-09-22) — Watchdog restart storm + 10 review findings; committed cb72223, pushed
+
+See `CLAUDE.md` for the full write-up (root causes, verification steps,
+regression caught before push). Short version:
+
+- **Root cause of the "off since Friday" report:** the Startup `.vbs`
+  (`dispatch-watchdog.vbs`) launched `scripts/watchdog.ps1` with no output
+  redirection — `logs/watchdog.log` went silent 2026-09-18 ~12:50 PM, so
+  nobody could see whether the watchdog was supervising anything over the
+  weekend. Fixed: `.vbs` now redirects to `logs/watchdog.log`.
+- **Live crash-loop:** watchdog's 30s `/health` timeout was shorter than
+  Whisper's actual response time under CPU contention (measured 48s — box
+  had ~47 stray Chrome processes pegging all 4 cores), so it killed a
+  working process every cycle, forcing a model reload that made the next
+  check miss too. Fixed: timeout 60s, requires 2 consecutive misses before
+  restarting.
+- `logs/dispatch-monitor.log` had grown to 4.25GB (append-only, never
+  rotated). Added `Limit-LogSize` to `watchdog.ps1`: archives to `.previous`
+  past 50MB on every restart.
+- Code review fixed 9 correctness/security findings across
+  `server/whisper.ts`, `shared/keywords.ts`, `server/routes.ts`,
+  `client/src/hooks/use-dispatch-buffer.ts`,
+  `client/src/lib/extract-address.ts`, `trial/reconciler.mjs`. Flagged but
+  NOT fixed: `/api/dispatch`'s dedup check is a check-then-act race across
+  fleet boxes sharing one Atlas cluster — needs a real design decision
+  (fuzzy matching can't use a unique index).
+- `ADMIN_SECRET` is still unset in `.env` on this box — the `requireAuth`
+  additions from this session are no-ops until it's configured.
 
 ## Recent changes (2026-09-18) — HOMOPHONE_FIXES tuned; committed f2bebdb, pushed
 
