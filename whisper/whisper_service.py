@@ -122,6 +122,33 @@ model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
 # direct POSTer (fleet boxes POSTing here instead of their local Whisper).
 _transcribe_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="transcribe")
 
+
+def _transcribe_all(path: str):
+    """Transcribe AND consume the lazy segment generator in the worker thread.
+
+    faster-whisper returns `segments` as a generator whose inference runs at
+    first iteration, not at the transcribe() call. Materializing it here keeps
+    all CPU-bound inference inside the single-worker executor, so the caller's
+    per-chunk timeout actually covers inference and the event loop (which
+    serves /health) stays responsive.
+    """
+    segments, info = model.transcribe(
+        path,
+        language="en",
+        beam_size=5,
+        best_of=5,
+        temperature=(0.0, 0.2, 0.4),
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 700},
+        # 2026-09-21: single clean style-only prompt for all
+        # requests (see CLEAN_PROMPT above); request-supplied
+        # prompts are ignored on purpose.
+        initial_prompt=CLEAN_PROMPT,
+        condition_on_previous_text=False,
+        compression_ratio_threshold=2.4,
+    )
+    return list(segments), info
+
 # Self-supervision (2026-09-18, after DISP-1's Whisper hung for 16h — TCP
 # port LISTENING but /health never replying, zero events produced). A live
 # watchdog catches that, but a box may run a dead or pre-fix watchdog, so the
@@ -201,27 +228,37 @@ async def transcribe(
                 temp_file.write(chunk)
 
         try:
-            transcribe_call = functools.partial(
-                model.transcribe,
-                language="en",
-                beam_size=5,
-                best_of=5,
-                temperature=(0.0, 0.2, 0.4),
-                vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 700},
-                # 2026-09-21: single clean style-only prompt for all
-                # requests (see CLEAN_PROMPT above); request-supplied
-                # prompts are ignored on purpose.
-                initial_prompt=CLEAN_PROMPT,
-                condition_on_previous_text=False,
-                compression_ratio_threshold=2.4,
-            )
             loop = asyncio.get_running_loop()
             _t0 = time.time()
-            segments, info = await loop.run_in_executor(_transcribe_executor, transcribe_call, temp_path)
+            # Hard per-chunk deadline: a hung inference (seen on 2026-09-21 —
+            # one stuck 4s chunk blocked the single-worker executor, /health
+            # wedged, and every following request failed until a manual
+            # restart) must not asphyxiate the service. On timeout the
+            # executor thread is unrecoverable, so exit and let the watchdog
+            # relaunch a clean process. 300s is ~3x the worst legitimate
+            # chunk on this box (107s measured under full CPU load on a 4s
+            # clip, 2026-09-21); the in-service self-supervisor remains the
+            # backstop for slower wedges.
+            # IMPORTANT: _transcribe_all() consumes the lazy segment generator
+            # INSIDE the worker thread — the original partial() returned a
+            # generator whose inference ran below in the event-loop thread,
+            # which both blocked /health and escaped this timeout.
+            _WHISPER_TIMEOUT = float(os.getenv("WHISPER_TRANSCRIBE_TIMEOUT", "300"))
+            try:
+                segments, info = await asyncio.wait_for(
+                    asyncio.wrap_future(_transcribe_executor.submit(_transcribe_all, temp_path)),
+                    timeout=_WHISPER_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                print(
+                    f"[supervisor] transcribe exceeded {_WHISPER_TIMEOUT}s — "
+                    "executor wedged, exiting so the watchdog can relaunch",
+                    flush=True,
+                )
+                os._exit(1)
             print(f"[timing] transcribe={time.time()-_t0:.1f}s audio={info.duration:.1f}s", flush=True)
-            # NOTE: `segments` is a lazy generator — the inference runs
-            # HERE, inside the loop below, not at the transcribe() call.
+            # _transcribe_all already materialized the segments (inference
+            # completed inside the worker thread, under the timeout above).
             nsp_drop = float(os.getenv("WHISPER_NSP_THRESHOLD", "0.5"))
             cr_drop = float(os.getenv("WHISPER_CR_THRESHOLD", "2.0"))
             result_segments: list[dict[str, object]] = []
