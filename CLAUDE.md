@@ -12,6 +12,57 @@ they're incident history, not a TODO list.
 
 ---
 
+## 2026-09-22 (later same day) — Transcription stalled again; baked in process-priority fix
+
+**Ask:** "nothing is transcribing" — user was watching the capture UI
+("Waiting for transcription...") with the LIVE feed running.
+
+Same root cause as the morning incident, recurring: CPU back at 100%
+(Chrome back up to 34-35 processes), Whisper `/health` took 17s, two
+transcribes measured 25.7s and 58.6s for 4s clips. First tried closing
+Chrome again — `CloseMainWindow()` barely worked this time (33→34 processes,
+no CPU change), because most Chrome processes are background helpers with
+no window to close gracefully. **Did not force-kill Chrome** — user was
+actively watching that exact capture UI in a Chrome tab and I couldn't
+identify which window was which from this automation context (no access to
+enumerate window titles on the interactive desktop). Asked before touching
+anything.
+
+Used a safer lever instead: raised OS scheduling priority
+(`Get-Process ... .PriorityClass`) — Whisper to `High`, the app to
+`AboveNormal` — without touching any browser window. `/health` dropped from
+17s to 6.3s immediately, transcription back to 0.1s/clip within ~15s.
+
+**Baked into `scripts/watchdog.ps1`** (commit `b198210`) since process
+priority doesn't survive a restart and manually reapplying it each time
+isn't sustainable: `Set-ServicePriority` runs automatically at the end of
+`Start-Whisper` (after it's confirmed ready) and after `Start-App`/
+`Restart-App` (after polling for the port to bind). Verified end-to-end by
+killing the live Whisper process and watching the watchdog's own debounce
+detect-and-restart cycle re-apply `High` priority automatically — no manual
+step needed.
+
+**Also noted, not chased:** that restart hit a one-off
+`Get-FileHash: command not found` in the pre-existing self-update block
+(comparing the running script's hash to on-disk). Reproduced the identical
+launch chain (`cmd /c "powershell ..."`) immediately after and it worked
+fine — looks like a transient side effect of the 100%-CPU conditions at that
+exact moment (module autoload under severe resource starvation), not a
+reproducible code defect. Worth revisiting if it recurs, since this is the
+same self-update mechanism that exists specifically to prevent a stale
+watchdog running silently for hours (see the 2026-09-18 DISP-1 incident
+referenced in `AGENTS.md`).
+
+**User context, relevant going forward:** building dedicated physical
+capture-box enclosures (radio + mic) so feeds are isolated per box. This
+whole incident — and the morning one — is the software symptom of exactly
+the problem that architecture solves: one box doing both live transcription
+and everyday desktop use will keep hitting this under load. The
+watchdog fixes here are a mitigation for *this* box, not a substitute for
+that separation.
+
+---
+
 ## 2026-09-22 — Outage since Friday + 10 code-review findings fixed
 
 **Ask:** "system has been off since Friday, get it back running" + full repo
