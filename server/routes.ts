@@ -168,6 +168,10 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   [/\bmorris\s+bridge(?:\s+rd|\s+road)?\b/gi, "Morris Bridge Rd"],
   [/\b(?:dr\s+)?martin\s+luther\s+king(?:\s+jr)?(?:\s+blvd|\s+boulevard)?\b/gi, "Martin Luther King Jr Blvd"],
   [/\bmlk\b/gi, "Martin Luther King Jr Blvd"],
+  [/\be-brush\b/gi, "Busch Blvd"],
+  [/\bbresh\b/gi, "Busch Blvd"],
+  // Whisper small hears "Busch" as "bridge" before a block number.
+  [/\bbridge\s+(\d{1,3})\b/gi, "and $1"],
   [/\bbusch(?:\s+blvd|\s+boulevard)?\b(?!\s+gardens)/gi, "Busch Blvd"],
   [/\bbush\b/gi, "Busch Blvd"],
   // Whisper hears "Busch" as "e-brush" — map the mangling to the corridor.

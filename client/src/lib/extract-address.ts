@@ -127,6 +127,12 @@ const ADDRESS_HOMOPHONES: [RegExp, string][] = [
   [/\b40th(?:\s+st(?:reet)?)?\b/gi, "40th St"],
   [/\babbot\s+bush\b/gi, "Busch"],
   [/\bbush\b/gi, "Busch"],
+  [/\be-brush\b/gi, "Busch"],
+  [/\bbresh\b/gi, "Busch"],
+  // Whisper small hears "Busch" as "bridge" before a block number
+  // ("e-brush 3, bridge 29" -> "Busch ... and 29"). Only rewrite when a
+  // number follows so real bridge talk ("bridge closure") is untouched.
+  [/\bbridge\s+(\d{1,3})\b/gi, "and $1"],
   [/\bbusch(?:\s+blvd|\s+boulevard)?\b(?!\s+gardens)/gi, "Busch Blvd"],
   [/\bsligh(?:\s+ave(?:nue)?)?\b/gi, "Sligh Ave"],
   [/\bkennedy(?:\s+blvd|\s+boulevard)?\b/gi, "Kennedy Blvd"],
