@@ -74,6 +74,25 @@ function Test-AppAlive($port) {
     }
 }
 
+# Raise a service's OS scheduling priority so Windows favors it over
+# everyday desktop load (browser tabs, etc.) when cores are contended —
+# this box isn't a dedicated capture box, so it runs Whisper/the app
+# alongside normal desktop use. Without this, /health under load measured
+# 17-48s and transcribes measured up to 58s for a 4s clip; after setting
+# Whisper to High and the app to AboveNormal, health dropped to ~6s with
+# the same Chrome load still running (2026-09-22, done manually first,
+# then folded in here so it survives every restart, not just this session).
+function Set-ServicePriority($port, $priority, $label) {
+    $procId = (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
+    if (-not $procId) { return }
+    try {
+        (Get-Process -Id $procId -ErrorAction Stop).PriorityClass = $priority
+        Write-Host "$(Get-Date) Set $label (PID $procId) to $priority priority" -ForegroundColor DarkCyan
+    } catch {
+        Write-Host "$(Get-Date) Could not set priority for $label (PID $procId): $_" -ForegroundColor DarkYellow
+    }
+}
+
 function Stop-StrayWhisper() {
     # Kill whisper_service python processes that don't hold the port (stale
     # duplicates wedge the service by squatting on memory while a new instance
@@ -127,6 +146,8 @@ function Start-Whisper() {
     }
     if (-not $ready) {
         Write-Warning "Whisper did not become ready within 5 minutes. Watchdog will retry on next cycle."
+    } else {
+        Set-ServicePriority 8178 'High' 'Whisper'
     }
 }
 
@@ -168,6 +189,16 @@ function Limit-LogSize($log) {
     }
 }
 
+# Poll until something binds $port (up to $timeoutSec) so the priority
+# bump below lands on the real process instead of racing its startup.
+function Wait-ForPort($port, $timeoutSec = 30) {
+    for ($i = 0; $i -lt $timeoutSec; $i++) {
+        if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) { return $true }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
 function Restart-App($title, $directory, $port, $command, $log) {
     Write-Host "$(Get-Date) Restarting $title..." -ForegroundColor Cyan
     Stop-ProcessOnPort $port
@@ -175,6 +206,7 @@ function Restart-App($title, $directory, $port, $command, $log) {
     New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
     Limit-LogSize $log
     Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command >> `"$log`" 2>&1" -WindowStyle Hidden
+    if (Wait-ForPort $port) { Set-ServicePriority $port 'AboveNormal' $title }
 }
 
 function Start-App($title, $directory, $port, $command, $log) {
@@ -184,6 +216,7 @@ function Start-App($title, $directory, $port, $command, $log) {
     New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
     Limit-LogSize $log
     Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command >> `"$log`" 2>&1" -WindowStyle Hidden
+    if (Wait-ForPort $port) { Set-ServicePriority $port 'AboveNormal' $title }
 }
 
 # Initial start
