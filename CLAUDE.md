@@ -12,6 +12,47 @@ they're incident history, not a TODO list.
 
 ---
 
+## 2026-09-22 (later still) — Pulled independent fleet fixes from "XQuiz"
+
+While pushing the priority fix above, discovered 3 new commits already on
+`origin/main` from another session (git author `XQuiz <xquiz@localhost>`,
+pushed minutes earlier) that converged on the same CPU-contention symptoms
+independently:
+
+- `whisper/whisper_service.py` — a real, complementary bug: faster-whisper's
+  segment generator runs inference lazily on first iteration, so the old
+  `run_in_executor(transcribe_call)` returned immediately and the actual
+  CPU-bound work happened outside any timeout boundary. A single hung 4s
+  chunk could wedge the executor and `/health` with it, invisible to any
+  watchdog timeout, until a manual restart (their incident: 4x on
+  2026-09-21). Fix: `_transcribe_all()` consumes the generator inside the
+  worker thread, wrapped in `asyncio.wait_for(..., timeout=300)`. Pulled and
+  restarted Whisper on this box to load it — didn't touch this file myself
+  today, no overlap with anything above.
+- `scripts/watchdog-xquiz.ps1` (new file) — their own version of the exact
+  timeout/debounce fix already in `scripts/watchdog.ps1` above (150s/3-strike
+  vs. this box's 60s/2-strike), but turned out to be **hardcoded to a
+  different, non-fleet environment**: path
+  `C:\Users\XQuiz\...\kimi\tasks\...\dispatch-monitor`, and it manually
+  prepends node/npm/git to PATH because they live inside a tool called
+  "Kimi"'s bundled runtime rather than the system PATH. Not one of the
+  documented DISP-N fleet boxes. Decision (user, 2026-09-22): leave it in
+  the repo as-is — harmless, not referenced by this box's or any documented
+  fleet box's startup path, and not portable here anyway given the hardcoded
+  paths. `scripts/watchdog.ps1` stays canonical for this box: more complete
+  (also has the log rotation and process-priority fixes XQuiz's version
+  lacks), and already verified working end-to-end today.
+- Small Busch-homophone additions to `extract-address.ts`/`routes.ts` — no
+  conflict with this session's edits to the same files.
+
+Take-away: the CPU-contention/restart-storm problem from this morning isn't
+unique to this box — at least one other environment hit the same failure
+mode around the same time and converged on a similar (if less complete) fix
+independently. Reinforces that this is a systemic risk of running Whisper
+alongside general desktop/other use, not a one-off.
+
+---
+
 ## 2026-09-22 (later same day) — Transcription stalled again; baked in process-priority fix
 
 **Ask:** "nothing is transcribing" — user was watching the capture UI
