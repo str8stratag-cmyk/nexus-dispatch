@@ -1057,7 +1057,7 @@ export async function registerRoutes(
           const claimKey = `${typeKey}|${latCell}|${lngCell}`;
           try {
             const db = await getDatabase();
-            await db.collection("dispatchClaims").insertOne({ _id: claimKey, createdAt: new Date() });
+            await db.collection<{ _id: string; createdAt: Date }>("dispatchClaims").insertOne({ _id: claimKey, createdAt: new Date() });
           } catch (err) {
             if ((err as { code?: number }).code === 11000) {
               // Another box just claimed this bucket — give its insert a
