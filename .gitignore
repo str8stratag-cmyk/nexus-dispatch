@@ -20,6 +20,8 @@ data.db-journal
 !.env.example
 
 *.log
+logs/
+whisper/debug-audio/
 .DS_Store
 .vercel/
 
