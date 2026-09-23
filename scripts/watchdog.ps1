@@ -9,7 +9,7 @@ $dispatchMonitor = "C:\Users\str8s\dispatch-monitor"
 $nexusDispatch = "C:\Users\str8s\nexus-dispatch"
 
 $whisperRestartInterval = [TimeSpan]::FromHours(4)
-$gitPullInterval = [TimeSpan]::FromHours(6)
+$gitPullInterval = [TimeSpan]::FromHours(4)
 $healthCheckInterval = [TimeSpan]::FromMinutes(1)
 
 $lastWhisperRestart = [DateTime]::MinValue
