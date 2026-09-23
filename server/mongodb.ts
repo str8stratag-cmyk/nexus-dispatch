@@ -27,6 +27,9 @@ export function getDatabase(): Promise<Db> {
         database.collection("dispatchEvents").createIndex({ id: 1 }, { unique: true }),
         database.collection("dispatchEvents").createIndex({ createdAt: -1 }),
         database.collection("settings").createIndex({ key: 1 }, { unique: true }),
+        // Short-lived distributed lock for the /api/dispatch cross-box insert
+        // race (see routes.ts) — _id is the claim key, TTL cleans it up.
+        database.collection("dispatchClaims").createIndex({ createdAt: 1 }, { expireAfterSeconds: 20 }),
       ]);
       return database;
     }).catch((err) => {
