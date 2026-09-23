@@ -219,6 +219,21 @@ function Start-App($title, $directory, $port, $command, $log) {
     if (Wait-ForPort $port) { Set-ServicePriority $port 'AboveNormal' $title }
 }
 
+# The capture UI's auto-start (audio-panel.tsx) only runs once a page is
+# actually loaded — after an unattended overnight reboot there's nobody here
+# to open Chrome and navigate to it. Open it in the default browser once the
+# app is confirmed listening, in the user's interactive desktop session (the
+# Startup .vbs that launches this script runs at logon, not as a service, so
+# a GUI window here is visible on the real desktop, same as a manual open).
+function Start-Browser($url) {
+    Write-Host "$(Get-Date) Opening $url in the default browser..." -ForegroundColor Cyan
+    try {
+        Start-Process $url
+    } catch {
+        Write-Warning "Could not open browser: $_"
+    }
+}
+
 # Initial start
 if (-not $NoInitialStart) {
     Start-Whisper
@@ -226,6 +241,10 @@ if (-not $NoInitialStart) {
     # Nexus Dispatch is dormant fleet-wide (user, 2026-09-17): repo keeps
     # pulling below so it stays current, but the app is not started/supervised.
     Start-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
+    if (Wait-ForPort 5000 30) {
+        Start-Sleep -Seconds 3
+        Start-Browser "http://127.0.0.1:5000"
+    }
 } else {
     # Services are already running (self-update path) — stamp the timers so
     # the loop does not immediately restart Whisper for looking "overdue".
