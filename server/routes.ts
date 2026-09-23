@@ -1040,6 +1040,34 @@ export async function registerRoutes(
           if (overlap / Math.max(ta.length, tb.length) >= 0.6) return true;
           return levenshtein(a, b) / Math.max(a.length, b.length) <= 0.25;
         };
+        // Cross-machine insert race: two DISP-N boxes can both pass the fuzzy
+        // check below for the same radio call within milliseconds of each
+        // other (separate processes on separate machines, no shared lock) and
+        // both insert + both alert Telegram. Close the window with a
+        // short-lived claim keyed on incident type + coarse location — Mongo's
+        // _id uniqueness is the only synchronization primitive every box
+        // actually shares. Road Mention events never match the fuzzy check
+        // below (see the signalType guard there), so they're intentionally
+        // not covered here — their own race is handled by the cooldown above.
+        if (lat && lng) {
+          const typeKey = crashClass.has(norm(parsed.signalType)) ? "crash" : norm(parsed.signalType);
+          const CLAIM_CELL_DEG = 0.0045; // ~500m, matches DEDUP_RADIUS_M
+          const latCell = Math.round(lat / CLAIM_CELL_DEG);
+          const lngCell = Math.round(lng / CLAIM_CELL_DEG);
+          const claimKey = `${typeKey}|${latCell}|${lngCell}`;
+          try {
+            const db = await getDatabase();
+            await db.collection("dispatchClaims").insertOne({ _id: claimKey, createdAt: new Date() });
+          } catch (err) {
+            if ((err as { code?: number }).code === 11000) {
+              // Another box just claimed this bucket — give its insert a
+              // moment to land, then let the normal fuzzy check below find it.
+              await new Promise((r) => setTimeout(r, 300 + Math.random() * 300));
+            } else {
+              console.error("Dispatch claim insert failed:", err);
+            }
+          }
+        }
         const cutoff = Date.now() - DEDUP_WINDOW_MS;
         const newAddr = norm(parsed.address);
         const newTranscript = norm(parsed.transcript);
