@@ -32,6 +32,34 @@ $env:WHISPER_DEVICE = "cpu"
 $env:WHISPER_COMPUTE_TYPE = "int8"
 $env:HF_HOME = Join-Path $repoRoot "models"
 
+# Optional per-box Whisper tuning from the same untracked whisper-model.local
+# (KEY=VALUE lines). Only whitelisted keys are honored, and a value already set
+# in the environment wins. Relative WHISPER_SAVE_AUDIO paths resolve against
+# the repo root. Example (debug-audio capture on one box):
+#   WHISPER_SAVE_AUDIO=whisper\debug-audio
+#   WHISPER_SAVE_MAX=400
+$allowedLocalKeys = @(
+  "WHISPER_SAVE_AUDIO",
+  "WHISPER_SAVE_MAX",
+  "WHISPER_NSP_THRESHOLD",
+  "WHISPER_CR_THRESHOLD",
+  "WHISPER_TRANSCRIBE_TIMEOUT"
+)
+$localConfigPath = Join-Path $repoRoot "whisper-model.local"
+if (Test-Path $localConfigPath) {
+  foreach ($line in Get-Content $localConfigPath) {
+    if ($line -match '^\s*([A-Z_]+)\s*=\s*(.+?)\s*$') {
+      $key = $Matches[1]
+      $value = $Matches[2]
+      if (($allowedLocalKeys -notcontains $key) -or [Environment]::GetEnvironmentVariable($key)) { continue }
+      if ($key -eq "WHISPER_SAVE_AUDIO" -and -not [System.IO.Path]::IsPathRooted($value)) {
+        $value = Join-Path $repoRoot $value
+      }
+      Set-Item -Path "Env:$key" -Value $value
+    }
+  }
+}
+
 # Launch with output redirected to log files. Inheriting a hidden console
 # window intermittently wedges the process on console writes (blocked at
 # startup, unkillable); a file sink avoids the console entirely. Start-Process

@@ -37,3 +37,9 @@ whisper-model.local
 
 # Kimi session resume notes
 KIMI_RESUME.md
+
+# Per-box local files (never committed): *.local covers whisper-model.local,
+# watchdog.local and .env.local; plus debug audio captures and hand backups.
+*.local
+debug-audio/
+*.bak-*

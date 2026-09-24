@@ -6,6 +6,7 @@ import { ObjectId } from "mongodb";
 import { storage } from "./storage";
 import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent, type InsertDispatchEvent } from "@shared/schema";
 import { normalizeKeywordEntry } from "@shared/keywords";
+import { extractAddress } from "@shared/extract-address";
 import { getDatabase, isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
 import { getWhisperModel } from "./whisper";
@@ -179,6 +180,7 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   [/\bsligh(?:\s+ave(?:nue)?)?\b/gi, "Sligh Ave"],
   [/\bkennedy(?:\s+blvd|\s+boulevard)?\b/gi, "Kennedy Blvd"],
   [/\bbroadway(?:\s+ave(?:nue)?)?\b/gi, "Broadway Ave"],
+  [/\b(?:lake\s+)?nona(?:\s+(?:road|rd|blvd|boulevard|pkwy|parkway))?\b/gi, "Nona"],
   [/\bbayshore(?:\s+blvd|\s+boulevard)?\b/gi, "Bayshore Blvd"],
   [/\bwest\s+shore(?:\s+blvd|\s+boulevard)?\b/gi, "West Shore Blvd"],
   [/\bgandy(?:\s+blvd|\s+boulevard)?\b/gi, "Gandy Blvd"],
@@ -887,6 +889,22 @@ export async function registerRoutes(
       if (!parsed.whisperModel) {
         const model = await getWhisperModel();
         if (model) parsed.whisperModel = model;
+      }
+
+      // Address backfill (auto-dispatch only): a capture client with a stale
+      // bundle, or a clipped phrase the client missed, can POST address=null
+      // while the transcript still names a location. Re-run the shared
+      // extractor here. Must run BEFORE the eventFields destructure below.
+      // Manual dispatches keep exactly what the operator entered.
+      if (!parsed.isManual && isInvalidAutoAddress(parsed.address) && parsed.transcript) {
+        const extracted = extractAddress(parsed.transcript);
+        if (extracted.address && !isInvalidAutoAddress(extracted.address)) {
+          parsed.address = extracted.address;
+          if (extracted.crossStreet && !parsed.crossStreet) {
+            parsed.crossStreet = extracted.crossStreet;
+          }
+          console.log(`[address-backfill] source=${parsed.source || "?"} -> ${extracted.address}`);
+        }
       }
 
       // skipDedup is an intake-only flag (see schema) — keep it out of the

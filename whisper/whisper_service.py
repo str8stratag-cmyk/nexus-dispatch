@@ -181,7 +181,12 @@ def _self_supervise() -> None:
             fails = 0
             continue
         fails += 1
-        if fails >= 10 and now - _LIVENESS["last_done"] > 300:
+        # Only a request that is actually WAITING (started after the last
+        # completion) can be starved by a wedge. Without this guard a quiet
+        # radio (no chunk for 5+ minutes) plus a slow /health under desktop
+        # load would kill a healthy idle service.
+        request_waiting = _LIVENESS["last_request"] > _LIVENESS["last_done"]
+        if fails >= 10 and request_waiting and now - _LIVENESS["last_done"] > 300:
             print(
                 f"[supervisor] /health unresponsive {fails * 30}s with no "
                 "transcribe completing — service wedged, exiting so a "
@@ -298,6 +303,11 @@ async def transcribe(
             "segments": result_segments,
             "dropped_segments": dropped_segments,
         }
+        if result["text"]:
+            # One low-noise line per non-empty chunk: length plus a short
+            # preview, so call review can correlate transcripts with events.
+            _preview = result["text"][:80].replace("\n", " ")
+            print(f"[text] len={len(result['text'])} preview={_preview!r}", flush=True)
 
         if SAVE_AUDIO_DIR:
             save_dir = Path(SAVE_AUDIO_DIR)

@@ -21,6 +21,27 @@ const CHUNK_DURATION_MS = 4_000;
 const WHISPER_SERVICE_URL = import.meta.env.VITE_WHISPER_SERVICE_URL || "http://127.0.0.1:8178";
 const WHISPER_API_KEY = import.meta.env.VITE_WHISPER_API_KEY;
 
+// Chunks whose average RMS falls below this are treated as silence and never
+// sent to Whisper. Mic gain differs per box, so it is configurable via an
+// untracked per-box setting: VITE_SILENCE_RMS in the repo-root .env.local
+// (read at app start; restart the app after changing it). Invalid or missing
+// values fall back to the fleet default.
+const DEFAULT_SILENCE_RMS = 0.015;
+function parseSilenceRms(raw: unknown): number {
+  const value = typeof raw === "string" ? Number.parseFloat(raw) : NaN;
+  return Number.isFinite(value) && value > 0 && value < 1 ? value : DEFAULT_SILENCE_RMS;
+}
+const SILENCE_RMS = parseSilenceRms(import.meta.env.VITE_SILENCE_RMS);
+
+// Raw capture: the browser's voice-call processing (echo cancellation, noise
+// suppression, auto gain) mangles radio audio and pumps the level the silence
+// gate measures. Applied fleet-wide; previously a local edit on every box.
+const RAW_AUDIO_CONSTRAINTS: MediaTrackConstraints = {
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false,
+};
+
 export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioCaptureReturn {
   const { deviceId, keywords = [], onTranscript } = options;
   const [isCapturing, setIsCapturing] = useState(false);
@@ -98,6 +119,9 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       if (result.text?.trim()) {
         onTranscriptRef.current?.(result.text.trim(), true);
       }
+      // A successful POST means Whisper is back: clear the failure banner,
+      // not just the counter (the "NOT RESPONDING" message used to stick).
+      if (transcribeFailStreakRef.current > 0) setError(null);
       transcribeFailStreakRef.current = 0;
     } catch (err) {
       const message = err instanceof Error ? err.message : "Local Whisper transcription failed.";
@@ -149,7 +173,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       recorderTimerRef.current = null;
       clearInterval(rmsInterval);
       const avgRms = rmsCount > 0 ? rmsSum / rmsCount : 0;
-      const isSilent = avgRms < 0.015;
+      const isSilent = avgRms < SILENCE_RMS;
       const blob = new Blob(chunks, { type: "audio/webm" });
       if (transcribePendingRef.current < 2) {
         transcribePendingRef.current += 1;
@@ -180,7 +204,9 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
 
     try {
       const constraints: MediaStreamConstraints = {
-        audio: deviceId ? { deviceId: { exact: deviceId } } : true,
+        audio: deviceId
+          ? { ...RAW_AUDIO_CONSTRAINTS, deviceId: { exact: deviceId } }
+          : { ...RAW_AUDIO_CONSTRAINTS },
       };
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;

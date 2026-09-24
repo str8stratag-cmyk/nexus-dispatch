@@ -12,6 +12,10 @@ export default defineConfig({
     },
   },
   root: path.resolve(import.meta.dirname, "client"),
+  // Read .env / .env.local from the repo root (not client/), so per-box
+  // client settings such as VITE_SILENCE_RMS live next to the server's .env.
+  // Only VITE_-prefixed keys are exposed to the browser.
+  envDir: path.resolve(import.meta.dirname),
   base: "./",
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),

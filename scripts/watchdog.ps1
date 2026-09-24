@@ -3,10 +3,25 @@ param([switch]$NoInitialStart)
 # Run from PowerShell: .\scripts\watchdog.ps1
 # Runs indefinitely until you close the window.
 # -NoInitialStart: skip the initial Whisper/app start (used when the updated
-# script spawns itself — services are already running).
+# script spawns itself -- services are already running).
 
-$dispatchMonitor = "C:\Users\str8s\dispatch-monitor"
-$nexusDispatch = "C:\Users\str8s\nexus-dispatch"
+# Paths derive from this script's location (scripts\ under the repo root),
+# so the watchdog works for any Windows user profile. Per-box overrides go in
+# the untracked repo-root file watchdog.local (KEY=VALUE lines):
+#   WHISPER_ROOT=C:\path\to\checkout-with-.venv-whisper   (default: this repo)
+#   NEXUS_DISPATCH=C:\path\to\nexus-dispatch              (default: sibling dir)
+$dispatchMonitor = Split-Path -Parent $PSScriptRoot
+$whisperRoot = $dispatchMonitor
+$nexusDispatch = Join-Path (Split-Path -Parent $dispatchMonitor) "nexus-dispatch"
+$watchdogLocal = Join-Path $dispatchMonitor "watchdog.local"
+if (Test-Path $watchdogLocal) {
+    foreach ($line in Get-Content $watchdogLocal) {
+        if ($line -match '^\s*(WHISPER_ROOT|NEXUS_DISPATCH)\s*=\s*(.+?)\s*$') {
+            if ($Matches[1] -eq "WHISPER_ROOT") { $whisperRoot = $Matches[2] }
+            else { $nexusDispatch = $Matches[2] }
+        }
+    }
+}
 
 $whisperRestartInterval = [TimeSpan]::FromHours(4)
 $gitPullInterval = [TimeSpan]::FromHours(4)
@@ -15,7 +30,7 @@ $healthCheckInterval = [TimeSpan]::FromMinutes(1)
 $lastWhisperRestart = [DateTime]::MinValue
 $lastGitPull = [DateTime]::MinValue
 
-# Fail fast if git needs credentials — an interactive prompt in the watchdog's
+# Fail fast if git needs credentials -- an interactive prompt in the watchdog's
 # hidden console wedges the entire health-check loop.
 $env:GIT_TERMINAL_PROMPT = "0"
 
@@ -55,7 +70,7 @@ function Test-WhisperAlive() {
         # 60s (not 30s): under CPU contention a live process can take 45-50s
         # to answer a trivial GET /health (measured 2026-09-22). A shorter
         # timeout here kills a working process mid-response, forcing a full
-        # model reload that adds even more CPU load — self-reinforcing
+        # model reload that adds even more CPU load -- self-reinforcing
         # restart loop, never actually recovers.
         $res = Invoke-WebRequest -Uri "http://127.0.0.1:8178/health" -Method GET -TimeoutSec 60 -UseBasicParsing
         return $res.StatusCode -eq 200
@@ -65,7 +80,7 @@ function Test-WhisperAlive() {
 }
 
 function Test-AppAlive($port) {
-    # Hit the DB-backed route — /api/health stays 200 even when Mongo is wedged.
+    # Hit the DB-backed route -- /api/health stays 200 even when Mongo is wedged.
     try {
         $res = Invoke-WebRequest -Uri "http://127.0.0.1:$port/api/events?limit=1" -Method GET -TimeoutSec 15 -UseBasicParsing
         return $res.StatusCode -eq 200
@@ -75,7 +90,7 @@ function Test-AppAlive($port) {
 }
 
 # Raise a service's OS scheduling priority so Windows favors it over
-# everyday desktop load (browser tabs, etc.) when cores are contended —
+# everyday desktop load (browser tabs, etc.) when cores are contended --
 # this box isn't a dedicated capture box, so it runs Whisper/the app
 # alongside normal desktop use. Without this, /health under load measured
 # 17-48s and transcribes measured up to 58s for a 4s clip; after setting
@@ -111,7 +126,7 @@ $lastAppRestart = @{ "Dispatch Monitor" = [DateTime]::MinValue; "Nexus Dispatch"
 
 function Restart-AppIfDead($title, $directory, $port, $command, $log) {
     if (Test-AppAlive $port) { return }
-    # NOTE: parenthesize Get-Date — "Get-Date - $x" parses '-' as a parameter
+    # NOTE: parenthesize Get-Date -- "Get-Date - $x" parses '-' as a parameter
     # token, $elapsed becomes $null, and the throttle below silently blocks
     # every restart (this watchdog never recovered a dead app until 2026-09-17).
     $elapsed = ([DateTime]::Now) - $lastAppRestart[$title]
@@ -131,7 +146,7 @@ function Start-Whisper() {
     Stop-WhisperLauncher
     Start-Sleep -Seconds 2
     # Run hidden and without -NoExit so the window closes when Whisper exits.
-    Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", "$dispatchMonitor\scripts\start-whisper.ps1" -WindowStyle Hidden
+    Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", (Join-Path $whisperRoot "scripts\start-whisper.ps1") -WindowStyle Hidden
 
     # Wait for Whisper to finish loading the model before returning
     Write-Host "$(Get-Date) Waiting for Whisper to be ready (up to 5 minutes)..." -ForegroundColor Cyan
@@ -158,6 +173,7 @@ function Restart-Whisper() {
 }
 
 function Pull-Repo($path) {
+    if (-not (Test-Path (Join-Path $path ".git"))) { return $false }
     Write-Host "$(Get-Date) Pulling updates for $path..." -ForegroundColor Cyan
     $before = git -C $path rev-parse HEAD
     git -C $path pull origin main | Out-Null
@@ -179,7 +195,7 @@ function Pull-Repo($path) {
 # start-whisper.ps1), apps inheriting the watchdog's hidden console
 # intermittently wedge on console writes and never bind their port.
 # The app log is opened in append mode (>>) and never rotated by anything
-# else, so it grows forever across restarts — hit 4.25GB on 2026-09-22.
+# else, so it grows forever across restarts -- hit 4.25GB on 2026-09-22.
 # Cap it here, at the one place new appends begin.
 $maxLogBytes = 50MB
 function Limit-LogSize($log) {
@@ -220,7 +236,7 @@ function Start-App($title, $directory, $port, $command, $log) {
 }
 
 # The capture UI's auto-start (audio-panel.tsx) only runs once a page is
-# actually loaded — after an unattended overnight reboot there's nobody here
+# actually loaded -- after an unattended overnight reboot there's nobody here
 # to open Chrome and navigate to it. Open it in the default browser once the
 # app is confirmed listening, in the user's interactive desktop session (the
 # Startup .vbs that launches this script runs at logon, not as a service, so
@@ -234,6 +250,21 @@ function Start-Browser($url) {
     }
 }
 
+# Always log to a file, including the -NoInitialStart self-update path: the
+# watchdog runs in a hidden window, so console-only output was lost. The
+# transcript captures Write-Host/Write-Warning output. Size-capped like the
+# app log. Failure to open it (e.g. a launcher already redirecting into the
+# same file) must never stop the watchdog.
+$watchdogLog = Join-Path $dispatchMonitor "logs\watchdog-stdout.log"
+New-Item -ItemType Directory -Force -Path (Split-Path $watchdogLog) | Out-Null
+Limit-LogSize $watchdogLog
+try {
+    Start-Transcript -Path $watchdogLog -Append -Force | Out-Null
+} catch {
+    Write-Warning "Could not open watchdog log ${watchdogLog}: $_"
+}
+Write-Host "$(Get-Date) Watchdog starting (repo: $dispatchMonitor, whisper: $whisperRoot, NoInitialStart: $NoInitialStart)" -ForegroundColor Green
+
 # Initial start
 if (-not $NoInitialStart) {
     Start-Whisper
@@ -246,7 +277,7 @@ if (-not $NoInitialStart) {
         Start-Browser "http://127.0.0.1:5000"
     }
 } else {
-    # Services are already running (self-update path) — stamp the timers so
+    # Services are already running (self-update path) -- stamp the timers so
     # the loop does not immediately restart Whisper for looking "overdue".
     $lastWhisperRestart = Get-Date
 }
@@ -255,7 +286,7 @@ $dmLog = Join-Path $dispatchMonitor "logs\dispatch-monitor.log"
 Write-Host "Watchdog running. Whisper restart every $($whisperRestartInterval.TotalHours)h, git pull every $($gitPullInterval.TotalHours)h." -ForegroundColor Green
 
 # Consecutive-failure debounce (2026-09-22): a single slow/timed-out health
-# check under CPU contention is not "dead" — restarting on one miss forces a
+# check under CPU contention is not "dead" -- restarting on one miss forces a
 # model reload that adds more load, causing the next check to miss too.
 # Require 2 consecutive misses (~2 health-check cycles) before restarting.
 $whisperFailStreak = 0
@@ -288,7 +319,7 @@ while ($true) {
 
         if ($dmUpdated) {
             # LOCAL CHANGE (2026-09-04, keep when pushing upstream): npm
-            # install BEFORE restarting the app on pull — prevents the
+            # install BEFORE restarting the app on pull -- prevents the
             # missing-dependency crash (e.g. express-rate-limit) on
             # post-pull restarts. Pull-Repo only installs when package.json
             # changed; this catches everything else.
@@ -298,7 +329,7 @@ while ($true) {
         }
 
         # Self-update: pulling a new watchdog.ps1 does NOT fix the running
-        # loop — it keeps executing the old in-memory script until something
+        # loop -- it keeps executing the old in-memory script until something
         # restarts it (2026-09-18: DISP-1 silently ran a pre-fix watchdog and
         # stayed dead for 16h). If the on-disk script differs from the one we
         # are running, spawn the updated script (skipping initial starts) and
@@ -310,6 +341,8 @@ while ($true) {
             $newHash = (Get-FileHash $newWd -Algorithm SHA256).Hash
             if ($oldHash -ne $newHash) {
                 Write-Host "$(Get-Date) Watchdog script updated on disk; spawning new instance and exiting." -ForegroundColor Cyan
+                # Release the log file so the new instance can append to it.
+                try { Stop-Transcript | Out-Null } catch { }
                 Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $newWd, "-NoInitialStart" -WindowStyle Hidden
                 Start-Sleep -Seconds 5
                 exit
