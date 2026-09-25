@@ -25,7 +25,7 @@ forwards only whitelisted keys. Every default equals the previous hard-coded beh
 | `WHISPER_NSP_THRESHOLD` | 0.5 | Drop a segment when no_speech_prob exceeds this |
 | `WHISPER_CR_THRESHOLD` | 2.0 | Drop a segment when compression_ratio exceeds this (loops) |
 | `WHISPER_EXTRA_FIXES` | off | Extra homophone fixes in `text_fixes.py` (single four -> Signal 4, crispy downs -> Bruce B Downs, ...) |
-| `WHISPER_BLOCKLIST` | off | Drop a chunk whose ENTIRE text is a known hallucination ("Thank you.") |
+| `WHISPER_BLOCKLIST` | off | Drop a chunk whose ENTIRE text is a known hallucination ("Thank you.", "Thanks for watching!", "I'll see you in the next one. Bye.", "Bye bye.") and strip a trailing YouTube-style sign-off after real speech ("10-4. Thanks for watching!" -> "10-4."). Mid-sentence "see you"/"bye" is never touched. |
 | `WHISPER_HOTWORDS` | off | faster-whisper hotwords; audit debug-audio sidecars for prompt echo before fleet use |
 
 `/health` reports the effective values. Tests: `python whisper/test_text_fixes.py`.

@@ -67,5 +67,46 @@ def _normalize_for_blocklist(text: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9 ]+", "", text.lower().replace("\u2019", "'").replace("'", "")).split())
 
 
+# YouTube-style sign-offs Whisper hallucinates on near-silence. Matched
+# case-insensitively with optional punctuation and trailing "bye"s.
+_AP = "['\u2019]"
+_SIGNOFF_NEXT_ONE = (
+    rf"(?:(?:i|we)(?:{_AP}ll|\s+will)\s+)?see\s+(?:you|ya)\s+(?:guys\s+|all\s+)?"
+    r"(?:in|on|at)\s+the\s+next\s+(?:one|video|episode|time)"
+)
+_SIGNOFF_NEXT_TIME = (
+    rf"(?:(?:i|we)(?:{_AP}ll|\s+will)\s+)?see\s+(?:you|ya)\s+(?:guys\s+|all\s+)?"
+    r"next\s+(?:time|week|video|one|episode)"
+)
+_SIGNOFF_WATCHING = r"(?:thanks|thank\s+you)(?:\s+(?:so|very)\s+much)?\s+for\s+watching"
+_SIGNOFF_SUBSCRIBE = (
+    rf"(?:(?:please|and)\s+)?(?:(?:don{_AP}t|do\s+not)\s+forget\s+to\s+)?"
+    r"(?:like(?:\s*(?:,|and|&)\s*)(?:comment(?:\s*(?:,|and|&)\s*))?)?"
+    r"subscribe(?:\s+to\s+(?:my|our|the)\s+channel)?"
+)
+# Whole chunk = one or more sign-offs, optionally followed by "bye"s.
+_SIGNOFF_ANY = "|".join((_SIGNOFF_NEXT_ONE, _SIGNOFF_NEXT_TIME, _SIGNOFF_WATCHING, _SIGNOFF_SUBSCRIBE))
+SIGNOFF_WHOLE_RE = re.compile(
+    rf"^\s*(?:(?:{_SIGNOFF_ANY})[\s,.!?-]*)+(?:bye[\s,.!?-]*)*$", re.IGNORECASE
+)
+# "Bye bye" (two or more) as the entire chunk. A single "Bye." is kept.
+BYE_BYE_RE = re.compile(r"^\s*bye(?:[\s,.!?-]+bye)+[\s,.!?-]*$", re.IGNORECASE)
+# Trailing strip: only the unmistakable YouTube phrases, and only after a
+# sentence/clause break (. ! ? ,), so "see you" / "bye" mid-sentence and
+# ordinary radio farewells ("10-4, see you next time") are never touched.
+_SIGNOFF_STRONG = "|".join((_SIGNOFF_NEXT_ONE, _SIGNOFF_WATCHING, _SIGNOFF_SUBSCRIBE))
+SIGNOFF_TRAILING_RE = re.compile(
+    rf"(?<=[.!?,])\s*(?:(?:{_SIGNOFF_STRONG})[\s,.!?-]*)+(?:bye[\s,.!?-]*)*$", re.IGNORECASE
+)
+
+
 def is_blocklisted_chunk(text: str) -> bool:
-    return _normalize_for_blocklist(text) in HALLUCINATION_BLOCKLIST
+    """True when the ENTIRE chunk is a known hallucination / sign-off."""
+    if _normalize_for_blocklist(text) in HALLUCINATION_BLOCKLIST:
+        return True
+    return bool(SIGNOFF_WHOLE_RE.match(text) or BYE_BYE_RE.match(text))
+
+
+def strip_trailing_signoff(text: str) -> str:
+    """Remove a trailing YouTube-style sign-off that follows real speech."""
+    return SIGNOFF_TRAILING_RE.sub("", text).rstrip()
