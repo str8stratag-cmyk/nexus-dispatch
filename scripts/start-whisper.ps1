@@ -38,12 +38,24 @@ $env:HF_HOME = Join-Path $repoRoot "models"
 # the repo root. Example (debug-audio capture on one box):
 #   WHISPER_SAVE_AUDIO=whisper\debug-audio
 #   WHISPER_SAVE_MAX=400
+#   WHISPER_BEAM_SIZE=2          (default 5)
+#   WHISPER_BEST_OF=2            (default 5)
+#   WHISPER_NSP_THRESHOLD=0.7    (default 0.5)
+#   WHISPER_EXTRA_FIXES=1        (default off; see whisper\text_fixes.py)
+#   WHISPER_BLOCKLIST=1          (default off; whole-chunk hallucination drop)
+#   WHISPER_HOTWORDS=Signal 4, Henry, ...   (default off; audit for echo)
 $allowedLocalKeys = @(
   "WHISPER_SAVE_AUDIO",
   "WHISPER_SAVE_MAX",
   "WHISPER_NSP_THRESHOLD",
   "WHISPER_CR_THRESHOLD",
-  "WHISPER_TRANSCRIBE_TIMEOUT"
+  "WHISPER_TRANSCRIBE_TIMEOUT",
+  # 2026-09-25 per-box tuning (defaults in whisper_service.py = old behavior):
+  "WHISPER_BEAM_SIZE",
+  "WHISPER_BEST_OF",
+  "WHISPER_HOTWORDS",
+  "WHISPER_EXTRA_FIXES",
+  "WHISPER_BLOCKLIST"
 )
 $localConfigPath = Join-Path $repoRoot "whisper-model.local"
 if (Test-Path $localConfigPath) {

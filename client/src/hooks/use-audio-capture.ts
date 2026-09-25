@@ -17,7 +17,16 @@ interface UseAudioCaptureReturn {
   supported: boolean;
 }
 
-const CHUNK_DURATION_MS = 4_000;
+// Recording chunk length. Per-box override via VITE_CHUNK_MS in the untracked
+// repo-root .env.local (restart the app after changing it). Longer chunks cut
+// fewer words at chunk boundaries at the cost of latency; CPU per second of
+// audio is unchanged. Out-of-range or missing values use the fleet default.
+const DEFAULT_CHUNK_MS = 4_000;
+function parseChunkMs(raw: unknown): number {
+  const value = typeof raw === "string" ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(value) && value >= 2_000 && value <= 15_000 ? value : DEFAULT_CHUNK_MS;
+}
+const CHUNK_DURATION_MS = parseChunkMs(import.meta.env.VITE_CHUNK_MS);
 const WHISPER_SERVICE_URL = import.meta.env.VITE_WHISPER_SERVICE_URL || "http://127.0.0.1:8178";
 const WHISPER_API_KEY = import.meta.env.VITE_WHISPER_API_KEY;
 

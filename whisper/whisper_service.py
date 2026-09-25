@@ -14,6 +14,8 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from faster_whisper import WhisperModel
 
+from text_fixes import EXTRA_HOMOPHONE_FIXES, is_blocklisted_chunk
+
 MODEL_NAME = os.getenv("WHISPER_MODEL", "medium.en")
 DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
@@ -39,6 +41,40 @@ CLEAN_PROMPT = None
 # buffer — oldest files are deleted past WHISPER_SAVE_MAX files.
 SAVE_AUDIO_DIR = os.getenv("WHISPER_SAVE_AUDIO") or None
 SAVE_AUDIO_MAX = int(os.getenv("WHISPER_SAVE_MAX", "200"))
+
+
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    """Per-box integer knob from the environment (start-whisper.ps1 forwards
+    whitelisted keys from the untracked whisper-model.local). Missing or
+    invalid values fall back to the default, which equals the pre-2026-09-25
+    behavior."""
+    raw = os.getenv(name, "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if lo <= value <= hi else default
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# Per-box decode knobs (2026-09-25 call review). Defaults = previous
+# hard-coded values, so a box without these keys behaves exactly as before.
+# The 2-core medium.en boxes decode a 4s chunk in ~11s at beam 5; beam 2
+# trades a little accuracy for throughput so fewer chunks are dropped by
+# the client's 2-deep queue.
+BEAM_SIZE = _env_int("WHISPER_BEAM_SIZE", 5, 1, 10)
+BEST_OF = _env_int("WHISPER_BEST_OF", 5, 1, 10)
+# Optional hotwords (faster-whisper prepends them to the decoder prompt).
+# Default OFF: prompt text has echoed verbatim into transcripts before
+# (2026-09-08, 2026-09-21). Enable per box only with debug-audio sidecars on
+# so echo can be audited.
+HOTWORDS = os.getenv("WHISPER_HOTWORDS", "").strip() or None
+# Opt-in text post-processing added 2026-09-25 (both default OFF).
+EXTRA_FIXES_ENABLED = _env_flag("WHISPER_EXTRA_FIXES")
+BLOCKLIST_ENABLED = _env_flag("WHISPER_BLOCKLIST")
 
 # Known homophone corrections: word-boundary, case-insensitive; the
 # replacement always uses the intended casing. Add entries here when call
@@ -77,6 +113,9 @@ HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
 def apply_homophone_fixes(text: str) -> str:
     for pattern, replacement in HOMOPHONE_FIXES:
         text = pattern.sub(replacement, text)
+    if EXTRA_FIXES_ENABLED:
+        for pattern, replacement in EXTRA_HOMOPHONE_FIXES:
+            text = pattern.sub(replacement, text)
     return text
 
 
@@ -135,8 +174,9 @@ def _transcribe_all(path: str):
     segments, info = model.transcribe(
         path,
         language="en",
-        beam_size=5,
-        best_of=5,
+        beam_size=BEAM_SIZE,
+        best_of=BEST_OF,
+        hotwords=HOTWORDS,
         temperature=(0.0, 0.2, 0.4),
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 700},
@@ -206,6 +246,15 @@ def health() -> dict[str, str]:
         "model": MODEL_NAME,
         "device": DEVICE,
         "compute_type": COMPUTE_TYPE,
+        # Effective per-box tuning (2026-09-25) so rollouts can be verified
+        # from /health without reading files on the box.
+        "beam_size": str(BEAM_SIZE),
+        "best_of": str(BEST_OF),
+        "hotwords": "on" if HOTWORDS else "off",
+        "nsp_threshold": os.getenv("WHISPER_NSP_THRESHOLD", "0.5"),
+        "cr_threshold": os.getenv("WHISPER_CR_THRESHOLD", "2.0"),
+        "extra_fixes": "on" if EXTRA_FIXES_ENABLED else "off",
+        "blocklist": "on" if BLOCKLIST_ENABLED else "off",
     }
 
 
@@ -295,8 +344,16 @@ async def transcribe(
             # Inference returned (success or handled error) — the service is
             # making progress; the supervisor must not count this as a wedge.
             _LIVENESS["last_done"] = time.time()
+        joined = " ".join(segment["text"] for segment in result_segments)
+        if BLOCKLIST_ENABLED and joined and is_blocklisted_chunk(joined):
+            for segment in result_segments:
+                segment["dropped_reason"] = "blocklist"
+            dropped_segments.extend(result_segments)
+            result_segments = []
+            joined = ""
+            print("[blocklist] dropped whole-chunk hallucination", flush=True)
         result = {
-            "text": " ".join(segment["text"] for segment in result_segments),
+            "text": joined,
             "language": info.language,
             "duration": info.duration,
             "model": MODEL_NAME,
