@@ -49,6 +49,24 @@ DISP-3 box — do not mistake them for this machine's state. The Azure Maps acco
 (Client ID 65434727-…) is shared across the fleet; this machine uses the same key
 (stored in `.env`, gitignored).
 
+## Release branch: what the fleet runs (2026-09-25, READ FIRST)
+
+The fleet watchdog deploys **only `origin/release`**, not `main`.
+
+- Merging or pushing to `main` does **not** deploy anything. Code reaches the
+  boxes only when the owner promotes it: `scripts\promote-release.ps1`
+  (shows the pending commits and asks for confirmation), or
+  `git push origin origin/main:refs/heads/release`.
+- **Agents (Claude, Grok, Codex, Kimi, any bot): never push to `release`,
+  never run promote-release.ps1, and never merge to `main` without the
+  owner's explicit approval in the current conversation.** Open a PR and stop.
+- Per-box override (rarely needed): `DEPLOY_BRANCH=<branch>` in the untracked
+  `watchdog.local`.
+- nexus-dispatch is dormant on the fleet, so its pull still tracks `main`.
+  Switch it to the release branch before re-enabling it.
+- Why: on 2026-09-24 a bot opened and merged PR #6 in 27 seconds with no
+  review, and the 4h watchdog pull put it on every box automatically.
+
 ## Local vs shared (READ FIRST)
 
 **DO NOT `git push` from this machine without the user's explicit say-so.**

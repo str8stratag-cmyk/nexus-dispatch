@@ -1,5 +1,5 @@
 param([switch]$NoInitialStart)
-# Watchdog: keep Whisper alive, pull GitHub updates, restart apps when code changes
+# Watchdog: keep Whisper alive, pull released GitHub updates (origin/release), restart apps when code changes
 # Run from PowerShell: .\scripts\watchdog.ps1
 # Runs indefinitely until you close the window.
 # -NoInitialStart: skip the initial Whisper/app start (used when the updated
@@ -10,15 +10,23 @@ param([switch]$NoInitialStart)
 # the untracked repo-root file watchdog.local (KEY=VALUE lines):
 #   WHISPER_ROOT=C:\path\to\checkout-with-.venv-whisper   (default: this repo)
 #   NEXUS_DISPATCH=C:\path\to\nexus-dispatch              (default: sibling dir)
+#   DEPLOY_BRANCH=release                                  (default: release)
 $dispatchMonitor = Split-Path -Parent $PSScriptRoot
 $whisperRoot = $dispatchMonitor
 $nexusDispatch = Join-Path (Split-Path -Parent $dispatchMonitor) "nexus-dispatch"
+# The fleet deploys ONLY the release branch (2026-09-25). Commits landing on
+# main -- including anything a bot pushes -- never reach the boxes until the
+# owner promotes them: scripts\promote-release.ps1 (or git push origin main:release).
+$deployBranch = "release"
 $watchdogLocal = Join-Path $dispatchMonitor "watchdog.local"
 if (Test-Path $watchdogLocal) {
     foreach ($line in Get-Content $watchdogLocal) {
-        if ($line -match '^\s*(WHISPER_ROOT|NEXUS_DISPATCH)\s*=\s*(.+?)\s*$') {
-            if ($Matches[1] -eq "WHISPER_ROOT") { $whisperRoot = $Matches[2] }
-            else { $nexusDispatch = $Matches[2] }
+        if ($line -match '^\s*(WHISPER_ROOT|NEXUS_DISPATCH|DEPLOY_BRANCH)\s*=\s*(.+?)\s*$') {
+            switch ($Matches[1]) {
+                "WHISPER_ROOT" { $whisperRoot = $Matches[2] }
+                "NEXUS_DISPATCH" { $nexusDispatch = $Matches[2] }
+                "DEPLOY_BRANCH" { $deployBranch = $Matches[2] }
+            }
         }
     }
 }
@@ -172,11 +180,24 @@ function Restart-Whisper() {
     $script:lastWhisperRestart = Get-Date
 }
 
-function Pull-Repo($path) {
+function Pull-Repo($path, $branch) {
     if (-not (Test-Path (Join-Path $path ".git"))) { return $false }
-    Write-Host "$(Get-Date) Pulling updates for $path..." -ForegroundColor Cyan
+    Write-Host "$(Get-Date) Pulling origin/$branch for $path..." -ForegroundColor Cyan
+    # Missing branch = do nothing. Never fall back to another branch: that
+    # fallback is exactly how unreviewed code would reach the fleet.
+    git -C $path ls-remote --exit-code --heads origin $branch 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "$(Get-Date) origin/$branch not found for $path; skipping pull."
+        return $false
+    }
     $before = git -C $path rev-parse HEAD
-    git -C $path pull origin main | Out-Null
+    git -C $path pull --no-edit origin $branch 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        # Conflict with local box edits: leave the tree exactly as it was.
+        Write-Warning "$(Get-Date) Pull of origin/$branch failed for $path (local changes?); left unchanged."
+        git -C $path merge --abort 2>&1 | Out-Null
+        return $false
+    }
     $after = git -C $path rev-parse HEAD
     if ($before -ne $after) {
         Write-Host "$(Get-Date) Updated $path" -ForegroundColor Green
@@ -283,7 +304,7 @@ if (-not $NoInitialStart) {
 }
 $dmLog = Join-Path $dispatchMonitor "logs\dispatch-monitor.log"
 
-Write-Host "Watchdog running. Whisper restart every $($whisperRestartInterval.TotalHours)h, git pull every $($gitPullInterval.TotalHours)h." -ForegroundColor Green
+Write-Host "Watchdog running. Whisper restart every $($whisperRestartInterval.TotalHours)h, git pull of origin/$deployBranch every $($gitPullInterval.TotalHours)h." -ForegroundColor Green
 
 # Consecutive-failure debounce (2026-09-22): a single slow/timed-out health
 # check under CPU contention is not "dead" -- restarting on one miss forces a
@@ -314,8 +335,10 @@ while ($true) {
 
     # Pull git updates periodically
     if (($now - $lastGitPull) -gt $gitPullInterval) {
-        $dmUpdated = Pull-Repo $dispatchMonitor
-        $ndUpdated = Pull-Repo $nexusDispatch
+        $dmUpdated = Pull-Repo $dispatchMonitor $deployBranch
+        # nexus-dispatch is dormant on the fleet (never started), so it keeps
+        # tracking main; switch it to $deployBranch before re-enabling it.
+        $ndUpdated = Pull-Repo $nexusDispatch "main"
 
         if ($dmUpdated) {
             # LOCAL CHANGE (2026-09-04, keep when pushing upstream): npm
