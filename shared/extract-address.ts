@@ -100,6 +100,15 @@ const ADDRESS_HOMOPHONES: [RegExp, string][] = [
   [/\bcyber\s+ave\b/gi, "Cypress Ave"],
   [/\bcolumbos\s+ave\b/gi, "Columbus Ave"],
   [/\bbowler\s+ave\b/gi, "Fowler Ave"],
+  // Bruce B Downs Blvd (2026-09-25 DISP-3 miss: the 09:07 "Signal 4 at Bruce
+  // B Downs and Fowler" call was transcribed "crispy downs ... Signal 4 at
+  // Bruce Viana" and quarantined with no address). Every alias is anchored on
+  // a two-word phrase ("bruce ... downs", "bruce viana", "crispy downs") so a
+  // bare "Bruce" or "downs" never becomes an address.
+  [/\bbruce\s+(?:b|be|bee|v|vee|d|p)\.?\s+downs?(?:\s+blvd|\s+boulevard)?\b/gi, "Bruce B Downs Blvd"],
+  [/\bbruce(?:y|ie)?\s+downs(?:\s+blvd|\s+boulevard)?\b/gi, "Bruce B Downs Blvd"],
+  [/\bbruce\s+vi(?:a|e)nn?a\b/gi, "Bruce B Downs Blvd"],
+  [/\bcrispy\s+downs\b/gi, "Bruce B Downs Blvd"],
   [/\bmlk\s+blvd\b/gi, "Martin Luther King Jr Blvd"],
   [/\bmlk\s+boulevard\b/gi, "Martin Luther King Jr Blvd"],
   [/\bmlk\b/gi, "Martin Luther King Jr Blvd"],
@@ -115,6 +124,10 @@ const ADDRESS_HOMOPHONES: [RegExp, string][] = [
   [/\bhillsbough\b/gi, "Hillsborough"],
   [/\bhi?l+s+borough(?:\s+ave(?:nue)?)?\b(?!\s+county)/gi, "Hillsborough Ave"],
   [/\bfowller\b/gi, "Fowler"],
+  // Spelling garbles of Fowler only. Sound-alikes ("sour", "fine") are NOT
+  // mapped: they are common words and would invent cross streets.
+  [/\bfouler\b/gi, "Fowler"],
+  [/\bfowlers\b/gi, "Fowler"],
   [/\bfowler(?:\s+ave(?:nue)?)?\b/gi, "Fowler Ave"],
   [/\bfletcher(?:\s+ave(?:nue)?)?\b/gi, "Fletcher Ave"],
   [/\bwaters(?:\s+ave(?:nue)?)?\b/gi, "Waters Ave"],
@@ -386,7 +399,7 @@ export interface ExtractedAddress {
 // extraction finds nothing for these; the geocoder still resolves them with the
 // city suffix. Order: multi-word / longest first so specific names win.
 const KNOWN_STREET_FALLBACK: [RegExp, string][] = [
-  [/\bbruce\s+b\s+downs\b/i, "Bruce B Downs Blvd"],
+  [/\bbruce\s+b\s+downs\b|\bbruce\s+(?:be|bee|v|vee)\s+downs\b|\bbruce(?:y|ie)?\s+downs\b|\bbruce\s+vi(?:a|e)nn?a\b|\bcrispy\s+downs\b/i, "Bruce B Downs Blvd"],
   [/\b(university\s+)?center\b/i, "University Center"],
   [/\bboy\s+scout\b/i, "Boy Scout Blvd"],
   [/\bhigh\s+park\b/i, "Hyde Park"],
@@ -398,7 +411,7 @@ const KNOWN_STREET_FALLBACK: [RegExp, string][] = [
   [/\bflorida\b/i, "N Florida Ave"],
   [/\bnebraska\b/i, "Nebraska Ave"],
   [/\bkennedy\b/i, "Kennedy Blvd"],
-  [/\bfowler\b/i, "Fowler Ave"],
+  [/\bfowler\b|\bfouler\b|\bfowlers\b/i, "Fowler Ave"],
   [/\bcolumbus\b/i, "Columbus Dr"],
   [/\bhoward\b/i, "N Howard Ave"],
   [/\bsligh\b/i, "Sligh Ave"],

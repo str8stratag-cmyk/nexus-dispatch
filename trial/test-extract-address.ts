@@ -21,6 +21,21 @@ const cases: [string, string | null, string | null][] = [
   ["mva kennedy in himes", "Kennedy Blvd", "Himes Ave"],
   ["on waters and 30th", "30th St", "Waters Ave"],
   ["on columbus and broadway", "Columbus Ave", "Broadway Ave"],
+  // Bruce B Downs mishearings (2026-09-25 DISP-3 09:07 miss, real call was
+  // "Signal 4 at Bruce B Downs and Fowler, accident call")
+  ["See you at 2-1-7-34. You're holding a single floor with an injury, crispy downs, and sour, and fine. Signal 4 at Bruce Viana, I'll bring my ", "Bruce B Downs Blvd", null],
+  ["signal 4 at bruce b downs and fowler", "Bruce B Downs Blvd", "Fowler Ave"],
+  ["signal 4 at bruce b. downs and fowler", "Bruce B Downs Blvd", "Fowler Ave"],
+  ["signal 4 at bruce v downs and fowler", "Bruce B Downs Blvd", "Fowler Ave"],
+  ["signal 4 at bruce be downs and fouler", "Bruce B Downs Blvd", "Fowler Ave"],
+  ["signal 4 at bruce downs and fowlers", "Bruce B Downs Blvd", "Fowler Ave"],
+  ["mva brucey downs boulevard at fletcher", "Bruce B Downs Blvd", "Fletcher Ave"],
+  ["signal four, crispy downs and fowler", "Bruce B Downs Blvd", "Fowler Ave"],
+  ["accident at bruce viana and fowler", "Bruce B Downs Blvd", "Fowler Ave"],
+  // Sound-alikes that must NOT invent streets
+  ["bruce is on scene, the car is upside down", null, null],
+  ["ups and downs all morning", null, null],
+  ["that smells sour, and fine by me", null, null],
   // Protected phrases must NOT extract
   ["Hillsborough County Sheriff units clear", null, null],
   ["the state of Florida highway patrol", "Florida highway", null],
@@ -52,6 +67,7 @@ const roadCases: [string, boolean][] = [
   ["thank you, bye-bye, static", false],
   ["the state of Florida highway patrol is assisting", false],
   ["Hillsborough County Sheriff clear of the call", false],
+  ["signal 4 at bruce viana", false], // not in MAJOR_ROAD_RE; extraction still works
 ];
 for (const [t, want] of roadCases) {
   const got = containsMajorRoad(t);

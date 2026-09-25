@@ -142,7 +142,7 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   [/\bflorida(?:\s+ave(?:nue)?)?\b(?!\s+state)/gi, "Florida Ave"],
   [/\bnebraska(?:\s+ave(?:nue)?)?\b/gi, "Nebraska Ave"],
   [/\bhillsborough(?:\s+ave(?:nue)?)?\b(?!\s+county)/gi, "Hillsborough Ave"],
-  [/\bfowler(?:\s+ave(?:nue)?)?\b/gi, "Fowler Ave"],
+  [/\b(?:fowler|fouler|fowlers)(?:\s+ave(?:nue)?)?\b/gi, "Fowler Ave"],
   [/\bfletcher(?:\s+ave(?:nue)?)?\b/gi, "Fletcher Ave"],
   [/\bwaters(?:\s+ave(?:nue)?)?\b/gi, "Waters Ave"],
   [/\bhimes(?:\s+ave(?:nue)?)?\b/gi, "Himes Ave"],
@@ -159,6 +159,14 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   [/\bbearss(?:\s+ave(?:nue)?)?\b/gi, "Bearss Ave"],
   [/\bgunn(?:\s+hwy|\s+highway)?\b/gi, "Gunn Hwy"],
   [/\bbruce\s+b\s+downs(?:\s+blvd|\s+boulevard)?\b/gi, "Bruce B Downs Blvd"],
+  // Whisper mishearings of Bruce B Downs (2026-09-25 DISP-3 miss). Kept in
+  // sync with ADDRESS_HOMOPHONES in shared/extract-address.ts; all anchored on
+  // two-word phrases so a bare "Bruce"/"downs" is never rewritten.
+  [/\bbruce\s+(?:be|bee|v|vee|d|p)\.?\s+downs?(?:\s+blvd|\s+boulevard)?\b/gi, "Bruce B Downs Blvd"],
+  [/\bbruce\s+b\.\s+downs?(?:\s+blvd|\s+boulevard)?\b/gi, "Bruce B Downs Blvd"],
+  [/\bbruce(?:y|ie)?\s+downs(?:\s+blvd|\s+boulevard)?\b/gi, "Bruce B Downs Blvd"],
+  [/\bbruce\s+vi(?:a|e)nn?a\b/gi, "Bruce B Downs Blvd"],
+  [/\bcrispy\s+downs\b/gi, "Bruce B Downs Blvd"],
   [/\behrlich(?:\s+rd|\s+road)?\b/gi, "Ehrlich Rd"],
   [/\bosborne(?:\s+ave(?:nue)?)?\b/gi, "Osborne Ave"],
   [/\bcomanche(?:\s+ave(?:nue)?)?\b/gi, "Comanche Ave"],
