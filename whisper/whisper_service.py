@@ -14,7 +14,7 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from faster_whisper import WhisperModel
 
-from text_fixes import EXTRA_HOMOPHONE_FIXES, is_blocklisted_chunk
+from text_fixes import EXTRA_HOMOPHONE_FIXES, is_blocklisted_chunk, strip_trailing_signoff
 
 MODEL_NAME = os.getenv("WHISPER_MODEL", "medium.en")
 DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
@@ -352,6 +352,28 @@ async def transcribe(
             result_segments = []
             joined = ""
             print("[blocklist] dropped whole-chunk hallucination", flush=True)
+        elif BLOCKLIST_ENABLED and joined:
+            # Strip a trailing YouTube-style sign-off ("..., thanks for
+            # watching!") and trim the segments to match the kept text.
+            stripped = strip_trailing_signoff(joined)
+            if stripped != joined:
+                keep_len = len(stripped)
+                kept_segments = []
+                offset = 0
+                for segment in result_segments:
+                    seg_text = segment["text"]
+                    if offset >= keep_len:
+                        segment["dropped_reason"] = "signoff"
+                        dropped_segments.append(segment)
+                    elif offset + len(seg_text) > keep_len:
+                        segment["text"] = seg_text[: keep_len - offset].rstrip()
+                        kept_segments.append(segment)
+                    else:
+                        kept_segments.append(segment)
+                    offset += len(seg_text) + 1
+                result_segments = [s for s in kept_segments if s["text"]]
+                joined = " ".join(segment["text"] for segment in result_segments)
+                print("[blocklist] stripped trailing sign-off", flush=True)
         result = {
             "text": joined,
             "language": info.language,
