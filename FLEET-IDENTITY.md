@@ -16,6 +16,11 @@ bottom.
 
 > **hostname `STRATAGCAP<N>` = fleet device `DISP-<N>`**
 
+This holds for the Windows boxes. The Mac is the one confirmed exception —
+it's `DISP-7`, not part of the numeric `STRATAGCAP<N>` sequence — so don't
+assume every `DISP-N` name maps back to a `STRATAGCAPN` hostname; check this
+table, and if a device isn't in it, ask rather than guessing.
+
 To find your own identity, on any box:
 
 ```powershell
@@ -35,7 +40,7 @@ don't assume you're DISP-anything.
 | `STRATAGCAP1` | DISP-1 | Unknown — not documented in `AGENTS.md`/`CLAUDE.md` | Not verified | Referenced in incident history (16h hang, 2026-09-18 self-update issue); no IP on record |
 | `STRATAGCAP4` | DISP-4 | Unknown — not documented | Not verified | Referenced only via "DISP-4 fleet review" (2026-09-12 keyword lesson) |
 | `STRATAGCAP5` | DISP-5 | Unknown — not documented | Not verified | Referenced in dispatch events and an address-parsing incident |
-| *(Mac)* | Mac | N/A | N/A | No `STRATAGCAP<N>` hostname — doesn't fit this convention. Only device confirmed reachable via Remote Desktop Commander as of the 2026-09-28 session notes; identity method for it is unresolved |
+| Unknown — hostname not on record | **DISP-7** | N/A | Fleet name confirmed by user 2026-09-28; hostname not yet given | The Mac. Doesn't fit the `STRATAGCAP<N>` → `DISP-<N>` numeric pattern (7 breaks the 1–5 sequence seen elsewhere), so don't assume its hostname — get it directly (`hostname` on the Mac) and record it here rather than guessing. Only device confirmed reachable via Remote Desktop Commander as of the 2026-09-28 session notes |
 
 **Read this table as "what's on record," not as verified fact for boxes
 other than the one you're running on.** Every entry above except DISP-3's

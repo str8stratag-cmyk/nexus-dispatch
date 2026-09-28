@@ -39,6 +39,11 @@ has no resolved identity method yet.
 file only helps the other four boxes once it's actually shared with them;
 flagging that to the user rather than assuming when to push.
 
+**Update, same session:** user confirmed the Mac is `DISP-7` — breaks the
+numeric `STRATAGCAP<N>` sequence, so it's recorded as a named exception in
+`FLEET-IDENTITY.md` rather than forcing it into the pattern. Its hostname
+is still unknown; not guessed, left for whoever's on that box to fill in.
+
 ---
 
 ## 2026-09-28 (later) — Corrected this box's identity in AGENTS.md (DISP-2 → DISP-3); unblocked pulls
