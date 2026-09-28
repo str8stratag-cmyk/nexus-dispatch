@@ -16,7 +16,8 @@ from faster_whisper import WhisperModel
 
 from text_fixes import EXTRA_HOMOPHONE_FIXES, is_blocklisted_chunk, strip_trailing_signoff
 
-MODEL_NAME = os.getenv("WHISPER_MODEL", "medium.en")
+# Fleet standard since 2026-09-28 (user decision): small.en on every box.
+MODEL_NAME = os.getenv("WHISPER_MODEL", "small.en")
 DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 API_KEY = os.getenv("WHISPER_API_KEY")

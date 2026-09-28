@@ -23,8 +23,18 @@ if (-not $Model) {
   }
 }
 
+# Fleet standard since 2026-09-28 (user decision): small.en on every box.
+# Boxes still carrying a retired model in whisper-model.local (medium.en,
+# turbo) are moved onto the standard here, so the fleet unifies through the
+# normal release pull without hand-editing every box's untracked file.
+$fleetModel = "small.en"
+$retiredModels = @("medium.en", "medium", "turbo", "large-v3-turbo")
+if ($Model -and ($retiredModels -contains $Model.Trim().ToLower())) {
+  Write-Warning "whisper-model.local asks for retired model '$Model'; using fleet standard '$fleetModel'."
+  $Model = $fleetModel
+}
 if (-not $Model) {
-  $Model = "medium.en"
+  $Model = $fleetModel
 }
 
 $env:WHISPER_MODEL = $Model
