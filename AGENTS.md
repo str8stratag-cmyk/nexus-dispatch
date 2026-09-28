@@ -5,11 +5,16 @@
 > (`AGENTS.md`) stays focused on fleet/device/ops context; `CLAUDE.md` is the
 > detailed incident-by-incident history.
 
-> **IDENTITY: THIS MACHINE IS DISP-2** (192.168.6.52). Work self-contained:
-> do NOT probe or depend on other DISP devices for config or shared services —
-> their DBs/services are localhost-bound and irrelevant here. When something is
-> missing (e.g. MongoDB URI), the fix comes from the user or this box, not from
-> poking DISP-3/Mac.
+> **IDENTITY: THIS MACHINE IS DISP-3** (hostname `STRATAGCAP3`, repo at
+> `C:\Users\NoName\dispatch-monitor`; confirmed by the user 2026-09-28).
+> **Note:** this box's actual LAN IP was observed as `192.168.4.74` on
+> 2026-09-28, on a different subnet than the `192.168.6.53` this file
+> previously documented for DISP-3 — treat `.53` as unverified until checked
+> again with `ipconfig`. Work self-contained: do NOT probe or depend on other
+> DISP devices for config or shared services — their DBs/services are
+> localhost-bound and irrelevant here. When something is missing (e.g.
+> MongoDB URI), the fix comes from the user or this box, not from poking
+> other fleet boxes.
 
 ## Project overview
 A full-stack dispatch monitoring dashboard. It captures live audio, transcribes speech, detects emergency keywords, and creates dispatch events stored in MongoDB Atlas.
@@ -21,8 +26,9 @@ A full-stack dispatch monitoring dashboard. It captures live audio, transcribes 
 
 ## Local runtime environment (this device)
 
-This Windows machine is **DISP-2**. It was the fleet's Whisper v3 Turbo tester
-until ~2026-09-25; it has been **off turbo** since then (user, 2026-09-28).
+This Windows machine is **DISP-3** (identity confirmed by the user 2026-09-28;
+this file previously — and incorrectly — described it as DISP-2). It runs
+Whisper watchdog-managed, per the fleet map below.
 
 > **FLEET WHISPER MODEL = `small.en` ON EVERY BOX (user decision 2026-09-28).**
 > No box runs `medium.en` or `turbo` anymore. `scripts/start-whisper.ps1` and
@@ -37,20 +43,19 @@ to (that's how the reconciler dedups across devices). Credentials live ONLY in e
 repo's `.env` (gitignored) — NEVER commit them, never write them into this file.
 If `.env` ever loses them, ask the user; do not hunt for MongoDB on other devices.
 
-- **Whisper endpoint (LAN):** `http://192.168.6.52:8178` — THIS machine's wired IP on
-  the TL-SG608 switch (verified 2026-09-02; the earlier report claiming `.53` was
-  wrong). `192.168.6.53` is a DIFFERENT device (MAC 04-7b-cb-a3-6c-ed) running its own
-  Whisper (`small.en` since 2026-09-28, like every box).
-  Old wireless IP `192.168.5.251` is retired.
+- **Whisper endpoint (LAN):** THIS machine serves Whisper on `0.0.0.0:8178`.
+  Fleet map below lists `192.168.6.53` for DISP-3, but `ipconfig` on
+  2026-09-28 showed this box's actual address as `192.168.4.74` (different
+  subnet) — re-verify before pointing any other device at this box over LAN.
 
-**Fleet map (confirmed 2026-09-03):**
+**Fleet map (confirmed 2026-09-03, identity of this machine corrected 2026-09-28):**
 | Device | IP | Role |
 |--------|----|------|
-| **DISP-2 (this machine)** | 192.168.6.52 | Whisper small.en (off turbo since ~2026-09-25), dispatch :5000 (nexus :5001 retired from runtime 2026-09-18) |
-| DISP-3 | 192.168.6.53 | Whisper small.en (was medium.en until 2026-09-28), watchdog-managed (4h restart, 6h git pull), runs `trial/` reconciler every 3 min |
+| DISP-2 | 192.168.6.52 | Whisper small.en (off turbo since ~2026-09-25), dispatch :5000 (nexus :5001 retired from runtime 2026-09-18) |
+| **DISP-3 (this machine)** | 192.168.6.53 (unverified — see note above; observed `.4.74` 2026-09-28) | Whisper small.en (was medium.en until 2026-09-28), watchdog-managed (4h restart, 6h git pull), runs `trial/` reconciler every 3 min |
 
-Status reports mentioning "watchdog-managed, reconciler, .53" come from the
-DISP-3 box — do not mistake them for this machine's state. The Azure Maps account
+Status reports mentioning "watchdog-managed, reconciler" now correctly
+describe THIS machine. The Azure Maps account
 (Client ID 65434727-…) is shared across the fleet; this machine uses the same key
 (stored in `.env`, gitignored).
 
@@ -203,17 +208,22 @@ The fleet watchdog deploys **only `origin/release`**, not `main`.
 
 Every time this box is fired up, work in this order:
 
-1. **Fire up / check the full stack.** ON THIS BOX the watchdog is intentionally
-   not the startup path — use `scripts\refresh-services.bat` (Desktop
-   shortcuts; Task Scheduler `Dispatch Services Autostart` covers logon).
-   It starts Whisper (8178) and Dispatch Monitor (5000). Nexus :5001 was
-   retired from this box's runtime 2026-09-18 — push-only mirror, never run —
-   though the refresh bat's kill sweep still frees :5001. Verify 8178/health
-   and :5000/api/events are responding before doing anything else. Full
-   ritual (calls review, Whisper tuning order): see `KIMI_RESUME.md` →
-   "Session Startup Ritual". NEVER start a second watchdog (e.g.
-   `start-watchdog.bat`) while one is running — two watchdogs race restarts
-   and wedge the apps. App output goes to
+1. **Fire up / check the full stack.** CORRECTED 2026-09-28 (identity fix):
+   this text below was written for DISP-2, where the watchdog was NOT the
+   startup path. This box is actually DISP-3, and `scripts\watchdog.ps1`
+   **is already running** here (verified via process list, 2026-09-28) — it
+   IS the supervisor: manages Whisper restarts (4h) and `git pull` (6h) on
+   `origin/release`. Do NOT run `scripts\refresh-services.bat` or any Desktop
+   refresh shortcut while the watchdog is live — its kill sweep races the
+   watchdog's restarts and wedges the apps, per the warning below. If Whisper
+   or the app is down, prefer letting the watchdog recover it, or start it
+   directly (`scripts\start-whisper.ps1` / `npm run dev`) rather than the
+   refresh bat. Verify 8178/health and :5000/api/events are responding
+   before doing anything else. Full ritual (calls review, Whisper tuning
+   order): see `KIMI_RESUME.md` → "Session Startup Ritual" (written for
+   DISP-2; treat with the same caution as everything else below). NEVER
+   start a second watchdog (e.g. `start-watchdog.bat`) while one is running
+   — two watchdogs race restarts and wedge the apps. App output goes to
    `dispatch-monitor\logs\dispatch-monitor.log` and
    `nexus-dispatch\logs\nexus-dispatch.log` — if an app won't bind its port,
    check those logs first. A healthy Whisper instance shows TWO python.exe
