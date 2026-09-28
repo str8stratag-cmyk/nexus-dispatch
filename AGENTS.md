@@ -5,11 +5,30 @@
 > (`AGENTS.md`) stays focused on fleet/device/ops context; `CLAUDE.md` is the
 > detailed incident-by-incident history.
 
-> **IDENTITY: THIS MACHINE IS DISP-2** (192.168.6.52). Work self-contained:
-> do NOT probe or depend on other DISP devices for config or shared services —
-> their DBs/services are localhost-bound and irrelevant here. When something is
-> missing (e.g. MongoDB URI), the fix comes from the user or this box, not from
-> poking DISP-3/Mac.
+> **IDENTITY:** this file is git-tracked and fleet-shared (pulled to every
+> DISP-N box by the watchdog every 4h), so it must NEVER hardcode which
+> machine "this" box is — a hardcoded line here is exactly what caused every
+> box in the fleet to think it was DISP-2 on 2026-09-28 (whichever box last
+> committed the line pushed its own identity to the whole fleet). Actual
+> per-box identity lives ONLY in the untracked, never-committed
+> `device-identity.local` (repo root, `DEVICE=DISP-N` — same pattern as
+> `whisper-model.local`).
+>
+> **Before doing anything device-specific:** read `device-identity.local` in
+> this repo root. If it's missing, do NOT guess or assume DISP-2 (or any
+> other box) — check the OS hostname (`hostname`) as a hint, then ask the
+> user to confirm and create the file (`DEVICE=DISP-N`) before proceeding.
+> The rest of this file's "Local runtime environment" section below was
+> originally written from one specific box's state (whisper model, bound IP,
+> etc.) — treat its specifics as a stale example, not fact, until verified
+> live against this box's actual `device-identity.local` /
+> `whisper-model.local` / running services.
+>
+> Work self-contained regardless of which box this is: do NOT probe or
+> depend on other DISP devices for config or shared services — their
+> DBs/services are localhost-bound and irrelevant here. When something is
+> missing (e.g. MongoDB URI), the fix comes from the user or this box, not
+> from poking another DISP device.
 
 ## Project overview
 A full-stack dispatch monitoring dashboard. It captures live audio, transcribes speech, detects emergency keywords, and creates dispatch events stored in MongoDB Atlas.
@@ -21,7 +40,14 @@ A full-stack dispatch monitoring dashboard. It captures live audio, transcribes 
 
 ## Local runtime environment (this device)
 
-This Windows machine (**DISP-2**) is the **Whisper v3 Turbo tester** for the fleet.
+> Everything in this section was originally written for DISP-2 specifically
+> (see IDENTITY note above). If `device-identity.local` says this box is a
+> different DISP-N, treat the model name, IP addresses, and role below as a
+> stale example — confirm this box's actual values via `hostname`,
+> `whisper-model.local`, and the currently-running services instead of
+> trusting this prose.
+
+This Windows machine (**DISP-2**, historically) was the **Whisper v3 Turbo tester** for the fleet.
 Other devices (Mac, DISP-1, DISP-3) run their own Whisper models but can send
 transcription to this box.
 
