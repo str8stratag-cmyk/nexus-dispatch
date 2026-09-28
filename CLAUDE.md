@@ -12,6 +12,29 @@ they're incident history, not a TODO list.
 
 ---
 
+## 2026-09-28 — Whole fleet standardized on Whisper `small.en`
+
+**Ask (user):** put every box on `small.en`; DISP-2 has been off turbo for
+3-4 days, note that in the docs.
+
+**Why:** on DISP-3 (i3-1005G1, 2 cores) medium.en took 11-13 s per 8 s
+chunk, slower than real time, so the client's 2-deep queue dropped audio.
+DISP-3 was switched by hand to small.en first (same beam 2 / thresholds).
+
+**Changed:** default model `medium.en` → `small.en` in
+`scripts/start-whisper.ps1` and `whisper/whisper_service.py`.
+`start-whisper.ps1` also maps a retired model left in a box's untracked
+`whisper-model.local` (`medium.en`, `medium`, `turbo`, `large-v3-turbo`) to
+the fleet standard with a warning, so the fleet unifies through the normal
+release pull. Any other explicit model still wins. AGENTS.md updated.
+
+**Rollout:** each box's watchdog pulls `origin/release` within 6 h and picks
+the model up at its next Whisper restart (4 h schedule). First start on a box
+downloads small.en (~480 MB) from Hugging Face, so a box without internet
+will fail to start Whisper until the model is copied in.
+
+---
+
 ## 2026-09-22 (later still) — Pulled independent fleet fixes from "XQuiz"
 
 While pushing the priority fix above, discovered 3 new commits already on

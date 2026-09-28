@@ -21,9 +21,14 @@ A full-stack dispatch monitoring dashboard. It captures live audio, transcribes 
 
 ## Local runtime environment (this device)
 
-This Windows machine (**DISP-2**) is the **Whisper v3 Turbo tester** for the fleet.
-Other devices (Mac, DISP-1, DISP-3) run their own Whisper models but can send
-transcription to this box.
+This Windows machine is **DISP-2**. It was the fleet's Whisper v3 Turbo tester
+until ~2026-09-25; it has been **off turbo** since then (user, 2026-09-28).
+
+> **FLEET WHISPER MODEL = `small.en` ON EVERY BOX (user decision 2026-09-28).**
+> No box runs `medium.en` or `turbo` anymore. `scripts/start-whisper.ps1` and
+> `whisper/whisper_service.py` default to `small.en`, and `start-whisper.ps1`
+> overrides a leftover `medium.en`/`turbo` in `whisper-model.local` to the
+> fleet standard (with a warning). The turbo/medium.en notes below are history.
 
 **MongoDB (RESOLVED 2026-09-04):** the app is MongoDB-only (migrated from Supabase).
 Shared fleet cluster: **MongoDB Atlas** (`mongodb+srv`, host `nexus-disp.dndtjvg.
@@ -35,16 +40,16 @@ If `.env` ever loses them, ask the user; do not hunt for MongoDB on other device
 - **Whisper endpoint (LAN):** `http://192.168.6.52:8178` — THIS machine's wired IP on
   the TL-SG608 switch (verified 2026-09-02; the earlier report claiming `.53` was
   wrong). `192.168.6.53` is a DIFFERENT device (MAC 04-7b-cb-a3-6c-ed) running its own
-  Whisper on `medium.en` — devices pointed at `.53` are NOT using this box's turbo.
+  Whisper (`small.en` since 2026-09-28, like every box).
   Old wireless IP `192.168.5.251` is retired.
 
 **Fleet map (confirmed 2026-09-03):**
 | Device | IP | Role |
 |--------|----|------|
-| **DISP-2 (this machine)** | 192.168.6.52 | Whisper v3 turbo tester, dispatch :5000 (nexus :5001 retired from runtime 2026-09-18) |
-| DISP-3 | 192.168.6.53 | Whisper medium.en, watchdog-managed (4h restart, 6h git pull), runs `trial/` reconciler every 3 min |
+| **DISP-2 (this machine)** | 192.168.6.52 | Whisper small.en (off turbo since ~2026-09-25), dispatch :5000 (nexus :5001 retired from runtime 2026-09-18) |
+| DISP-3 | 192.168.6.53 | Whisper small.en (was medium.en until 2026-09-28), watchdog-managed (4h restart, 6h git pull), runs `trial/` reconciler every 3 min |
 
-Status reports mentioning "medium.en, watchdog-managed, reconciler, .53" come from the
+Status reports mentioning "watchdog-managed, reconciler, .53" come from the
 DISP-3 box — do not mistake them for this machine's state. The Azure Maps account
 (Client ID 65434727-…) is shared across the fleet; this machine uses the same key
 (stored in `.env`, gitignored).
@@ -93,9 +98,9 @@ The fleet watchdog deploys **only `origin/release`**, not `main`.
   (upstream side for squash-merged features, local side for intentional
   adaptations like cross-env/LAN binds), then npm install + check + service
   refresh. Full procedure in KIMI_RESUME.md (AGENT NOTE, 2026-09-16).
-- **Policy (user decision 2026-09-03):** turbo stays on DISP-2 as the tester.
-  If it keeps getting good results, the user will share it with the other DISP
-  devices. Until then: no pushes.
+- **Policy (user decision 2026-09-03, SUPERSEDED 2026-09-28):** turbo stayed on
+  DISP-2 as the tester. DISP-2 came off turbo ~2026-09-25, and on 2026-09-28
+  the user standardized the whole fleet on `small.en`.
 - When sharing IS approved, push ONLY: (1) the model-selection mechanism
   (the `whisper-model.local` block in `scripts/start-whisper.ps1`), and (2) the
   `whisperModel` event tagging (schema + storage + whisper.ts + routes stamp +
@@ -120,9 +125,9 @@ The fleet watchdog deploys **only `origin/release`**, not `main`.
   key), `KIMI_RESUME.md`, logs, `test-audio.wav`.
 - After ANY future `git pull`, run the post-pull checklist below — upstream
   removed the `whisper-model.local` block once already.
-- **Model:** `turbo` (device-local, via `whisper-model.local`, gitignored). Do not
-  change to `medium.en` — that is only the fallback default in the start scripts.
-  This box IS DISP-2 and runs turbo; other devices run their own models. Note:
+- **Model:** `small.en`, the fleet standard (2026-09-28). `whisper-model.local`
+  may still hold per-box decode knobs (beam size, thresholds); a retired model
+  name in it (`medium.en`/`turbo`) is overridden to `small.en` at start. Note:
   `nexus-dispatch/start-whisper-disp2.bat` (distil-large-v3, port 8179) came from the
   fleet's shared repo — it is NOT this box's config and should not be run here.
 - **Whisper bind:** `0.0.0.0:8178` in BOTH `scripts/start-whisper.ps1` and
@@ -144,7 +149,7 @@ The fleet watchdog deploys **only `origin/release`**, not `main`.
   (starts all three services hidden, restarts Whisper every 4h, `git pull` every 6h).
   NOT auto-started on this box. Health check is `GET /health` (30s timeout).
   When active it starts Whisper via `start-whisper.ps1`, which reads
-  `whisper-model.local` → stays on turbo.
+  `whisper-model.local` → runs the fleet standard `small.en`.
   LOCAL CHANGE (2026-09-04): after a pull updates a repo, the watchdog runs
   `npm install` for that repo BEFORE restarting its app — prevents the
   missing-dependency crash (e.g. `express-rate-limit`) on post-pull restarts.
@@ -159,9 +164,9 @@ The fleet watchdog deploys **only `origin/release`**, not `main`.
 - **Post-pull checklist (learned 2026-09-02):**
   1. `npm install` if `package.json` changed, then `npm run check`.
   2. Verify the `whisper-model.local` block survived in `scripts/start-whisper.ps1`
-     (upstream removed it once already — without it this box silently boots `medium.en`).
+     (upstream removed it once already; it still carries per-box decode knobs).
   3. Restart services (`scripts/refresh-services.bat`) and confirm
-     `/health` reports `"model":"turbo"`.
+     `/health` reports `"model":"small.en"`.
 - **Known quirk:** `/health` can time out mid-transcription (CPU-bound, single
   worker). Transcription is unaffected; retry the health check.
 - **Road Mentions (tuned 2026-09-12):** "Road Mention" events (major road
