@@ -5,8 +5,13 @@
 > (`AGENTS.md`) stays focused on fleet/device/ops context; `CLAUDE.md` is the
 > detailed incident-by-incident history.
 
-> **IDENTITY: THIS MACHINE IS DISP-3** (hostname `STRATAGCAP3`, repo at
-> `C:\Users\NoName\dispatch-monitor`; confirmed by the user 2026-09-28).
+> **IDENTITY: see `FLEET-IDENTITY.md`.** Convention: hostname
+> `STRATAGCAP<N>` = fleet device `DISP-<N>`. On THIS checkout, hostname is
+> `STRATAGCAP3` → **DISP-3** (confirmed by the user 2026-09-28; repo at
+> `C:\Users\NoName\dispatch-monitor`). Don't just trust this line if it's
+> stale — re-run `$env:COMPUTERNAME` and check `FLEET-IDENTITY.md` yourself;
+> that file, not this banner, is the source of truth, since this exact
+> banner went stale and wrong once already (see `CLAUDE.md` 2026-09-28).
 > **Note:** this box's actual LAN IP was observed as `192.168.4.74` on
 > 2026-09-28, on a different subnet than the `192.168.6.53` this file
 > previously documented for DISP-3 — treat `.53` as unverified until checked

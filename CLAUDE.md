@@ -12,6 +12,35 @@ they're incident history, not a TODO list.
 
 ---
 
+## 2026-09-28 (later still) — Added `FLEET-IDENTITY.md`: hostname-based identity for every box
+
+**Ask (user):** after the DISP-2→DISP-3 mislabel above, build a shared file
+so every box can learn its own identity from its hostname instead of a
+hand-maintained banner in `AGENTS.md` (the thing that just went stale).
+
+**Convention (from the user):** hostname `STRATAGCAP<N>` = fleet device
+`DISP-<N>` (`STRATAGCAP3` = DISP-3, `STRATAGCAP2` = DISP-2, etc.).
+
+**What changed:** new `FLEET-IDENTITY.md` at repo root — the convention, a
+per-hostname lookup table, and instructions for a box (or an agent session
+on it) to self-check via `$env:COMPUTERNAME` rather than trusting static
+prose. `AGENTS.md`'s identity banner now points at it instead of restating
+identity as fact.
+
+**Honesty check on the table:** I only independently verified DISP-3 (this
+box) in this session. DISP-2's IP (`192.168.6.52`) and DISP-3's documented
+IP (`192.168.6.53`, contradicted by the `192.168.4.74` this box actually
+has) are carried over from prior doc text, not re-checked. DISP-1, DISP-4,
+DISP-5 have no IP on record at all — the table says so explicitly rather
+than inventing values. The Mac doesn't fit the `STRATAGCAP<N>` pattern and
+has no resolved identity method yet.
+
+**Not pushed** — same rule as the identity-correction commit above. This
+file only helps the other four boxes once it's actually shared with them;
+flagging that to the user rather than assuming when to push.
+
+---
+
 ## 2026-09-28 (later) — Corrected this box's identity in AGENTS.md (DISP-2 → DISP-3); unblocked pulls
 
 **What was wrong:** `AGENTS.md` on this checkout asserted `THIS MACHINE IS
