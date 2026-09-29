@@ -40,21 +40,28 @@ A full-stack dispatch monitoring dashboard. It captures live audio, transcribes 
 - Branch: `main`
 - Deployment: **Vercel retired** (switched to MongoDB Atlas + locally-run apps on the fleet, at agent advice) — see master `AGENTS.md`
 
-## Fleet runtime environment (per-device specifics — NOT this file's identity)
+## Fleet-wide orders (apply to every box — no device specifics here)
 
-> This section documents facts about individual fleet boxes for reference.
-> It does **not** assert which one you're on — that answer lives only in
-> `device-identity.local` (this box) and `FLEET-IDENTITY.md` (the fleet-wide
-> hostname → DISP-N table with per-device notes). Read those, not prose here,
-> to find out which row below (if any) is yours.
+> This file carries fleet-wide conventions and mandates only. It does **not**
+> — and must not — record facts about any individual device, including this
+> one: not an IP, not a tuning value, not "device X does Y." A session on
+> DISP-4 fixing an AGENTS.md problem does not get to write notes about DISP-2
+> or DISP-3 here either — that's overreach the same way a hardcoded identity
+> banner was. Per-device facts belong ONLY in that device's own local,
+> untracked files (`device-identity.local`, `whisper-model.local`,
+> `.env.local`), recorded by a session actually running on that device.
+> `FLEET-IDENTITY.md` is the one exception: a hostname → DISP-N convention
+> table, because every box needs the *same* lookup mechanism to find itself
+> — but even there, don't add per-device operational notes beyond the
+> identity lookup itself.
 
 > **FLEET WHISPER MODEL = `small.en` ON EVERY BOX (user decision 2026-09-28).**
 > No box runs `medium.en` or `turbo` anymore. `scripts/start-whisper.ps1` and
 > `whisper/whisper_service.py` default to `small.en`, and `start-whisper.ps1`
 > overrides a leftover `medium.en`/`turbo` in `whisper-model.local` to the
-> fleet standard (with a warning). Per-box beam size is a separate, still
-> genuinely per-device tuning key (`WHISPER_BEAM_SIZE` in `whisper-model.local`,
-> default 5) — check that file, not this one, for a given box's actual value.
+> fleet standard (with a warning). Beam size is a separate, genuinely
+> per-device tuning key (`WHISPER_BEAM_SIZE` in `whisper-model.local`,
+> default 5) — that file, not this one, is where a box's actual value lives.
 
 **MongoDB (RESOLVED 2026-09-04):** the app is MongoDB-only (migrated from Supabase).
 Shared fleet cluster: **MongoDB Atlas** (`mongodb+srv`, host `nexus-disp.dndtjvg.
@@ -62,15 +69,6 @@ mongodb.net`, db `str8stratag_db_user`) — the SAME database all DISP devices w
 to (that's how the reconciler dedups across devices). Credentials live ONLY in each
 repo's `.env` (gitignored) — NEVER commit them, never write them into this file.
 If `.env` ever loses them, ask the user; do not hunt for MongoDB on other devices.
-
-**Per-device notes on record** (may be stale — verify live against the box in
-front of you rather than trusting this table; see `FLEET-IDENTITY.md` for the
-hostname lookup and its own freshness caveats):
-| Device | LAN IP on record | Notes |
-|--------|----|------|
-| DISP-2 | `192.168.6.52` (verified 2026-09-02) | Was the fleet's Whisper v3 Turbo tester until ~2026-09-25; off turbo since, now `small.en` like every box. Runs dispatch on `:5000`. |
-| DISP-3 | `192.168.6.53` documented; `192.168.4.74` observed 2026-09-28 (different subnet, unresolved) | `small.en` since 2026-09-28 (was `medium.en`). Watchdog-managed (4h Whisper restart, 6h `git pull`), runs `trial/` reconciler every 3 min. |
-| DISP-4 | Not on record | Confirmed by the user (2026-09-28/29 session) — `small.en`, tuned `WHISPER_BEAM_SIZE=3`/`WHISPER_BEST_OF=3` and `VITE_SILENCE_RMS=0.03` (9% displayed) that session, both via that box's own `whisper-model.local`/`.env.local`. |
 
 The Azure Maps account (Client ID 65434727-…) is shared across the entire
 fleet; every box uses the same key (stored in its own `.env`, gitignored).
@@ -230,20 +228,21 @@ The fleet watchdog deploys **only `origin/release`**, not `main`.
 
 Every time this box is fired up, work in this order:
 
-1. **Fire up / check the full stack.** CORRECTED 2026-09-28 (identity fix):
-   this text below was written for DISP-2, where the watchdog was NOT the
-   startup path. This box is actually DISP-3, and `scripts\watchdog.ps1`
-   **is already running** here (verified via process list, 2026-09-28) — it
-   IS the supervisor: manages Whisper restarts (4h) and `git pull` (6h) on
-   `origin/release`. Do NOT run `scripts\refresh-services.bat` or any Desktop
-   refresh shortcut while the watchdog is live — its kill sweep races the
-   watchdog's restarts and wedges the apps, per the warning below. If Whisper
-   or the app is down, prefer letting the watchdog recover it, or start it
-   directly (`scripts\start-whisper.ps1` / `npm run dev`) rather than the
-   refresh bat. Verify 8178/health and :5000/api/events are responding
-   before doing anything else. Full ritual (calls review, Whisper tuning
-   order): see `KIMI_RESUME.md` → "Session Startup Ritual" (written for
-   DISP-2; treat with the same caution as everything else below). NEVER
+1. **Fire up / check the full stack.** Whether the watchdog (`scripts\watchdog.ps1`)
+   or a manual refresh script (`scripts\refresh-services.bat`) is this box's
+   startup path is a per-device fact — check what's actually running
+   (process list) rather than trusting prose here, since this exact text was
+   previously written assuming one specific box's setup and went stale when
+   read on a different box. If the watchdog IS running: it supervises Whisper
+   restarts (4h) and `git pull` (6h) on `origin/release`, and you must NOT
+   run `refresh-services.bat` or any Desktop refresh shortcut alongside it —
+   its kill sweep races the watchdog's restarts and wedges the apps, per the
+   warning below. If Whisper or the app is down, prefer letting the watchdog
+   recover it, or start it directly (`scripts\start-whisper.ps1` / `npm run dev`)
+   rather than the refresh bat. Verify 8178/health and :5000/api/events are
+   responding before doing anything else. Full ritual (calls review, Whisper
+   tuning order): see `KIMI_RESUME.md` → "Session Startup Ritual" (also
+   written from one box's perspective — verify before trusting). NEVER
    start a second watchdog (e.g. `start-watchdog.bat`) while one is running
    — two watchdogs race restarts and wedge the apps. App output goes to
    `dispatch-monitor\logs\dispatch-monitor.log` and
