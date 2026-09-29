@@ -67,6 +67,28 @@ def _normalize_for_blocklist(text: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9 ]+", "", text.lower().replace("\u2019", "'").replace("'", "")).split())
 
 
+# Phrases that are hallucinations with NO legitimate-repeat exception (unlike
+# "thank you", which real dispatchers can plausibly say twice \u2014 see the
+# "Thank you. Thank you." negative case below and in test_text_fixes.py).
+# Whisper tends to loop these, or emit two different ones back-to-back, in a
+# single chunk (2026-09-28: "We'll be right back. We'll be right back." and a
+# song-lyric hallucination emitted twice with slightly different endings), so
+# unlike HALLUCINATION_BLOCKLIST's exact-single-phrase check, the WHOLE chunk
+# is blocked when it's made up entirely of one-or-more of these, in any
+# combination/order \u2014 never a partial phrase, never mixed with real speech.
+REPEATABLE_HALLUCINATIONS = frozenset({
+    "well be right back",
+    "ill be right back",
+    "get out of here",
+    "one night till youre over cant i get out of here",
+    "one night till youre over cant i get out",
+})
+_REPEATABLE_ALT = "|".join(
+    re.escape(p) for p in sorted(REPEATABLE_HALLUCINATIONS, key=len, reverse=True)
+)
+REPEATABLE_WHOLE_RE = re.compile(rf"^(?:(?:{_REPEATABLE_ALT})\s*)+$")
+
+
 # YouTube-style sign-offs Whisper hallucinates on near-silence. Matched
 # case-insensitively with optional punctuation and trailing "bye"s.
 _AP = "['\u2019]"
@@ -79,13 +101,18 @@ _SIGNOFF_NEXT_TIME = (
     r"next\s+(?:time|week|video|one|episode)"
 )
 _SIGNOFF_WATCHING = r"(?:thanks|thank\s+you)(?:\s+(?:so|very)\s+much)?\s+for\s+watching"
+# "Thanks for tuning in" (2026-09-28: TV/radio-outro chatter picked up like
+# "thanks for watching") — same shape, different verb.
+_SIGNOFF_TUNING_IN = r"(?:thanks|thank\s+you)(?:\s+(?:so|very)\s+much)?\s+for\s+tuning\s+in"
 _SIGNOFF_SUBSCRIBE = (
     rf"(?:(?:please|and)\s+)?(?:(?:don{_AP}t|do\s+not)\s+forget\s+to\s+)?"
     r"(?:like(?:\s*(?:,|and|&)\s*)(?:comment(?:\s*(?:,|and|&)\s*))?)?"
     r"subscribe(?:\s+to\s+(?:my|our|the)\s+channel)?"
 )
 # Whole chunk = one or more sign-offs, optionally followed by "bye"s.
-_SIGNOFF_ANY = "|".join((_SIGNOFF_NEXT_ONE, _SIGNOFF_NEXT_TIME, _SIGNOFF_WATCHING, _SIGNOFF_SUBSCRIBE))
+_SIGNOFF_ANY = "|".join(
+    (_SIGNOFF_NEXT_ONE, _SIGNOFF_NEXT_TIME, _SIGNOFF_WATCHING, _SIGNOFF_TUNING_IN, _SIGNOFF_SUBSCRIBE)
+)
 SIGNOFF_WHOLE_RE = re.compile(
     rf"^\s*(?:(?:{_SIGNOFF_ANY})[\s,.!?-]*)+(?:bye[\s,.!?-]*)*$", re.IGNORECASE
 )
@@ -94,7 +121,7 @@ BYE_BYE_RE = re.compile(r"^\s*bye(?:[\s,.!?-]+bye)+[\s,.!?-]*$", re.IGNORECASE)
 # Trailing strip: only the unmistakable YouTube phrases, and only after a
 # sentence/clause break (. ! ? ,), so "see you" / "bye" mid-sentence and
 # ordinary radio farewells ("10-4, see you next time") are never touched.
-_SIGNOFF_STRONG = "|".join((_SIGNOFF_NEXT_ONE, _SIGNOFF_WATCHING, _SIGNOFF_SUBSCRIBE))
+_SIGNOFF_STRONG = "|".join((_SIGNOFF_NEXT_ONE, _SIGNOFF_WATCHING, _SIGNOFF_TUNING_IN, _SIGNOFF_SUBSCRIBE))
 SIGNOFF_TRAILING_RE = re.compile(
     rf"(?<=[.!?,])\s*(?:(?:{_SIGNOFF_STRONG})[\s,.!?-]*)+(?:bye[\s,.!?-]*)*$", re.IGNORECASE
 )
@@ -102,7 +129,10 @@ SIGNOFF_TRAILING_RE = re.compile(
 
 def is_blocklisted_chunk(text: str) -> bool:
     """True when the ENTIRE chunk is a known hallucination / sign-off."""
-    if _normalize_for_blocklist(text) in HALLUCINATION_BLOCKLIST:
+    norm = _normalize_for_blocklist(text)
+    if norm in HALLUCINATION_BLOCKLIST:
+        return True
+    if norm and REPEATABLE_WHOLE_RE.match(norm):
         return True
     return bool(SIGNOFF_WHOLE_RE.match(text) or BYE_BYE_RE.match(text))
 

@@ -1,16 +1,21 @@
 # Fleet Identity — how a device learns who it is
 
 **Purpose:** this file exists because a hardcoded `THIS MACHINE IS DISP-2`
-banner in `AGENTS.md` went stale on this checkout and nobody caught it until
-2026-09-28 (see `CLAUDE.md`, "Corrected this box's identity"). Copied,
+banner in `AGENTS.md` went stale on one box's checkout and nobody caught it
+until 2026-09-28 (see `CLAUDE.md`, "Corrected this box's identity"). Copied,
 uncommitted, or partially-merged docs drift. A device's **hostname doesn't
 drift** — so identity should be derived from it, not asserted as static text
 that has to be kept in sync by hand across five machines.
 
-This file is shared/tracked (pushed like any other doc), so every box's
-clone has the same lookup table. `AGENTS.md`'s identity banner should say
-"derive your identity from this file," not restate it — see the note at the
-bottom.
+This file is shared/tracked (pushed like any other doc, same content on
+every box's clone), so it can hold the fleet-wide lookup table but **must
+never** state which row is "this machine" — that fact is different on every
+clone and belongs in each box's own **`device-identity.local`** (gitignored,
+one per box, never committed — see `AGENTS.md`'s IDENTITY note). 2026-09-29:
+restructured for exactly this reason, after this file's own first version
+briefly said "on THIS checkout, hostname is STRATAGCAP3" — a mistake in
+the same direction as the original DISP-2 bug, just caught same-day instead
+of days later.
 
 ## The convention
 
@@ -50,14 +55,18 @@ own IP with `ipconfig` before trusting the table, and correct your row if
 it's wrong — then flag the correction in `CLAUDE.md` the way the DISP-3 fix
 was flagged, so the next reader knows what changed and why.
 
-## For `AGENTS.md` maintainers
-
-Don't hardcode `THIS MACHINE IS DISP-N` as plain prose again. Instead:
+## Establishing identity on a box (do this, not prose in a tracked file)
 
 1. Run `$env:COMPUTERNAME`.
-2. Look it up here.
-3. If it matches a known row, state identity with a pointer back to this
-   file (e.g. "per `FLEET-IDENTITY.md`, hostname `STRATAGCAP3` → DISP-3"),
-   so a future reader can re-derive it instead of trusting stale prose.
-4. If it doesn't match, don't guess — ask the user, and add a new row here
-   once confirmed (with today's date and how it was confirmed).
+2. Look it up in the table above.
+3. If it matches a known row, and/or the user confirms it in chat, write
+   the result into that box's **`device-identity.local`** (gitignored,
+   repo root, `DEVICE=DISP-N`) — never into `AGENTS.md`, this file, or
+   anything else that's tracked. See `AGENTS.md`'s IDENTITY note for format.
+4. If it doesn't match, don't guess — ask the user, then both create that
+   box's `device-identity.local` AND add a new row to the table above
+   (dated, with how it was confirmed) so the next box benefits.
+5. Never write "this machine is DISP-N" into `AGENTS.md`, this file, or any
+   other tracked file — that's the exact mistake this restructure fixes.
+   Fleet-wide facts (the table, the convention) are tracked; which row
+   applies to "here" is not.

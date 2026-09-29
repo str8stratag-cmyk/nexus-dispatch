@@ -43,3 +43,11 @@ KIMI_RESUME.md
 *.local
 debug-audio/
 *.bak-*
+
+# Per-device identity (2026-09-29): device-identity.local, this box's own
+# "you are DISP-N" note. Already covered by the *.local rule above — no
+# extra entry needed. NEVER commit/push it: a repo-tracked file is the SAME
+# content on every box's clone, so it can never correctly say "this machine
+# is X" for all of them at once (that's what caused the DISP-2/DISP-3
+# mislabel). See AGENTS.md's IDENTITY note and FLEET-IDENTITY.md for the
+# fleet-wide, tracked convention instead.

@@ -12,6 +12,130 @@ they're incident history, not a TODO list.
 
 ---
 
+## 2026-09-29 (later) — Reconciled with PR #13 (DISP-4's identity fix, merged); adopted `device-identity.local`
+
+**What happened:** DISP-4 was independently building the same fix (see
+entry below) and pushed `fix/agents-md-identity-v2`. I found this by
+fetching before deciding whether to push my own local commit, compared the
+two rather than pushing a conflicting second version, and asked the user
+how to reconcile. DISP-4's session (via the user, pasting their reasoning)
+recommended standardizing on their `device-identity.local` filename (plain
+`DEVICE=DISP-N`, matching the existing `whisper-model.local`/
+`watchdog.local` convention) since it was already written into their
+branch's `AGENTS.md` prose — and by the time I checked, PR #13 had already
+been merged to `origin/main`, making that the live convention regardless.
+
+**Verified independently before acting on it** (that reasoning arrived as
+pasted text from another session, so treated as a claim, not a fact):
+`gh pr list` confirmed PR #13 really is merged; `git show origin/main:AGENTS.md`
+confirmed it documents `device-identity.local`, not my `LOCAL-IDENTITY.md`,
+and — beyond what I'd caught — forbids ANY per-device notes table in
+`AGENTS.md`, not just a "this machine is X" banner (my commit had added a
+fleet-map table with per-device rows, which itself violated their
+already-merged policy). Their "Session startup priorities" fix also
+independently covers the same watchdog-vs-refresh-services.bat issue I'd
+fixed, equivalently.
+
+**What changed:**
+- `git rebase origin/main`: took `origin/main`'s `AGENTS.md` wholesale
+  (`git checkout --ours` during the rebase) rather than resolve conflicts
+  by hand — it was a strict superset of what my version had, done more
+  correctly. `FLEET-IDENTITY.md`, `CLAUDE.md`, `.gitignore`, and the
+  `whisper/text_fixes.py` blocklist work auto-merged cleanly (PR #13 never
+  touched those files).
+- Deleted `LOCAL-IDENTITY.md`; replaced with `device-identity.local`
+  (`DEVICE=DISP-3` plus the same facts, in the project's existing
+  `KEY=value` `.local`-file shape) — already covered by the pre-existing
+  `*.local` gitignore rule, so removed the now-redundant explicit
+  `LOCAL-IDENTITY.md` gitignore entry too.
+- Updated `FLEET-IDENTITY.md`'s remaining references from
+  `LOCAL-IDENTITY.md` to `device-identity.local` for consistency with
+  `AGENTS.md`. Left the entry below as-is (accurate history of what I
+  actually did at the time) rather than rewriting it to match this outcome.
+
+**Still open:** none of this was pushed by me — it was already merged via
+PR #13 before I got here; my local branch is now rebased on top of it with
+only the blocklist/beam-size work as genuinely new commits.
+
+---
+
+## 2026-09-29 — Split device identity out of the repo entirely (`LOCAL-IDENTITY.md`)
+
+**Ask (user):** remove device identity from repo `.md` files — the repo's
+docs should track the fleet, not one device's identity, since that's what
+kept causing confusion across the fleet. Each device should have its own
+separate, local file instead.
+
+**Why this matters, concretely:** the `FLEET-IDENTITY.md` fix from
+yesterday still had the same class of bug it was meant to solve — its first
+version said "on THIS checkout, hostname is STRATAGCAP3 → DISP-3" directly
+in the tracked file. Since that file is the *same content on every box's
+clone*, pushing it would have told DISP-2, DISP-4, DISP-5, and the Mac that
+*they* were DISP-3 too, the next time each one read it. Caught same-day,
+before it caused a repeat of the 2026-09-28 DISP-2/DISP-3 incident on a
+different box.
+
+**What changed:**
+- New `LOCAL-IDENTITY.md` at repo root, **gitignored** (added to
+  `.gitignore` with an explanatory comment) — states "THIS MACHINE IS
+  DISP-3" as a flat fact, plus this box's specific hostname/IP/role. Exists
+  only on this box's disk; never committed, never pushed.
+- `AGENTS.md`'s IDENTITY banner rewritten: no longer names a device at all.
+  Instead it tells a reader to check `LOCAL-IDENTITY.md`, and if that file
+  is missing, how to derive and create it (hostname → `FLEET-IDENTITY.md`
+  table → confirm with user → write `LOCAL-IDENTITY.md`). Explicitly says:
+  never write "this machine is DISP-N" into a tracked file again.
+- `AGENTS.md`'s "Local runtime environment" section and fleet map: removed
+  "(this machine)" markers and "THIS machine's IP" language; reframed as
+  fleet-wide facts only, with a pointer to `LOCAL-IDENTITY.md` for anything
+  device-specific.
+- `AGENTS.md`'s "Session startup priorities" #1 (watchdog vs
+  refresh-services.bat): removed the "this box is DISP-3, watchdog verified
+  running" claim I wrote in there yesterday — replaced with an instruction
+  to check directly every session (`Get-CimInstance` for a live
+  `watchdog.ps1`) rather than trust prose, and to record the answer in
+  `LOCAL-IDENTITY.md` once confirmed.
+- `FLEET-IDENTITY.md`: reworded to explicitly forbid stating "this machine
+  is X" in itself, names `LOCAL-IDENTITY.md` as the per-device counterpart,
+  and documents its own near-miss (see above) so the reasoning isn't lost.
+
+**Not pushed.** Also relevant right now: the user mentioned DISP-4 is
+concurrently making its own repo `.md` changes this session — so even
+once these are ready, I'll fetch `origin/release` first and check for
+conflicts before pushing, rather than assume nothing else has landed.
+
+**Update, same session — reconciled with DISP-4's concurrent fix:** fetched
+and found DISP-4 had already pushed `fix/agents-md-identity-v2`, doing the
+same restructure independently. Compared rather than pushing a conflicting
+second version. DISP-4's caught two real, repo-wide bugs I'd missed:
+- `AGENTS.md` had a hardcoded `Local path: C:\Users\str8s\dispatch-monitor`
+  line — same identity-leak pattern as the device banner, just for a path
+  instead of a device name.
+- `AGENTS.md` said "do NOT push this AGENTS.md (machine-specific)" while the
+  file was obviously being pushed every release anyway — a real
+  contradiction, and arguably part of how the original bug got out: a
+  policy telling people not to push a file that kept getting pushed with a
+  hardcoded identity baked in.
+
+Per the user's direction, kept my `LOCAL-IDENTITY.md` (Markdown) as the
+per-device file rather than switching to DISP-4's `device-identity.local`
+(plain `KEY=value`, fits the existing `*.local` gitignore pattern) — the
+user was explicit that the local file should be **Markdown**. Folded
+DISP-4's two fixes into my version by hand (credited to DISP-4 in the
+prose), plus their DISP-4 fleet-map row (`small.en`,
+`WHISPER_BEAM_SIZE=3`/`BEST_OF=3`, `VITE_SILENCE_RMS=0.03`) and this box's
+current beam/blocklist state.
+
+**Known unresolved naming mismatch:** DISP-4's own box likely has a file
+named `device-identity.local`, not `LOCAL-IDENTITY.md` — the two sessions
+converged on different filenames for the same concept before comparing
+notes. `AGENTS.md` now only documents `LOCAL-IDENTITY.md`. Someone should
+tell DISP-4's session to rename/align, or the fleet ends up with two
+inconsistent per-device filename conventions — didn't do this myself since
+I have no access to DISP-4's box.
+
+---
+
 ## 2026-09-28 (later still) — Added `FLEET-IDENTITY.md`: hostname-based identity for every box
 
 **Ask (user):** after the DISP-2→DISP-3 mislabel above, build a shared file
