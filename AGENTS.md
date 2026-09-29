@@ -5,41 +5,56 @@
 > (`AGENTS.md`) stays focused on fleet/device/ops context; `CLAUDE.md` is the
 > detailed incident-by-incident history.
 
-> **IDENTITY: see `FLEET-IDENTITY.md`.** Convention: hostname
-> `STRATAGCAP<N>` = fleet device `DISP-<N>`. On THIS checkout, hostname is
-> `STRATAGCAP3` → **DISP-3** (confirmed by the user 2026-09-28; repo at
-> `C:\Users\NoName\dispatch-monitor`). Don't just trust this line if it's
-> stale — re-run `$env:COMPUTERNAME` and check `FLEET-IDENTITY.md` yourself;
-> that file, not this banner, is the source of truth, since this exact
-> banner went stale and wrong once already (see `CLAUDE.md` 2026-09-28).
-> **Note:** this box's actual LAN IP was observed as `192.168.4.74` on
-> 2026-09-28, on a different subnet than the `192.168.6.53` this file
-> previously documented for DISP-3 — treat `.53` as unverified until checked
-> again with `ipconfig`. Work self-contained: do NOT probe or depend on other
-> DISP devices for config or shared services — their DBs/services are
-> localhost-bound and irrelevant here. When something is missing (e.g.
-> MongoDB URI), the fix comes from the user or this box, not from poking
-> other fleet boxes.
+> **IDENTITY:** this file is git-tracked and fleet-shared — pulled to every
+> DISP-N box (via the release-branch promotion flow) — so it must NEVER
+> assert which specific machine "this" box is. That exact mistake happened
+> **twice**: first a hardcoded "THIS MACHINE IS DISP-2" banner leaked to the
+> whole fleet on 2026-09-28, then the fix for it was itself replaced with a
+> hardcoded "DISP-3" banner (a different session's own checkout) the same
+> day. A device-identity banner in this file is the bug, not the fix.
+>
+> Real identity lives in exactly two places, neither of which is this file:
+> - **`FLEET-IDENTITY.md`** — the fleet-wide hostname → DISP-N convention
+>   and lookup table (tracked, shared — safe to keep here since it's a
+>   lookup table, not an assertion about "this" checkout).
+> - **`device-identity.local`** (repo root, `DEVICE=DISP-N`) — this specific
+>   box's own confirmed identity. Untracked, never committed (`*.local` is
+>   gitignored), so a pull can never overwrite it with another box's value.
+>
+> **Before doing anything device-specific:** read `device-identity.local`.
+> If it's missing, don't guess from this file's prose — check `hostname` /
+> `$env:COMPUTERNAME` against `FLEET-IDENTITY.md`, then ask the user to
+> confirm and create the file. Work self-contained regardless of which box
+> this is: do NOT probe or depend on other DISP devices for config or shared
+> services — their DBs/services are localhost-bound and irrelevant here.
+> When something is missing (e.g. MongoDB URI), the fix comes from the user
+> or this box, not from poking other fleet boxes.
 
 ## Project overview
 A full-stack dispatch monitoring dashboard. It captures live audio, transcribes speech, detects emergency keywords, and creates dispatch events stored in MongoDB Atlas.
 
 - Repo: `str8stratag-cmyk/dispatch-monitor`
-- Local path: `C:\Users\str8s\dispatch-monitor`
+- Local path: `C:\Users\<local Windows user>\dispatch-monitor` — the Windows
+  user/checkout path differs per box (same identity-leak bug as above: a
+  specific box's path was previously hardcoded here as fact).
 - Branch: `main`
 - Deployment: **Vercel retired** (switched to MongoDB Atlas + locally-run apps on the fleet, at agent advice) — see master `AGENTS.md`
 
-## Local runtime environment (this device)
+## Fleet runtime environment (per-device specifics — NOT this file's identity)
 
-This Windows machine is **DISP-3** (identity confirmed by the user 2026-09-28;
-this file previously — and incorrectly — described it as DISP-2). It runs
-Whisper watchdog-managed, per the fleet map below.
+> This section documents facts about individual fleet boxes for reference.
+> It does **not** assert which one you're on — that answer lives only in
+> `device-identity.local` (this box) and `FLEET-IDENTITY.md` (the fleet-wide
+> hostname → DISP-N table with per-device notes). Read those, not prose here,
+> to find out which row below (if any) is yours.
 
 > **FLEET WHISPER MODEL = `small.en` ON EVERY BOX (user decision 2026-09-28).**
 > No box runs `medium.en` or `turbo` anymore. `scripts/start-whisper.ps1` and
 > `whisper/whisper_service.py` default to `small.en`, and `start-whisper.ps1`
 > overrides a leftover `medium.en`/`turbo` in `whisper-model.local` to the
-> fleet standard (with a warning). The turbo/medium.en notes below are history.
+> fleet standard (with a warning). Per-box beam size is a separate, still
+> genuinely per-device tuning key (`WHISPER_BEAM_SIZE` in `whisper-model.local`,
+> default 5) — check that file, not this one, for a given box's actual value.
 
 **MongoDB (RESOLVED 2026-09-04):** the app is MongoDB-only (migrated from Supabase).
 Shared fleet cluster: **MongoDB Atlas** (`mongodb+srv`, host `nexus-disp.dndtjvg.
@@ -48,21 +63,17 @@ to (that's how the reconciler dedups across devices). Credentials live ONLY in e
 repo's `.env` (gitignored) — NEVER commit them, never write them into this file.
 If `.env` ever loses them, ask the user; do not hunt for MongoDB on other devices.
 
-- **Whisper endpoint (LAN):** THIS machine serves Whisper on `0.0.0.0:8178`.
-  Fleet map below lists `192.168.6.53` for DISP-3, but `ipconfig` on
-  2026-09-28 showed this box's actual address as `192.168.4.74` (different
-  subnet) — re-verify before pointing any other device at this box over LAN.
-
-**Fleet map (confirmed 2026-09-03, identity of this machine corrected 2026-09-28):**
-| Device | IP | Role |
+**Per-device notes on record** (may be stale — verify live against the box in
+front of you rather than trusting this table; see `FLEET-IDENTITY.md` for the
+hostname lookup and its own freshness caveats):
+| Device | LAN IP on record | Notes |
 |--------|----|------|
-| DISP-2 | 192.168.6.52 | Whisper small.en (off turbo since ~2026-09-25), dispatch :5000 (nexus :5001 retired from runtime 2026-09-18) |
-| **DISP-3 (this machine)** | 192.168.6.53 (unverified — see note above; observed `.4.74` 2026-09-28) | Whisper small.en (was medium.en until 2026-09-28), watchdog-managed (4h restart, 6h git pull), runs `trial/` reconciler every 3 min |
+| DISP-2 | `192.168.6.52` (verified 2026-09-02) | Was the fleet's Whisper v3 Turbo tester until ~2026-09-25; off turbo since, now `small.en` like every box. Runs dispatch on `:5000`. |
+| DISP-3 | `192.168.6.53` documented; `192.168.4.74` observed 2026-09-28 (different subnet, unresolved) | `small.en` since 2026-09-28 (was `medium.en`). Watchdog-managed (4h Whisper restart, 6h `git pull`), runs `trial/` reconciler every 3 min. |
+| DISP-4 | Not on record | Confirmed by the user (2026-09-28/29 session) — `small.en`, tuned `WHISPER_BEAM_SIZE=3`/`WHISPER_BEST_OF=3` and `VITE_SILENCE_RMS=0.03` (9% displayed) that session, both via that box's own `whisper-model.local`/`.env.local`. |
 
-Status reports mentioning "watchdog-managed, reconciler" now correctly
-describe THIS machine. The Azure Maps account
-(Client ID 65434727-…) is shared across the fleet; this machine uses the same key
-(stored in `.env`, gitignored).
+The Azure Maps account (Client ID 65434727-…) is shared across the entire
+fleet; every box uses the same key (stored in its own `.env`, gitignored).
 
 ## Release branch: what the fleet runs (2026-09-25, READ FIRST)
 
@@ -115,7 +126,13 @@ The fleet watchdog deploys **only `origin/release`**, not `main`.
   (the `whisper-model.local` block in `scripts/start-whisper.ps1`), and (2) the
   `whisperModel` event tagging (schema + storage + whisper.ts + routes stamp +
   whisper_service.py response). Do NOT push: the helper bats / detached start
-  scripts (upstream deleted those on purpose), or this AGENTS.md (machine-specific).
+  scripts (upstream deleted those on purpose). **`AGENTS.md` itself IS meant to
+  be pushed/shared** (corrected 2026-09-29) — the old "machine-specific, don't
+  push" guidance here was itself the root cause of the identity-leak bug: this
+  file kept getting pushed anyway with a hardcoded box identity baked into its
+  prose (twice — DISP-2, then DISP-3). The fix isn't to stop pushing it — it's
+  that the file must never assert a specific device's identity (see IDENTITY
+  note at top). Per-box specifics belong in the untracked `*.local` files.
 - **QA tooling (added 2026-09-04, local-only until push approved):**
   - `node scripts/accuracy-by-source.mjs [hours]` — per-source event stats from
     Atlas (count, avg transcript length, no-keyword %, no-coords %). First run
