@@ -12,6 +12,92 @@ they're incident history, not a TODO list.
 
 ---
 
+## 2026-09-28 (later still) — Added `FLEET-IDENTITY.md`: hostname-based identity for every box
+
+**Ask (user):** after the DISP-2→DISP-3 mislabel above, build a shared file
+so every box can learn its own identity from its hostname instead of a
+hand-maintained banner in `AGENTS.md` (the thing that just went stale).
+
+**Convention (from the user):** hostname `STRATAGCAP<N>` = fleet device
+`DISP-<N>` (`STRATAGCAP3` = DISP-3, `STRATAGCAP2` = DISP-2, etc.).
+
+**What changed:** new `FLEET-IDENTITY.md` at repo root — the convention, a
+per-hostname lookup table, and instructions for a box (or an agent session
+on it) to self-check via `$env:COMPUTERNAME` rather than trusting static
+prose. `AGENTS.md`'s identity banner now points at it instead of restating
+identity as fact.
+
+**Honesty check on the table:** I only independently verified DISP-3 (this
+box) in this session. DISP-2's IP (`192.168.6.52`) and DISP-3's documented
+IP (`192.168.6.53`, contradicted by the `192.168.4.74` this box actually
+has) are carried over from prior doc text, not re-checked. DISP-1, DISP-4,
+DISP-5 have no IP on record at all — the table says so explicitly rather
+than inventing values. The Mac doesn't fit the `STRATAGCAP<N>` pattern and
+has no resolved identity method yet.
+
+**Not pushed** — same rule as the identity-correction commit above. This
+file only helps the other four boxes once it's actually shared with them;
+flagging that to the user rather than assuming when to push.
+
+**Update, same session:** user confirmed the Mac is `DISP-7` — breaks the
+numeric `STRATAGCAP<N>` sequence, so it's recorded as a named exception in
+`FLEET-IDENTITY.md` rather than forcing it into the pattern. Its hostname
+is still unknown; not guessed, left for whoever's on that box to fill in.
+
+---
+
+## 2026-09-28 (later) — Corrected this box's identity in AGENTS.md (DISP-2 → DISP-3); unblocked pulls
+
+**What was wrong:** `AGENTS.md` on this checkout asserted `THIS MACHINE IS
+DISP-2`, with a fleet map, LAN IP, and startup instructions written for
+DISP-2 (e.g. "the watchdog is intentionally not the startup path — use
+refresh-services.bat"). A prior local, uncommitted edit had already flagged
+this as wrong and reworked it to say DISP-3, but the release branch (PR #12,
+`aa62860`) also touched `AGENTS.md`, so the uncommitted local edit and the
+incoming release commit conflicted — this box's `git pull` would keep
+failing/being skipped until that was resolved by hand.
+
+**Verified independently before touching anything** (did not trust either
+the old file text or the staged edit's claims at face value):
+- Real hostname: `STRATAGCAP3`. Real LAN IP (`ipconfig`): `192.168.4.74` —
+  on a different subnet than either `192.168.6.52` (DISP-2) or `192.168.6.53`
+  (DISP-3) as previously documented. **Not re-verified against a physical
+  network map — flagged as unverified in AGENTS.md, not asserted as fact.**
+- `whisper-model.local` already has `WHISPER_MODEL=small.en` — matches the
+  fleet standard from PR #12.
+- `scripts\watchdog.ps1` **is genuinely running** (PID 10256, confirmed via
+  `Get-CimInstance Win32_Process`) — contradicts the old AGENTS.md text
+  claiming the watchdog isn't this box's startup path. The staged edit's
+  claim of PID 4156 for this was wrong; corrected to the real PID/method.
+- The user confirmed directly in chat: "THIS MACHINE IS DISP-3."
+
+**What changed:** `git stash`'d the local `AGENTS.md` edit, fast-forward
+pulled `origin/release` (now at `aa62860`, bringing in the `small.en`
+fleet-standard content from PR #12), then re-applied an identity correction
+by hand on top — DISP-2 → DISP-3 in the identity banner, "Local runtime
+environment" section, Whisper endpoint note, fleet map, and the "Session
+startup priorities" section (the watchdog-vs-refresh-services.bat guidance,
+which was actively dangerous to follow as originally written on this box).
+Kept everything release-side (small.en defaults, model-override mapping)
+untouched.
+
+**Not pushed.** Per this file's own standing rule ("Agents: never push to
+`release` ... never merge to `main` without the owner's explicit approval in
+the current conversation"), this is a local commit only. Other fleet boxes'
+copies of `AGENTS.md` are unaffected.
+
+**Still open / not verified:** the large historical narrative later in
+`AGENTS.md` (turbo policy, unpushed-commit counts, `KIMI_RESUME.md`
+"Session Startup Ritual", the 2026-09-21/22 incident log) reads as DISP-2's
+history and was left as-is — not rewritten for DISP-3, just no longer
+contradicted by the top-of-file identity banner. Worth a fuller pass if this
+box's real operational history matters going forward. The `192.168.6.53`
+fleet-map entry for this box is unverified, not corrected to `.4.74`, since
+I don't know if `.53` is a static assignment this box should still claim
+(e.g. via DHCP reservation) or just stale.
+
+---
+
 ## 2026-09-28 — Whole fleet standardized on Whisper `small.en`
 
 **Ask (user):** put every box on `small.en`; DISP-2 has been off turbo for

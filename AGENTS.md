@@ -5,30 +5,63 @@
 > (`AGENTS.md`) stays focused on fleet/device/ops context; `CLAUDE.md` is the
 > detailed incident-by-incident history.
 
-> **IDENTITY: THIS MACHINE IS DISP-2** (192.168.6.52). Work self-contained:
-> do NOT probe or depend on other DISP devices for config or shared services —
-> their DBs/services are localhost-bound and irrelevant here. When something is
-> missing (e.g. MongoDB URI), the fix comes from the user or this box, not from
-> poking DISP-3/Mac.
+> **IDENTITY:** this file is git-tracked and fleet-shared — pulled to every
+> DISP-N box (via the release-branch promotion flow) — so it must NEVER
+> assert which specific machine "this" box is. That exact mistake happened
+> **twice**: first a hardcoded "THIS MACHINE IS DISP-2" banner leaked to the
+> whole fleet on 2026-09-28, then the fix for it was itself replaced with a
+> hardcoded "DISP-3" banner (a different session's own checkout) the same
+> day. A device-identity banner in this file is the bug, not the fix.
+>
+> Real identity lives in exactly two places, neither of which is this file:
+> - **`FLEET-IDENTITY.md`** — the fleet-wide hostname → DISP-N convention
+>   and lookup table (tracked, shared — safe to keep here since it's a
+>   lookup table, not an assertion about "this" checkout).
+> - **`device-identity.local`** (repo root, `DEVICE=DISP-N`) — this specific
+>   box's own confirmed identity. Untracked, never committed (`*.local` is
+>   gitignored), so a pull can never overwrite it with another box's value.
+>
+> **Before doing anything device-specific:** read `device-identity.local`.
+> If it's missing, don't guess from this file's prose — check `hostname` /
+> `$env:COMPUTERNAME` against `FLEET-IDENTITY.md`, then ask the user to
+> confirm and create the file. Work self-contained regardless of which box
+> this is: do NOT probe or depend on other DISP devices for config or shared
+> services — their DBs/services are localhost-bound and irrelevant here.
+> When something is missing (e.g. MongoDB URI), the fix comes from the user
+> or this box, not from poking other fleet boxes.
 
 ## Project overview
 A full-stack dispatch monitoring dashboard. It captures live audio, transcribes speech, detects emergency keywords, and creates dispatch events stored in MongoDB Atlas.
 
 - Repo: `str8stratag-cmyk/dispatch-monitor`
-- Local path: `C:\Users\str8s\dispatch-monitor`
+- Local path: `C:\Users\<local Windows user>\dispatch-monitor` — the Windows
+  user/checkout path differs per box (same identity-leak bug as above: a
+  specific box's path was previously hardcoded here as fact).
 - Branch: `main`
 - Deployment: **Vercel retired** (switched to MongoDB Atlas + locally-run apps on the fleet, at agent advice) — see master `AGENTS.md`
 
-## Local runtime environment (this device)
+## Fleet-wide orders (apply to every box — no device specifics here)
 
-This Windows machine is **DISP-2**. It was the fleet's Whisper v3 Turbo tester
-until ~2026-09-25; it has been **off turbo** since then (user, 2026-09-28).
+> This file carries fleet-wide conventions and mandates only. It does **not**
+> — and must not — record facts about any individual device, including this
+> one: not an IP, not a tuning value, not "device X does Y." A session on
+> DISP-4 fixing an AGENTS.md problem does not get to write notes about DISP-2
+> or DISP-3 here either — that's overreach the same way a hardcoded identity
+> banner was. Per-device facts belong ONLY in that device's own local,
+> untracked files (`device-identity.local`, `whisper-model.local`,
+> `.env.local`), recorded by a session actually running on that device.
+> `FLEET-IDENTITY.md` is the one exception: a hostname → DISP-N convention
+> table, because every box needs the *same* lookup mechanism to find itself
+> — but even there, don't add per-device operational notes beyond the
+> identity lookup itself.
 
 > **FLEET WHISPER MODEL = `small.en` ON EVERY BOX (user decision 2026-09-28).**
 > No box runs `medium.en` or `turbo` anymore. `scripts/start-whisper.ps1` and
 > `whisper/whisper_service.py` default to `small.en`, and `start-whisper.ps1`
 > overrides a leftover `medium.en`/`turbo` in `whisper-model.local` to the
-> fleet standard (with a warning). The turbo/medium.en notes below are history.
+> fleet standard (with a warning). Beam size is a separate, genuinely
+> per-device tuning key (`WHISPER_BEAM_SIZE` in `whisper-model.local`,
+> default 5) — that file, not this one, is where a box's actual value lives.
 
 **MongoDB (RESOLVED 2026-09-04):** the app is MongoDB-only (migrated from Supabase).
 Shared fleet cluster: **MongoDB Atlas** (`mongodb+srv`, host `nexus-disp.dndtjvg.
@@ -37,22 +70,8 @@ to (that's how the reconciler dedups across devices). Credentials live ONLY in e
 repo's `.env` (gitignored) — NEVER commit them, never write them into this file.
 If `.env` ever loses them, ask the user; do not hunt for MongoDB on other devices.
 
-- **Whisper endpoint (LAN):** `http://192.168.6.52:8178` — THIS machine's wired IP on
-  the TL-SG608 switch (verified 2026-09-02; the earlier report claiming `.53` was
-  wrong). `192.168.6.53` is a DIFFERENT device (MAC 04-7b-cb-a3-6c-ed) running its own
-  Whisper (`small.en` since 2026-09-28, like every box).
-  Old wireless IP `192.168.5.251` is retired.
-
-**Fleet map (confirmed 2026-09-03):**
-| Device | IP | Role |
-|--------|----|------|
-| **DISP-2 (this machine)** | 192.168.6.52 | Whisper small.en (off turbo since ~2026-09-25), dispatch :5000 (nexus :5001 retired from runtime 2026-09-18) |
-| DISP-3 | 192.168.6.53 | Whisper small.en (was medium.en until 2026-09-28), watchdog-managed (4h restart, 6h git pull), runs `trial/` reconciler every 3 min |
-
-Status reports mentioning "watchdog-managed, reconciler, .53" come from the
-DISP-3 box — do not mistake them for this machine's state. The Azure Maps account
-(Client ID 65434727-…) is shared across the fleet; this machine uses the same key
-(stored in `.env`, gitignored).
+The Azure Maps account (Client ID 65434727-…) is shared across the entire
+fleet; every box uses the same key (stored in its own `.env`, gitignored).
 
 ## Release branch: what the fleet runs (2026-09-25, READ FIRST)
 
@@ -105,7 +124,13 @@ The fleet watchdog deploys **only `origin/release`**, not `main`.
   (the `whisper-model.local` block in `scripts/start-whisper.ps1`), and (2) the
   `whisperModel` event tagging (schema + storage + whisper.ts + routes stamp +
   whisper_service.py response). Do NOT push: the helper bats / detached start
-  scripts (upstream deleted those on purpose), or this AGENTS.md (machine-specific).
+  scripts (upstream deleted those on purpose). **`AGENTS.md` itself IS meant to
+  be pushed/shared** (corrected 2026-09-29) — the old "machine-specific, don't
+  push" guidance here was itself the root cause of the identity-leak bug: this
+  file kept getting pushed anyway with a hardcoded box identity baked into its
+  prose (twice — DISP-2, then DISP-3). The fix isn't to stop pushing it — it's
+  that the file must never assert a specific device's identity (see IDENTITY
+  note at top). Per-box specifics belong in the untracked `*.local` files.
 - **QA tooling (added 2026-09-04, local-only until push approved):**
   - `node scripts/accuracy-by-source.mjs [hours]` — per-source event stats from
     Atlas (count, avg transcript length, no-keyword %, no-coords %). First run
@@ -203,17 +228,23 @@ The fleet watchdog deploys **only `origin/release`**, not `main`.
 
 Every time this box is fired up, work in this order:
 
-1. **Fire up / check the full stack.** ON THIS BOX the watchdog is intentionally
-   not the startup path — use `scripts\refresh-services.bat` (Desktop
-   shortcuts; Task Scheduler `Dispatch Services Autostart` covers logon).
-   It starts Whisper (8178) and Dispatch Monitor (5000). Nexus :5001 was
-   retired from this box's runtime 2026-09-18 — push-only mirror, never run —
-   though the refresh bat's kill sweep still frees :5001. Verify 8178/health
-   and :5000/api/events are responding before doing anything else. Full
-   ritual (calls review, Whisper tuning order): see `KIMI_RESUME.md` →
-   "Session Startup Ritual". NEVER start a second watchdog (e.g.
-   `start-watchdog.bat`) while one is running — two watchdogs race restarts
-   and wedge the apps. App output goes to
+1. **Fire up / check the full stack.** Whether the watchdog (`scripts\watchdog.ps1`)
+   or a manual refresh script (`scripts\refresh-services.bat`) is this box's
+   startup path is a per-device fact — check what's actually running
+   (process list) rather than trusting prose here, since this exact text was
+   previously written assuming one specific box's setup and went stale when
+   read on a different box. If the watchdog IS running: it supervises Whisper
+   restarts (4h) and `git pull` (6h) on `origin/release`, and you must NOT
+   run `refresh-services.bat` or any Desktop refresh shortcut alongside it —
+   its kill sweep races the watchdog's restarts and wedges the apps, per the
+   warning below. If Whisper or the app is down, prefer letting the watchdog
+   recover it, or start it directly (`scripts\start-whisper.ps1` / `npm run dev`)
+   rather than the refresh bat. Verify 8178/health and :5000/api/events are
+   responding before doing anything else. Full ritual (calls review, Whisper
+   tuning order): see `KIMI_RESUME.md` → "Session Startup Ritual" (also
+   written from one box's perspective — verify before trusting). NEVER
+   start a second watchdog (e.g. `start-watchdog.bat`) while one is running
+   — two watchdogs race restarts and wedge the apps. App output goes to
    `dispatch-monitor\logs\dispatch-monitor.log` and
    `nexus-dispatch\logs\nexus-dispatch.log` — if an app won't bind its port,
    check those logs first. A healthy Whisper instance shows TWO python.exe
