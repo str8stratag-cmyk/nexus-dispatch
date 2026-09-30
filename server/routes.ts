@@ -182,7 +182,9 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   // Whisper small hears "Busch" as "bridge" before a block number.
   [/\bbridge\s+(\d{1,3})\b/gi, "and $1"],
   [/\bbusch(?:\s+blvd|\s+boulevard)?\b(?!\s+gardens)/gi, "Busch Blvd"],
-  [/\bbush\b/gi, "Busch Blvd"],
+  // "bushed" (2026-09-30 call review): \bbush\b alone doesn't match — "bush"
+  // and "ed" are one contiguous word, no boundary between them.
+  [/\bbush(?:ed)?\b/gi, "Busch Blvd"],
   // Whisper hears "Busch" as "e-brush" — map the mangling to the corridor.
   [/\be[- ]brush\b(?!\s+gardens)/gi, "Busch Blvd"],
   [/\bsligh(?:\s+ave(?:nue)?)?\b/gi, "Sligh Ave"],

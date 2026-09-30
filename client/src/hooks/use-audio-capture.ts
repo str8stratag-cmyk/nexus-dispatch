@@ -153,8 +153,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
 
     const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
     const chunks: Blob[] = [];
-    let rmsSum = 0;
-    let rmsCount = 0;
+    let peakRms = 0;
     recorderRef.current = recorder;
 
     const sampleRms = () => {
@@ -167,8 +166,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
         }, 0);
         return Math.sqrt(sumSquares / data.length);
       })() : 0;
-      rmsSum += currentRms;
-      rmsCount++;
+      if (currentRms > peakRms) peakRms = currentRms;
       return currentRms;
     };
 
@@ -181,8 +179,14 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       recorderRef.current = null;
       recorderTimerRef.current = null;
       clearInterval(rmsInterval);
-      const avgRms = rmsCount > 0 ? rmsSum / rmsCount : 0;
-      const isSilent = avgRms < SILENCE_RMS;
+      // Gate on the chunk's PEAK sample, not the average (2026-09-30 call
+      // review: a real Signal 4 was almost missed because a short, loud
+      // transmission inside an otherwise-quiet 4s chunk got diluted below
+      // the average threshold — the whole chunk would have been dropped
+      // before ever reaching Whisper). A chunk is silent only if even its
+      // loudest 200ms sample stayed under the gate; this only ever sends
+      // MORE audio to Whisper than the old average-based gate did, never less.
+      const isSilent = peakRms < SILENCE_RMS;
       const blob = new Blob(chunks, { type: "audio/webm" });
       if (transcribePendingRef.current < 2) {
         transcribePendingRef.current += 1;

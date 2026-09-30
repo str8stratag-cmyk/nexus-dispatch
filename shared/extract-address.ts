@@ -139,7 +139,9 @@ const ADDRESS_HOMOPHONES: [RegExp, string][] = [
   [/\b30th(?:\s+st(?:reet)?)?\b/gi, "30th St"],
   [/\b40th(?:\s+st(?:reet)?)?\b/gi, "40th St"],
   [/\babbot\s+bush\b/gi, "Busch"],
-  [/\bbush\b/gi, "Busch"],
+  // "bushed" (2026-09-30 call review): \bbush\b alone doesn't match — "bush"
+  // and "ed" are one contiguous word, no boundary between them.
+  [/\bbush(?:ed)?\b/gi, "Busch"],
   [/\be-brush\b/gi, "Busch"],
   [/\bbresh\b/gi, "Busch"],
   // Whisper small hears "Busch" as "bridge" before a block number

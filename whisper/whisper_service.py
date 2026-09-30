@@ -90,8 +90,12 @@ HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bflorida tech\b", re.IGNORECASE), "Florida tag"),
     (re.compile(r"\bflirtag\b", re.IGNORECASE), "Florida tag"),
     # "bush" is nearly always Busch Blvd in Tampa road context; literal
-    # shrubbery mentions are rare and harmless if renamed.
-    (re.compile(r"\bbush\b", re.IGNORECASE), "Busch"),
+    # shrubbery mentions are rare and harmless if renamed. "bushed" (2026-09-30
+    # call review, "each bound bushed" for "eastbound Busch"): \bbush\b alone
+    # doesn't match it — "bush" and "ed" are one contiguous word.
+    (re.compile(r"\bbush(?:ed)?\b", re.IGNORECASE), "Busch"),
+    # "eastbound" heard as two words, "bound" swallowing the "t".
+    (re.compile(r"\beach\s+bound\b", re.IGNORECASE), "eastbound"),
     # Street-name garbles (2026-09-18 call review, 500 events).
     (re.compile(r"\bmckin\w*\b", re.IGNORECASE), "McKinley"),
     (re.compile(r"\bmcdill+\b", re.IGNORECASE), "MacDill"),

@@ -15,6 +15,9 @@ const cases: [string, string | null, string | null][] = [
   // Bare major roads now extract (user request)
   ["SIGNAL 4 A HILLSBOROUGH AND ARMENIA", "Hillsborough Ave", null],
   ["break on busch and 56th", "56th St", "Busch Blvd"],
+  // "bushed" (2026-09-30 call review, real missed/garbled call): \bbush\b
+  // alone doesn't match "bushed" - no word boundary between "bush" and "ed".
+  ["there's a signal 4 with injuries, eastbound bushed", "eastbound Busch Blvd", null],
   ["on floribraska near sligh", "Nebraska Ave", "Sligh Ave"],
   ["signal four at fowler fletcher", "Fletcher Ave", "Fowler Ave"],
   ["two fifty eastbounder on 50th", "50th St", null],
