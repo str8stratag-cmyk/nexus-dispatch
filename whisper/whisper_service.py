@@ -96,6 +96,15 @@ HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bbush(?:ed)?\b", re.IGNORECASE), "Busch"),
     # "eastbound" heard as two words, "bound" swallowing the "t".
     (re.compile(r"\beach\s+bound\b", re.IGNORECASE), "eastbound"),
+    # Selmon/Crosstown Expressway (2026-09-30, real DISP-5 quarantine miss:
+    # "settlement expressway" for "Selmon Expressway"; also "salmon"/
+    # "sandman"/"sellman"). When "expressway"/"expy" is actually said, keep
+    # it in the fixed text. Real dispatchers say it bare ~98% of the time
+    # (user, 2026-09-30) — the bare fallback below (must run AFTER this one:
+    # once "expressway"/"expy" is consumed here, it can't double-match) is
+    # what catches the common case.
+    (re.compile(r"\b(?:settlement|salmon|sandman|sellman)\s+(?:expressway|expy)\b", re.IGNORECASE), "Selmon Expressway"),
+    (re.compile(r"\b(?:settlement|salmon|sandman|sellman)\b", re.IGNORECASE), "Selmon"),
     # Street-name garbles (2026-09-18 call review, 500 events).
     (re.compile(r"\bmckin\w*\b", re.IGNORECASE), "McKinley"),
     (re.compile(r"\bmcdill+\b", re.IGNORECASE), "MacDill"),

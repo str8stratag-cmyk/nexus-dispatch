@@ -191,6 +191,14 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   [/\bkennedy(?:\s+blvd|\s+boulevard)?\b/gi, "Kennedy Blvd"],
   [/\bbroadway(?:\s+ave(?:nue)?)?\b/gi, "Broadway Ave"],
   [/\b(?:lake\s+)?nona(?:\s+(?:road|rd|blvd|boulevard|pkwy|parkway))?\b/gi, "Nona"],
+  // Selmon/Crosstown Expressway (2026-09-30, real DISP-5 quarantine miss:
+  // "settlement expressway" for "Selmon Expressway"; also "salmon"/
+  // "sandman"/"sellman"). Bare match, no "expressway"/"expy" required —
+  // real dispatchers say it bare ~98% of the time (user, 2026-09-30), same
+  // as "Selmon"/"Crosstown" below.
+  [/\b(?:settlement|salmon|sandman|sellman)(?:\s+expressway|\s+expy)?\b/gi, "Selmon Expy"],
+  [/\bselmon(?:\s+expressway|\s+expy)?\b/gi, "Selmon Expy"],
+  [/\bcrosstown(?:\s+expressway|\s+expy)?\b/gi, "Selmon Expy"],
   [/\bbayshore(?:\s+blvd|\s+boulevard)?\b/gi, "Bayshore Blvd"],
   [/\bwest\s+shore(?:\s+blvd|\s+boulevard)?\b/gi, "West Shore Blvd"],
   [/\bgandy(?:\s+blvd|\s+boulevard)?\b/gi, "Gandy Blvd"],
@@ -582,7 +590,7 @@ const STREET_SUFFIX_ONLY = new Set([
   "lane", "ln", "court", "ct", "circle", "cir", "highway", "hwy", "parkway", "pkwy",
   "place", "pl", "terrace", "ter", "trail", "trl", "way", "loop", "cove", "point",
   "run", "ridge", "rdg", "spur", "plaza", "sq", "square", "alley", "bridge", "bypass",
-  "causeway", "center", "centre", "commons", "curve", "divide", "estate", "expressway",
+  "causeway", "center", "centre", "commons", "curve", "divide", "estate", "expressway", "expy",
   "freeway", "garden", "gardens", "gate", "green", "grove", "heights", "hill", "hills",
   "hollow", "island", "isle", "junction", "knoll", "lake", "landings", "mall", "manor",
   "meadow", "meadows", "mill", "mills", "mission", "mont", "mount", "mountain", "neck",

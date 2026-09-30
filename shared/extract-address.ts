@@ -7,7 +7,7 @@ const STREET_SUFFIXES = new Set([
   "lane", "ln", "court", "ct", "circle", "cir", "highway", "hwy", "parkway", "pkwy",
   "place", "pl", "terrace", "ter", "trail", "trl", "way", "loop", "cove", "point",
   "run", "ridge", "rdg", "spur", "plaza", "sq", "square", "alley", "bridge", "bypass",
-  "causeway", "center", "centre", "commons", "curve", "divide", "estate", "expressway",
+  "causeway", "center", "centre", "commons", "curve", "divide", "estate", "expressway", "expy",
   "freeway", "garden", "gardens", "gate", "green", "grove", "heights", "hill", "hills",
   "hollow", "island", "isle", "junction", "knoll", "lake", "landings", "mall", "manor",
   "meadow", "meadows", "mill", "mills", "mission", "mont", "mount", "mountain", "neck",
@@ -63,6 +63,16 @@ const CROSS_LINKERS = new Set(["and", "amd", "at", "in", "near", "by", "/", "bet
 // These are corrected BEFORE street extraction so "mcdull and mlk" becomes
 // "mcdill and mlk" and the address parser can find the real street names.
 const ADDRESS_HOMOPHONES: [RegExp, string][] = [
+  // Selmon/Crosstown Expressway (2026-09-30, real DISP-5 quarantine miss:
+  // "settlement expressway" for "Selmon Expressway"; also "salmon"/
+  // "sandman"/"sellman"). Bare match, no "expressway"/"expy" required —
+  // real dispatchers say it bare ~98% of the time (user, 2026-09-30), same
+  // as "Selmon"/"Crosstown" below. Accepted tradeoff: a literal, unrelated
+  // "salmon"/"sandman" mention in dispatch chatter would also get rewritten,
+  // judged unlikely enough in this domain to be worth catching the common case.
+  [/\b(?:settlement|salmon|sandman|sellman)(?:\s+expressway|\s+expy)?\b/gi, "Selmon Expy"],
+  [/\bselmon(?:\s+expressway|\s+expy)?\b/gi, "Selmon Expy"],
+  [/\bcrosstown(?:\s+expressway|\s+expy)?\b/gi, "Selmon Expy"],
   [/\bgandhi\s+boulevard\b/gi, "Gandy Blvd"],
   [/\bgandhi\s+blvd\b/gi, "Gandy Blvd"],
   [/\bgandhi\b/gi, "Gandy"],
@@ -424,6 +434,7 @@ const KNOWN_STREET_FALLBACK: [RegExp, string][] = [
   [/\blois\b/i, "Lois Ave"],
   [/\bhimes\b|\bhines\b/i, "Himes Ave"],
   [/\bselmon\b/i, "Selmon Expy"],
+  [/\bcrosstown\b/i, "Selmon Expy"],
   [/\bcurtis\b/i, "Curtis St"],
   [/\bmlk\b|\bmartin\s+luther\s+king\b/i, "MLK Blvd"],
   [/\bi\s*-\s*275\b/i, "I-275"],
@@ -511,7 +522,7 @@ export function applyAddressHomophones(text: string): string {
 // detected — dispatchers name them bare ("on Hillsborough", "at Busch and
 // 56th") and those calls used to be dropped entirely. Tested AFTER homophone
 // correction so mishearings (gandhi -> Gandy) still count.
-const MAJOR_ROAD_RE = /\b(Florida Ave|Nebraska Ave|Hillsborough Ave|Fowler Ave|Fletcher Ave|Waters Ave|Himes Ave|Dale Mabry|Columbus Ave|Memorial Highway|50th St|56th St|30th St|Busch Blvd|Sligh Ave|Kennedy Blvd|Martin Luther King Jr Blvd|Cypress|Broadway Ave|Bayshore Blvd|Gandy Blvd|West Shore Blvd)\b/i;
+const MAJOR_ROAD_RE = /\b(Florida Ave|Nebraska Ave|Hillsborough Ave|Fowler Ave|Fletcher Ave|Waters Ave|Himes Ave|Dale Mabry|Columbus Ave|Memorial Highway|50th St|56th St|30th St|Busch Blvd|Sligh Ave|Kennedy Blvd|Martin Luther King Jr Blvd|Cypress|Broadway Ave|Bayshore Blvd|Gandy Blvd|West Shore Blvd|Selmon Expy)\b/i;
 
 export function containsMajorRoad(transcript: string): boolean {
   if (!transcript) return false;

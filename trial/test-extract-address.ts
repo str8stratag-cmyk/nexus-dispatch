@@ -18,6 +18,21 @@ const cases: [string, string | null, string | null][] = [
   // "bushed" (2026-09-30 call review, real missed/garbled call): \bbush\b
   // alone doesn't match "bushed" - no word boundary between "bush" and "ed".
   ["there's a signal 4 with injuries, eastbound bushed", "eastbound Busch Blvd", null],
+  // Selmon/Crosstown Expressway (2026-09-30 call review, real DISP-5 event
+  // that went to quarantine instead of resolving): Whisper heard "Selmon"
+  // as "settlement".
+  ["this is 22nd street and settlement expressway also known as the crosstown expressway", "22nd street", "Selmon Expy"],
+  ["signal 4 on the crosstown expressway", "Selmon Expy", null],
+  ["signal 4 on the crosstown", "Selmon Expy", null],
+  ["signal 4 on the salmon expressway", "Selmon Expy", null],
+  ["signal 4 on the sandman expressway", "Selmon Expy", null],
+  ["signal 4 on the sellman expressway", "Selmon Expy", null],
+  // Bare, no "expressway" said - the common case (user, 2026-09-30: ~98% of
+  // real traffic omits it). Accepted tradeoff: this also means a literal,
+  // unrelated "salmon"/"sandman" mention would get rewritten too - judged
+  // unlikely enough in dispatch-radio context to be worth it.
+  ["signal 4 on the salmon", "Selmon Expy", null],
+  ["signal 4 on sandman", "Selmon Expy", null],
   ["on floribraska near sligh", "Nebraska Ave", "Sligh Ave"],
   ["signal four at fowler fletcher", "Fletcher Ave", "Fowler Ave"],
   ["two fifty eastbounder on 50th", "50th St", null],
