@@ -43,6 +43,9 @@ CASES = [
     ("Signal 4 and something in the LS drive.", "Signal 4 and something in the Ellis Dr"),
     ("south end at 2908 L.S. Drive", "south end at 2908 Ellis Dr"),
     ("crash at del mabry and columbus", "crash at Dale Mabry and columbus"),
+    ("signal 4 at dale may be and henderson", "signal 4 at Dale Mabry and henderson"),
+    ("no signal for Dale may be thank you", "no signal for Dale Mabry thank you"),
+    ("crash at dale may be.", "crash at Dale Mabry."),
     # --- negatives: must be unchanged ---
     ("single car crash on the ramp", None),
     ("we have a single unit on scene", None),
@@ -61,6 +64,8 @@ CASES = [
     ("attack on the floor", None),
     ("tampa police", None),
     ("els drive", None),
+    ("officer dale may be late", None),
+    ("dale may be on scene shortly", None),
 ]
 
 BLOCK_CASES = [

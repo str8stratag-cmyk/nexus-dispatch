@@ -13,7 +13,7 @@ const STREET_SUFFIXES = new Set([
   "meadow", "meadows", "mill", "mills", "mission", "mont", "mount", "mountain", "neck",
   "oval", "overlook", "park", "pass", "path", "pike", "pine", "pines", "prairie", "ranch",
   "river", "route", "row", "shoal", "shore", "spring", "springs", "station", "stravenue",
-  "mabry", "linebaugh", "cypress",
+  "mabry", "linebaugh", "cypress", "henderson", "handler",
   "stream", "summit", "throughway", "trace", "track", "trafficway", "trailer", "tunnel",
   "turnpike", "union", "valley", "vista", "village", "vllg", "ville", "walk", "wall",
   "waters", "wells",
@@ -22,6 +22,18 @@ const STREET_SUFFIXES = new Set([
 const DIRECTIONALS = new Set([
   "n", "s", "e", "w", "ne", "nw", "se", "sw",
   "north", "south", "east", "west",
+]);
+
+// Street names in STREET_SUFFIXES that are also ordinary words/surnames
+// (2026-10-01 review). "handler" only counts right after a directional
+// ("304 East Handler", never "K9 handler en route"); "henderson" never right
+// after a personal title ("officer Henderson on scene").
+const DIRECTIONAL_ONLY_SUFFIXES = new Set(["handler"]);
+const SURNAME_SUFFIXES = new Set(["henderson"]);
+const PERSON_TITLES = new Set([
+  "officer", "deputy", "sergeant", "sgt", "corporal", "cpl", "detective", "det",
+  "lieutenant", "lt", "captain", "capt", "trooper", "chief", "agent",
+  "mr", "mrs", "ms", "miss", "dr",
 ]);
 
 // Words that should not appear inside a street name and stop backtracking.
@@ -63,6 +75,21 @@ const CROSS_LINKERS = new Set(["and", "amd", "at", "in", "near", "by", "/", "bet
 // These are corrected BEFORE street extraction so "mcdull and mlk" becomes
 // "mcdill and mlk" and the address parser can find the real street names.
 const ADDRESS_HOMOPHONES: [RegExp, string][] = [
+  // "304 East Handler" (2026-10-01, real quarantine misses across DISP-1/
+  // 2/5/7, user-confirmed canonical name 2026-10-01). "Tambler" is the
+  // mishearing to fix; "Handler" itself is already correct when heard right.
+  [/\btambler\b/gi, "Handler"],
+  // Armenia Ave & Broad St (2026-10-01, real DISP-2/3 quarantine misses,
+  // user-confirmed). "Barat" for "Broad"; "Armenian" (the nationality
+  // adjective) for "Armenia".
+  // Street context only ("Barat Street", "West Barat") - "Barat" is also a
+  // surname, so it is never rewritten bare.
+  [/\bbarat(?=\s+st(?:reet)?\b)/gi, "Broad"],
+  [/(?<=\b(?:north|south|east|west)\s+)barat\b/gi, "Broad"],
+  // "Armenian" is a real word (could describe a person, not just the
+  // street) - unlike "Barat"/"Tambler", scoped to require "Avenue"/"Ave"
+  // (how it actually appeared in both real transcripts) rather than bare.
+  [/\barmenian\s+(?:avenue|ave)\b/gi, "Armenia Ave"],
   // Selmon/Crosstown Expressway (2026-09-30, real DISP-5 quarantine miss:
   // "settlement expressway" for "Selmon Expressway"; also "salmon"/
   // "sandman"/"sellman"). Bare match, no "expressway"/"expy" required —
@@ -100,7 +127,26 @@ const ADDRESS_HOMOPHONES: [RegExp, string][] = [
   [/\bdale\s+maybury\b/gi, "Dale Mabry"],
   [/\bdale\s+mayberry\b/gi, "Dale Mabry"],
   [/\bdealt\s+mabry\b/gi, "Dale Mabry"],
+  [/\bdale\s+labrie\b/gi, "Dale Mabry"],
+  // "Dale may be" (2026-09-30, live in the DISP-5 quarantine queue). Only in
+  // a street position, so a person named Dale ("officer Dale may be late")
+  // is left alone.
+  [/\bdale\s+may\s+be\b(?=\s*(?:[,.;:!?]|$)|\s+(?:&|(?:and|at|highway|hwy|north|south|east|west|northbound|southbound|thank)\b))/gi, "Dale Mabry"],
+  // "Delmarie Highway" / bare "South down Mabry" (2026-10-01, real
+  // quarantine misses - extracted a directional phrase instead of just the
+  // street, so geocoding failed even though the street itself was right).
+  [/\bdelmarie(?:\s+highway|\s+hwy)?\b/gi, "Dale Mabry Hwy"],
+  // Drop the directional prefix rather than keep it in the geocoded address
+  // - "Dale Mabry" alone is proven to geocode; a directional-prefixed
+  // compound is an unverified guess at a format that might fail the same way.
+  [/\bsouth\s*down(?:\s+dale)?\s+mabry\b/gi, "Dale Mabry"],
+  [/\bsouth\s*down(?:\s+dale)?\s+maybury\b/gi, "Dale Mabry"],
+  // "Kenney Boulevard" for "Kennedy Blvd" (2026-10-01, real quarantine miss).
+  // Requires the suffix - bare "Kenney" is a surname.
+  [/\bkenney\s+(?:blvd|boulevard)\b/gi, "Kennedy Blvd"],
   [/\bmaybury\b/gi, "Mabry"],
+  // NOTE: no Anderson -> Henderson rewrite. Both are real Tampa roads
+  // (owner decision 2026-10-01).
   [/\bloess\s+avenue\b/gi, "Lois Avenue"],
   [/\blowest\b/gi, "Lois"],
   [/\btimes\s+ave\b/gi, "Himes Ave"],
@@ -223,6 +269,10 @@ function isStandaloneDispatchNumber(word: string): boolean {
 function buildStreetCandidate(tokens: Token[], suffixIndex: number): StreetCandidate | null {
   const suffixToken = tokens[suffixIndex];
   if (!suffixToken || !suffixToken.isSuffix) return null;
+  const suffixWord = cleanWord(suffixToken.text);
+  const prevWord = suffixIndex > 0 ? cleanWord(tokens[suffixIndex - 1].text) : "";
+  if (DIRECTIONAL_ONLY_SUFFIXES.has(suffixWord) && !DIRECTIONALS.has(prevWord)) return null;
+  if (SURNAME_SUFFIXES.has(suffixWord) && PERSON_TITLES.has(prevWord)) return null;
 
   const parts: string[] = [suffixToken.text];
   let hasNumber = false;
@@ -244,8 +294,20 @@ function buildStreetCandidate(tokens: Token[], suffixIndex: number): StreetCandi
     // street"). Real street-name words don't carry periods mid-name.
     if (/\.$/.test(token.text)) break;
 
-    // If we already have a street number, don't absorb a second standalone digit
-    // (likely a Signal/District/Zone number that leaked through).
+    // Never absorb a standalone single digit immediately followed by a
+    // comma - it's virtually always a leaked Signal/District/Zone number
+    // with its natural pause still intact ("signal 4, Dale Mabry" was
+    // misparsed as address "4, Dale Mabry", 2026-09-30 real quarantine
+    // miss), never a real house number in this fleet's data. Scoped to the
+    // comma (not just "is it a standalone digit") so a signal number fused
+    // straight into a longer phrase with no pause ("signal 4 NISSAN MURANO
+    // RAN OFF ROAD...") still absorbs normally - same class of token,
+    // different punctuation, different real-world meaning. Previously only
+    // guarded a SECOND digit (hasNumber &&); a lone leading one with a
+    // comma slipped through the same way.
+    if (/^\d,$/.test(token.text)) break;
+    // Still never absorb a SECOND standalone digit after a street number
+    // (pre-existing guard, kept alongside the comma rule above).
     if (hasNumber && isStandaloneDispatchNumber(token.text)) break;
 
     // Allow numbers (street numbers or route numbers), directionals, and name words.
@@ -433,8 +495,19 @@ const KNOWN_STREET_FALLBACK: [RegExp, string][] = [
   [/\bmemorial\b/i, "Memorial Hwy"],
   [/\blois\b/i, "Lois Ave"],
   [/\bhimes\b|\bhines\b/i, "Himes Ave"],
+  // Henderson (2026-09-30 call review) - must stay after "Dale Mabry" above
+  // so matchKnownStreets returns [Dale Mabry, Henderson] in that order for
+  // "Dale Mabry and Henderson" (this array's iteration order determines
+  // result order, not the transcript's word order).
+  [/(?<!\b(?:officer|deputy|sergeant|sgt|corporal|cpl|detective|det|lieutenant|lt|captain|capt|trooper|chief|agent|mr|mrs|ms|miss|dr)\.?\s+)\bhenderson\b/i, "Henderson Blvd"],
   [/\bselmon\b/i, "Selmon Expy"],
   [/\bcrosstown\b/i, "Selmon Expy"],
+  // Armenia Ave & Broad St (2026-10-01, real DISP-2/3 quarantine misses,
+  // user-confirmed intersection). "Broad" only in a street context ("broad
+  // street", "west broad", paired with Armenia) - never bare, so "in broad
+  // daylight" does not produce an address.
+  [/\barmenia\b/i, "Armenia Ave"],
+  [/\bbroad\s+st(?:reet)?\b|\b(?:north|south|east|west)\s+broad\b|\barmenia\s+(?:ave(?:nue)?\s+)?(?:and|&|at)\s+broad\b|\bbroad\s+(?:and|&|at)\s+armenia\b/i, "Broad St"],
   [/\bcurtis\b/i, "Curtis St"],
   [/\bmlk\b|\bmartin\s+luther\s+king\b/i, "MLK Blvd"],
   [/\bi\s*-\s*275\b/i, "I-275"],
@@ -522,7 +595,7 @@ export function applyAddressHomophones(text: string): string {
 // detected — dispatchers name them bare ("on Hillsborough", "at Busch and
 // 56th") and those calls used to be dropped entirely. Tested AFTER homophone
 // correction so mishearings (gandhi -> Gandy) still count.
-const MAJOR_ROAD_RE = /\b(Florida Ave|Nebraska Ave|Hillsborough Ave|Fowler Ave|Fletcher Ave|Waters Ave|Himes Ave|Dale Mabry|Columbus Ave|Memorial Highway|50th St|56th St|30th St|Busch Blvd|Sligh Ave|Kennedy Blvd|Martin Luther King Jr Blvd|Cypress|Broadway Ave|Bayshore Blvd|Gandy Blvd|West Shore Blvd|Selmon Expy)\b/i;
+const MAJOR_ROAD_RE = /\b(Florida Ave|Nebraska Ave|Hillsborough Ave|Fowler Ave|Fletcher Ave|Waters Ave|Himes Ave|Dale Mabry|Columbus Ave|Memorial Highway|50th St|56th St|30th St|Busch Blvd|Sligh Ave|Kennedy Blvd|Martin Luther King Jr Blvd|Cypress|Broadway Ave|Bayshore Blvd|Gandy Blvd|West Shore Blvd|Selmon Expy|Henderson Blvd|Armenia Ave|Broad St)\b/i;
 
 export function containsMajorRoad(transcript: string): boolean {
   if (!transcript) return false;
