@@ -148,8 +148,28 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   [/\bhimes(?:\s+ave(?:nue)?)?\b/gi, "Himes Ave"],
   [/\bhale(?:\s+ave(?:nue)?)?\b/gi, "Hale Ave"],
   [/\bdale\s+mabry(?:\s+hwy|\s+highway)?\b/gi, "Dale Mabry Hwy"],
+  // "Dale Labrie" (2026-09-30, real DISP-2 quarantine miss) and "Dale may
+  // be" (2026-09-30, DISP-5 quarantine) are Dale Mabry mishearings.
+  // Anderson and Henderson are BOTH real Tampa roads, so "Anderson" is never
+  // rewritten to "Henderson" (owner decision 2026-10-01).
+  [/\bdale\s+labrie\b/gi, "Dale Mabry Hwy"],
+  [/\bdale\s+may\s+be\b(?=\s*(?:[,.;:!?]|$)|\s+(?:&|(?:and|at|highway|hwy|north|south|east|west|northbound|southbound|thank)\b))/gi, "Dale Mabry Hwy"],
+  [/\bhenderson(?:\s+blvd|\s+boulevard)?\b/gi, "Henderson Blvd"],
   [/\bcolumbus(?:\s+ave(?:nue)?)?\b/gi, "Columbus Ave"],
   [/\barmenia(?:\s+ave(?:nue)?)?\b/gi, "Armenia Ave"],
+  // Armenia Ave & Broad St, "304 East Handler" (2026-10-01, real quarantine
+  // misses, user-confirmed). "Armenian" requires "avenue"/"ave" - it's a
+  // real word (could describe a person) unlike "Barat"/"Tambler".
+  [/\barmenian\s+(?:avenue|ave)\b/gi, "Armenia Ave"],
+  // Broad St only in a street context - "broad/barat street", a
+  // directional ("west broad"), or paired with Armenia - never bare "broad"
+  // ("broad daylight"). Lookarounds, not capture groups, so the replacement
+  // stays a literal road name for knownRoadOnlyQuery().
+  [/\b(?:broad|barat)\s+st(?:reet)?\b/gi, "Broad St"],
+  [/(?<=\b(?:north|south|east|west)\s+)(?:broad|barat)\b(?!\s+st(?:reet)?\b)/gi, "Broad St"],
+  [/(?<=\bArmenia Ave\s+(?:and|&|at)\s+)(?:broad|barat)\b(?!\s+st(?:reet)?\b)/gi, "Broad St"],
+  [/\b(?:broad|barat)\b(?!\s+st(?:reet)?\b)(?=\s+(?:and|&|at)\s+armenia\b)/gi, "Broad St"],
+  [/\btambler\b/gi, "Handler"],
   [/\bmacdill(?:\s+ave(?:nue)?)?\b/gi, "MacDill Ave"],
   [/\bplatt(?:\s+st(?:reet)?)?\b/gi, "Platt St"],
   [/\bchannelside(?:\s+dr(?:ive)?)?\b/gi, "Channelside Dr"],

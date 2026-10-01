@@ -44,6 +44,9 @@ EXTRA_HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(?:floor|florida|kansas|flurry)\s+(?:attack|tag|tech)\b", re.IGNORECASE), "Florida tag"),
     (re.compile(r"\btampa\s+ponds\b", re.IGNORECASE), "Tampa Palms"),
     (re.compile(r"\b(?:del|dell|dail|daily)\s+mabry\b", re.IGNORECASE), "Dale Mabry"),
+    # "Dale may be" (2026-09-30, live in the DISP-5 quarantine queue). Only in
+    # a street position, so a person named Dale ("Dale may be late") is left alone.
+    (re.compile(r"\bdale\s+may\s+be\b(?=\s*(?:[,.;:!?]|$)|\s+(?:&|(?:and|at|highway|hwy|north|south|east|west|northbound|southbound|thank)\b))", re.IGNORECASE), "Dale Mabry"),
     # "2908 S Ellis Dr" came out "LS drive" / "L.S. drive".
     (re.compile(r"\b(?:l\.?\s?s\.?|l-s)\s+(?:drive|dr)\b\.?", re.IGNORECASE), "Ellis Dr"),
 ]
