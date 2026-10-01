@@ -130,6 +130,23 @@ BLOCK_CASES = [
     ("10-4, I'll see you in the next one hour at 30th Street.", False),
     ("Thanks for watching the door, Kilo 71.", False),
     ("Subscriber called in a Signal 4 at Fowler.", False),
+    # --- YouTube-style narration (2026-10-01, DISP-5 4s chunk -> 158 chars) ---
+    ("So, I'm going to do a little bit of a quick look at the video and see how it loo", True),
+    ("So, I'm going to do a little bit of a quick look at the video and see how it looks. "
+     "I'm going to start with the color and then the audio.", True),
+    ("Let's look at the video and see how it looks.", True),
+    ("In this video, I'm going to show you how to set up your camera.", True),
+    ("In today\u2019s video we're going to talk about lighting.", True),
+    ("Hey guys, welcome back to my channel.", True),
+    # negative: real dispatch talk about video evidence / everyday phrasing
+    ("Pull the surveillance video from the Circle K on Fowler.", False),
+    ("I'm going to take a quick look at the video from the store camera.", False),
+    ("We're going to do a little bit of traffic control at Fowler and 30th.", False),
+    ("Suspect is on video at the gas station, Signal 4.", False),
+    ("Can you check this video and see if it shows the tag?", False),
+    ("The male in this video is wearing a red hoodie.", False),
+    ("Welcome back, Henry 4.", False),
+    ("Video is in the case file, 10-4.", False),
 ]
 
 STRIP_CASES = [
