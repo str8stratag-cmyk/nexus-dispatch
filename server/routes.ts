@@ -139,6 +139,11 @@ function isInServiceArea(lat: number, lng: number): boolean {
 // Ave. Canonicalize the names we know; unknown cross streets ("Orchid") are
 // left bare and still resolve once the other side is typed.
 const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
+  // "8401 North Carolina Street" (2026-10-01, real quarantine misses on
+  // four independent boxes) - real address is "3401 S Carolina St"
+  // (user-confirmed 2026-10-02). Optional leading "4" catches "Signal 4"
+  // fusing into "8401" with no space.
+  [/\b4?8401\s+north\s+carolina(?:\s+st(?:reet)?)?\b/gi, "3401 S Carolina St"],
   [/\bflorida(?:\s+ave(?:nue)?)?\b(?!\s+state)/gi, "Florida Ave"],
   [/\bnebraska(?:\s+ave(?:nue)?)?\b/gi, "Nebraska Ave"],
   [/\bhillsborough(?:\s+ave(?:nue)?)?\b(?!\s+county)/gi, "Hillsborough Ave"],
