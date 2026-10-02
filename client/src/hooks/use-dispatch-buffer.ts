@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { detectKeywords, type KeywordEntry } from "@/lib/constants";
-import { extractAddress, type ExtractedAddress } from "@/lib/extract-address";
+import { extractAddress, containsMajorRoad, type ExtractedAddress } from "@/lib/extract-address";
 
 export interface DispatchPayload {
   transcript: string;
@@ -14,6 +14,18 @@ interface UseDispatchBufferOptions {
   onDispatch: (payload: DispatchPayload) => Promise<void>;
   silenceMs?: number;
   maxChunks?: number;
+}
+
+// True when the transcript carries NO keyword but DOES name a major-road
+// intersection in its extracted address — the "Road Mention" class the
+// server already gates (context or recent same road, else quarantine for
+// review). Without this, a real call like "on the corner of Cypress and
+// Delmigras" (actually Cypress & Dale Mabry) never reaches the pipeline at
+// all: no keyword → no dispatch POST → invisible in events AND quarantine.
+function roadMentionWorthy(transcript: string): boolean {
+  const { address, crossStreet } = extractAddress(transcript);
+  if (!address) return false;
+  return containsMajorRoad(`${address} ${crossStreet ?? ""}`);
 }
 
 export function useDispatchBuffer({
@@ -35,8 +47,13 @@ export function useDispatchBuffer({
 
   const buildPayload = useCallback((chunks: string[]): DispatchPayload & ExtractedAddress => {
     const transcript = chunks.join(" ");
-    const keywords = detectKeywords(transcript, keywordList);
+    let keywords = detectKeywords(transcript, keywordList);
     const { address, crossStreet } = extractAddress(transcript);
+    if (keywords.length === 0 && address && containsMajorRoad(`${address} ${crossStreet ?? ""}`)) {
+      // Synthesize the Road Mention signal so the normal flow (server gates,
+      // cooldown, quarantine review) applies exactly as for real keywords.
+      keywords = [{ keyword: address, signalType: "Road Mention" }];
+    }
     return { transcript, keywords, address, crossStreet };
   }, [keywordList]);
 
@@ -55,7 +72,7 @@ export function useDispatchBuffer({
     const fullTranscript = bufferRef.current.join(" ");
     const allKeywords = detectKeywords(fullTranscript, keywordList);
 
-    if (allKeywords.length > 0) {
+    if (allKeywords.length > 0 || roadMentionWorthy(fullTranscript)) {
       setIsPending(true);
 
       // 3. Reset the silence timer

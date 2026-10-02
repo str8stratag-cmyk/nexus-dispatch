@@ -10,6 +10,9 @@ const cases: [string, string | null, string | null][] = [
   ["signal 4 on hillsbough and 40th", "40th St", "Hillsborough Ave"],
   ["west shore and gandy boulevard, florida tag 10-50", "West Shore Blvd", "Gandy Blvd"],
   ["signal four, cypress and dale mabry", "Dale Mabry", "cypress"],
+  // 2026-10-01 live miss: real call at Cypress & Dale Mabry came out as
+  // "Cypress and Delmigras" and never dispatched (no keyword matched).
+  ["on the corner of cypress and delmigras", "Dale Mabry", "cypress"],
   // Numbered addresses unchanged
   ["mva at 808 north linebaugh avenue", "808 north Linebaugh avenue", null],
   // Bare major roads now extract (user request)

@@ -111,6 +111,9 @@ EXTRA_HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(\d{1,3}(?:st|nd|rd|th))\s+(?:in|and|&)\s+pallor\b", re.IGNORECASE), r"\1 and Fowler"),
     (re.compile(r"\bplatte\b", re.IGNORECASE), "Platt"),
     (re.compile(r"\bhillsboro\b", re.IGNORECASE), "Hillsborough"),
+    # Whisper fuses "Dale Mabry" into one word (2026-10-01 Cypress & Dale
+    # Mabry call transcribed as "Cypress and Delmigras").
+    (re.compile(r"\bdelmigras\b", re.IGNORECASE), "Dale Mabry"),
     # "2908 S Ellis Dr" came out "LS drive" / "L.S. drive".
     (re.compile(r"\b(?:l\.?\s?s\.?|l-s)\s+(?:drive|dr)\b\.?", re.IGNORECASE), "Ellis Dr"),
 ]

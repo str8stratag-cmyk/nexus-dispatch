@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { detectKeywords } from "@/lib/constants";
+import { MAJOR_ROAD_RE } from "@/lib/extract-address";
 import { useKeywords } from "@/hooks/use-keywords";
 
 interface TranscriptEntry {
@@ -55,6 +56,10 @@ export default function TranscriptFeed({ entries }: TranscriptFeedProps) {
       {entries.map((entry) => {
         const keywords = detectKeywords(entry.text, keywordList);
         const hasKeywords = keywords.length > 0;
+        // Main-flag-road mentions that carry no keyword still deserve a
+        // visual flag — that's the Cypress & Dale Mabry class of miss
+        // (2026-10-01) where the call never dispatched at all.
+        const roadMatch = !hasKeywords && new RegExp(MAJOR_ROAD_RE.source, "i").test(entry.text);
 
         // Highlight keywords in the transcript. `entry.text` is live
         // transcription and `kw.keyword` ultimately derives from the
@@ -75,6 +80,12 @@ export default function TranscriptFeed({ entries }: TranscriptFeedProps) {
               `<mark class="bg-orange-500/30 text-orange-300 rounded px-0.5">$1</mark>`
             );
           });
+        } else if (roadMatch) {
+          const roadRegex = new RegExp(`(${MAJOR_ROAD_RE.source})`, "gi");
+          highlightedText = highlightedText.replace(
+            roadRegex,
+            `<mark class="bg-sky-500/25 text-sky-300 rounded px-0.5">$1</mark>`
+          );
         }
 
         return (
@@ -83,6 +94,8 @@ export default function TranscriptFeed({ entries }: TranscriptFeedProps) {
             className={`p-2 rounded text-xs leading-relaxed ${
               hasKeywords
                 ? "bg-orange-950/30 border border-orange-900/40"
+                : roadMatch
+                ? "bg-sky-950/20 border border-sky-900/30"
                 : entry.isFinal
                 ? "bg-muted/30"
                 : "bg-transparent text-muted-foreground"
@@ -113,6 +126,13 @@ export default function TranscriptFeed({ entries }: TranscriptFeedProps) {
                         {kw.signalType}
                       </span>
                     ))}
+                  </div>
+                )}
+                {roadMatch && (
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    <span className="inline-flex items-center rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-sky-400">
+                      Main Road
+                    </span>
                   </div>
                 )}
               </div>

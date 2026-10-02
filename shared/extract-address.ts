@@ -126,6 +126,9 @@ const ADDRESS_HOMOPHONES: [RegExp, string][] = [
   [/\bdealt\s+maybury\b/gi, "Dale Mabry"],
   [/\bdale\s+maybury\b/gi, "Dale Mabry"],
   [/\bdale\s+mayberry\b/gi, "Dale Mabry"],
+  // Whisper fuses "Dale Mabry" into one word (2026-10-01: "Cypress and
+  // Delmigras" was a real Cypress & Dale Mabry call that never dispatched).
+  [/\bdelmigras\b/gi, "Dale Mabry"],
   [/\bdealt\s+mabry\b/gi, "Dale Mabry"],
   [/\bdale\s+labrie\b/gi, "Dale Mabry"],
   // "Dale may be" (2026-09-30, live in the DISP-5 quarantine queue). Only in
@@ -615,7 +618,7 @@ export function applyAddressHomophones(text: string): string {
 // detected — dispatchers name them bare ("on Hillsborough", "at Busch and
 // 56th") and those calls used to be dropped entirely. Tested AFTER homophone
 // correction so mishearings (gandhi -> Gandy) still count.
-const MAJOR_ROAD_RE = /\b(Florida Ave|Nebraska Ave|Hillsborough Ave|Fowler Ave|Fletcher Ave|Waters Ave|Himes Ave|Dale Mabry|Columbus Ave|Memorial Highway|50th St|56th St|30th St|Busch Blvd|Sligh Ave|Kennedy Blvd|Martin Luther King Jr Blvd|Cypress|Broadway Ave|Bayshore Blvd|Gandy Blvd|West Shore Blvd|Selmon Expy|Henderson Blvd|Armenia Ave|Broad St)\b/i;
+export const MAJOR_ROAD_RE = /\b(Florida Ave|Nebraska Ave|Hillsborough Ave|Fowler Ave|Fletcher Ave|Waters Ave|Himes Ave|Dale Mabry|Columbus Ave|Memorial Highway|50th St|56th St|30th St|Busch Blvd|Sligh Ave|Kennedy Blvd|Martin Luther King Jr Blvd|Cypress|Broadway Ave|Bayshore Blvd|Gandy Blvd|West Shore Blvd|Selmon Expy|Henderson Blvd|Armenia Ave|Broad St)\b/i;
 
 export function containsMajorRoad(transcript: string): boolean {
   if (!transcript) return false;

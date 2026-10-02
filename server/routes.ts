@@ -1,12 +1,15 @@
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import type { Server } from "node:http";
 import { hostname } from "node:os";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import rateLimit from "express-rate-limit";
 import { ObjectId } from "mongodb";
 import { storage } from "./storage";
 import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent, type InsertDispatchEvent } from "@shared/schema";
 import { normalizeKeywordEntry } from "@shared/keywords";
 import { extractAddress } from "@shared/extract-address";
+import { suggestStreets, levenshtein, type StreetDictionary } from "@shared/street-match";
 import { getDatabase, isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
 import { getWhisperModel } from "./whisper";
@@ -155,6 +158,9 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   [/\bdale\s+labrie\b/gi, "Dale Mabry Hwy"],
   [/\bdale\s+may\s+be\b(?=\s*(?:[,.;:!?]|$)|\s+(?:&|(?:and|at|highway|hwy|north|south|east|west|northbound|southbound|thank)\b))/gi, "Dale Mabry Hwy"],
   [/\bhenderson(?:\s+blvd|\s+boulevard)?\b/gi, "Henderson Blvd"],
+  // Whisper fuses "Dale Mabry" into one word (2026-10-01: "Cypress and
+  // Delmigras" was a real Cypress & Dale Mabry call that never dispatched).
+  [/\bdelmigras\b/gi, "Dale Mabry Hwy"],
   [/\bcolumbus(?:\s+ave(?:nue)?)?\b/gi, "Columbus Ave"],
   [/\barmenia(?:\s+ave(?:nue)?)?\b/gi, "Armenia Ave"],
   // Armenia Ave & Broad St, "304 East Handler" (2026-10-01, real quarantine
@@ -740,6 +746,24 @@ async function roadMentionedRecently(address: string | null | undefined): Promis
   });
 }
 
+// Street dictionary for fuzzy-matching garbled street names against real
+// Tampa/Hillsborough roads (shared/street-match.ts). Generated once by
+// scripts/generate-street-dictionary.ts and committed; loaded lazily. Feature
+// is off when the file is missing (e.g. dictionary not generated on a box).
+let streetDictionary: StreetDictionary | null | undefined;
+function getStreetDictionary(): StreetDictionary | null {
+  if (streetDictionary !== undefined) return streetDictionary;
+  try {
+    streetDictionary = JSON.parse(
+      readFileSync(path.join(process.cwd(), "shared", "tampa-street-dictionary.json"), "utf8"),
+    ) as StreetDictionary;
+  } catch {
+    streetDictionary = null;
+    console.log("[street-match] tampa-street-dictionary.json not found — fuzzy street matching disabled");
+  }
+  return streetDictionary;
+}
+
 // Rejected auto-dispatches go to a quarantine collection instead of being
 // silently dropped, so a real call killed by a false-positive gate (spam
 // filter, address resolution) can be reviewed and recovered afterwards.
@@ -857,7 +881,9 @@ export async function registerRoutes(
       if (!doc) {
         return res.status(404).json({ message: "Quarantined item not found" });
       }
-      const address: string | null = doc.address ?? null;
+      // A reconcile pass may have attached a street-dictionary suggestion —
+      // restore from the corrected address when one exists.
+      const address: string | null = doc.suggestion?.address ?? doc.address ?? null;
       // Quarantined items were rejected BEFORE the geocoding step in
       // /api/dispatch ever ran (spam/TV/address gates), so they carry no
       // lat/lng — restoring straight from the doc left every restored event
@@ -893,6 +919,111 @@ export async function registerRoutes(
       await db.collection("quarantinedDispatches").deleteOne({ _id: doc._id });
       broadcastEvent(event);
       res.json(event);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // Street-dictionary reconcile: scan address-related quarantine rejections,
+  // attach a corrected-address suggestion to each, and auto-restore the ones
+  // whose suggestion is very confident AND geocodes cleanly. Manual/ops
+  // trigger — not part of the live dispatch path.
+  app.post("/api/quarantine/reconcile", requireAuth, writeLimiter, async (req, res) => {
+    try {
+      const dict = getStreetDictionary();
+      if (!dict) {
+        return res.status(503).json({ message: "Street dictionary unavailable" });
+      }
+      const force = req.query.force === "1";
+      const db = await getDatabase();
+      const reasons = ["requires a resolved address", "unrecognized street (geocode failed)"];
+      const docs = await db
+        .collection("quarantinedDispatches")
+        .find({
+          reason: { $in: reasons },
+          ...(force ? {} : { suggestion: { $exists: false } }),
+        })
+        .sort({ createdAt: -1 })
+        .limit(500)
+        .toArray();
+      const AUTO_RESTORE_MIN = 0.92;
+      let suggested = 0;
+      let autoRestored = 0;
+      let failed = 0;
+      for (const doc of docs) {
+        const original: string | null = doc.address ?? null;
+        if (!original) {
+          failed++;
+          continue;
+        }
+        const [match] = suggestStreets(original, dict);
+        if (!match) {
+          // Clear any stale suggestion from an earlier pass (force refresh).
+          if (doc.suggestion) {
+            await db
+              .collection("quarantinedDispatches")
+              .updateOne({ _id: doc._id }, { $unset: { suggestion: "" } });
+          }
+          failed++;
+          continue;
+        }
+        let geo: GeocodeResult | null = null;
+        try {
+          geo = await geocodeAddress(match.correctedAddress);
+        } catch {
+          geo = null;
+        }
+        const suggestion = {
+          address: match.correctedAddress,
+          score: match.score,
+          lat: geo?.lat ?? null,
+          lng: geo?.lng ?? null,
+          geocodedAt: geo ? new Date() : null,
+        };
+        await db
+          .collection("quarantinedDispatches")
+          .updateOne({ _id: doc._id }, { $set: { suggestion } });
+        suggested++;
+        // Auto-restore only when the correction actually changes the
+        // address (verbatim matches are usually junk addresses that happen
+        // to be real street names — "E Street") and the corrected address
+        // carries positional substance: a block number or a two-road
+        // intersection. Below that, the suggestion stays for one-click
+        // manual restore.
+        const differs = match.correctedAddress.trim().toLowerCase() !== original.trim().toLowerCase();
+        const hasSubstance = /\d/.test(match.correctedAddress) || match.correctedAddress.includes(" & ");
+        if (match.score < AUTO_RESTORE_MIN || !geo || !differs || !hasSubstance) continue;
+        let geocodedRoad: string | null = null;
+        try {
+          geocodedRoad = await reverseGeocodeRoad(geo.lat, geo.lng);
+        } catch {
+          geocodedRoad = null;
+        }
+        try {
+          const event = await storage.createEvent({
+            transcript: String(doc.transcript ?? ""),
+            keywords: String(doc.keywords ?? "[]"),
+            address: suggestion.address,
+            signalType: doc.signalType ?? null,
+            district: "Unknown",
+            source: doc.source ?? "Unknown",
+            status: "active",
+            isManual: true,
+            whisperModel: doc.whisperModel ?? null,
+            lat: geo.lat,
+            lng: geo.lng,
+            geocodedRoad,
+            locationApprox: isBareRoadName(suggestion.address),
+          });
+          await db.collection("quarantinedDispatches").deleteOne({ _id: doc._id });
+          broadcastEvent(event);
+          autoRestored++;
+        } catch (err) {
+          console.error("[reconcile] auto-restore failed:", err);
+          failed++;
+        }
+      }
+      res.json({ scanned: docs.length, suggested, autoRestored, failed });
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }
@@ -1003,6 +1134,27 @@ export async function registerRoutes(
         }
       }
 
+      // Street-dictionary correction: when geocoding failed, match the garbled
+      // street against real Tampa roads and re-geocode the corrected query.
+      // geocodeAddress only returns once the provider's match contains the
+      // queried road, so a non-null result IS the verification — a wrong
+      // guess can't produce a pin. Tighter score floor than the quarantine
+      // reconcile path (0.85 vs 0.75): live corrections publish immediately.
+      if (!lat && !lng && parsed.address) {
+        const [suggestion] = suggestStreets(parsed.address, getStreetDictionary());
+        if (suggestion && suggestion.score >= 0.85) {
+          const correctedGeo = await geocodeAddress(suggestion.correctedAddress);
+          if (correctedGeo) {
+            console.log(
+              `[streetfix] "${parsed.address}" -> "${suggestion.correctedAddress}" (score ${suggestion.score})`,
+            );
+            parsed.address = suggestion.correctedAddress;
+            lat = correctedGeo.lat;
+            lng = correctedGeo.lng;
+          }
+        }
+      }
+
       // Cross-reference the resolved coordinates against the actual road name.
       if (lat && lng) {
         geocodedRoad = await reverseGeocodeRoad(lat, lng);
@@ -1068,21 +1220,6 @@ export async function registerRoutes(
         // equality misses re-broadcasts of the same call. Fuzzy fallback:
         // substring, token overlap, or near-levenshtein. Numbered streets must
         // match exactly — "50th st" vs "56th st" is a different incident.
-        const levenshtein = (a: string, b: string): number => {
-          let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
-          for (let i = 1; i <= a.length; i++) {
-            let cur = [i];
-            for (let j = 1; j <= b.length; j++) {
-              cur[j] = Math.min(
-                prev[j] + 1,
-                cur[j - 1] + 1,
-                prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
-              );
-            }
-            prev = cur;
-          }
-          return prev[b.length];
-        };
         const addressesSimilar = (a: string, b: string): boolean => {
           if (a.includes(b) || b.includes(a)) return true;
           const numsA = a.split(" ").filter((t) => /^\d/.test(t));
@@ -1535,6 +1672,80 @@ async function handleTelegramUpdate(update: any): Promise<void> {
     callback_query_id: callback.id,
     text: "Call accepted. Good luck out there.",
   });
+}
+
+// Long-poll transport for the Accept button callbacks. Telegram servers
+// can't reach the fleet boxes (private LAN, no public URL), so when no
+// webhook URL is configured we poll getUpdates outbound instead. The acked
+// offset lives in the shared Mongo settings doc — several boxes can poll
+// the same bot without double-handling an update.
+const TELEGRAM_POLL_OFFSET_KEY = "telegram_poll_offset";
+let telegramPollingStarted = false;
+
+export function startTelegramPolling(): void {
+  if (telegramPollingStarted) return;
+  telegramPollingStarted = true;
+  void telegramPollLoop();
+}
+
+async function telegramPollLoop(): Promise<void> {
+  let backoffMs = 5000;
+  for (;;) {
+    const { botToken } = await getTelegramCredentials();
+    if (!botToken) {
+      await new Promise((r) => setTimeout(r, 60_000));
+      continue;
+    }
+    let data;
+    try {
+      const stored = parseInt((await storage.getSetting(TELEGRAM_POLL_OFFSET_KEY))?.value ?? "0", 10);
+      data = await telegramApiCall(botToken, "getUpdates", {
+        offset: Number.isFinite(stored) && stored > 0 ? stored : undefined,
+        timeout: 30,
+        allowed_updates: ["callback_query"],
+      });
+    } catch (err: any) {
+      console.error(`[telegram] getUpdates failed: ${err?.message ?? err} — retry in ${backoffMs / 1000}s`);
+      await new Promise((r) => setTimeout(r, backoffMs));
+      backoffMs = Math.min(backoffMs * 2, 120_000);
+      continue;
+    }
+    if (!data.ok) {
+      // 409 = another consumer holds the bot (a configured webhook, or
+      // another fleet box polling the shared bot). Back off; whichever box
+      // holds the connection keeps the fleet-wide offset current.
+      console.error(`[telegram] getUpdates: ${data.description} — backing off ${backoffMs / 1000}s`);
+      await new Promise((r) => setTimeout(r, backoffMs));
+      backoffMs = Math.min(backoffMs * 2, 120_000);
+      continue;
+    }
+    backoffMs = 5000;
+    for (const update of data.result ?? []) {
+      try {
+        await handleTelegramUpdate(update);
+      } catch (err) {
+        console.error("[telegram] callback handling failed:", err);
+      }
+      await storage.upsertSetting({ key: TELEGRAM_POLL_OFFSET_KEY, value: String(update.update_id + 1) });
+    }
+  }
+}
+
+// Webhook when TELEGRAM_WEBHOOK_URL is configured (Telegram must be able to
+// reach it — public URL/tunnel); otherwise clear any stale webhook and long
+// poll outbound. Called once at server start.
+export async function initTelegramTransport(): Promise<void> {
+  const { botToken } = await getTelegramCredentials();
+  if (!botToken) {
+    throw new Error("Telegram bot token not configured");
+  }
+  if (process.env.TELEGRAM_WEBHOOK_URL?.trim()) {
+    await setTelegramWebhook();
+    return;
+  }
+  const cleared = await telegramApiCall(botToken, "deleteWebhook", { drop_pending_updates: false });
+  console.log(`[telegram] No webhook URL configured — long polling for Accept callbacks (stale webhook cleared: ${cleared.ok})`);
+  startTelegramPolling();
 }
 
 export async function setTelegramWebhook(url?: string): Promise<{ success: boolean; description?: string }> {

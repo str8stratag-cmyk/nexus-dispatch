@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ShieldAlert, MapPin, Clock, RotateCcw } from "lucide-react";
+import { ShieldAlert, MapPin, Clock, RotateCcw, Wand2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 interface QuarantineRow {
@@ -23,6 +23,7 @@ interface QuarantineRow {
   source: string | null;
   signalType: string | null;
   whisperModel: string | null;
+  suggestion?: { address: string; score: number } | null;
   createdAt: string;
 }
 
@@ -61,6 +62,30 @@ export default function QuarantinePanel() {
     },
   });
 
+  // Street-dictionary reconcile: matches quarantined addresses against real
+  // Tampa streets; very confident matches are auto-restored by the server,
+  // the rest come back with a suggestion for one-click restore.
+  const reconcileMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/quarantine/reconcile");
+      return res.json() as Promise<{ scanned: number; suggested: number; autoRestored: number; failed: number }>;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/quarantine"] });
+      toast({
+        title: "Street Match Complete",
+        description: `${data.suggested} suggested, ${data.autoRestored} auto-restored, ${data.failed} unmatched`,
+      });
+    },
+    onError: (err: any) => {
+      toast({
+        title: "Street Match Failed",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   const reasons = Array.from(new Set(items.map((item) => item.reason).filter(Boolean)));
   const filteredItems = reasonFilter === "all" ? items : items.filter((item) => item.reason === reasonFilter);
 
@@ -76,6 +101,17 @@ export default function QuarantinePanel() {
             <Badge variant="outline" className="text-xs text-amber-600 border-amber-600/30 bg-amber-600/10">
               {items.length} quarantined
             </Badge>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 px-2 text-xs"
+              onClick={() => reconcileMutation.mutate()}
+              disabled={reconcileMutation.isPending}
+              data-testid="reconcile-streets"
+            >
+              <Wand2 className="h-3 w-3 mr-1" />
+              {reconcileMutation.isPending ? "Matching..." : "Match streets"}
+            </Button>
             {reasons.length > 0 && (
               <Select value={reasonFilter} onValueChange={setReasonFilter}>
                 <SelectTrigger className="h-7 w-40 text-xs" data-testid="quarantine-reason-filter">
@@ -126,6 +162,15 @@ export default function QuarantinePanel() {
               <div className="flex items-center gap-1 text-xs font-mono text-foreground">
                 <MapPin className="h-3 w-3 text-primary shrink-0" />
                 {item.address}
+              </div>
+            )}
+            {item.suggestion && (
+              <div className="flex items-center gap-1 text-xs font-mono text-emerald-600">
+                <Wand2 className="h-3 w-3 shrink-0" />
+                {item.suggestion.address}
+                <span className="text-emerald-600/60">
+                  · {Math.round(item.suggestion.score * 100)}%
+                </span>
               </div>
             )}
             {item.transcript && (
