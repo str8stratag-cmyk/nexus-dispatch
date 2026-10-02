@@ -44,6 +44,16 @@ EXTRA_HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(?:floor|florida|kansas|flurry)\s+(?:attack|tag|tech)\b", re.IGNORECASE), "Florida tag"),
     (re.compile(r"\btampa\s+ponds\b", re.IGNORECASE), "Tampa Palms"),
     (re.compile(r"\b(?:del|dell|dail|daily)\s+mabry\b", re.IGNORECASE), "Dale Mabry"),
+    # "Dale may be" (2026-09-30, live in the DISP-5 quarantine queue). Only in
+    # a street position, so a person named Dale ("Dale may be late") is left alone.
+    (re.compile(r"\bdale\s+may\s+be\b(?=\s*(?:[,.;:!?]|$)|\s+(?:&|(?:and|at|highway|hwy|north|south|east|west|northbound|southbound|thank)\b))", re.IGNORECASE), "Dale Mabry"),
+    # Lois Ave heard as "Wallace"/"Wallis" at Hillsborough Ave (2026-10-02,
+    # DISP-1: radio "Signal 4 Hillsborough and Lois" -> "Hillsborough and
+    # Wallace"). Only rewritten when directly paired with Hillsborough via
+    # "and"/"&", in either order, so "Wallace" anywhere else (a surname,
+    # "Hillsborough County ... Wallace") is left alone.
+    (re.compile(r"\b(hillsborough\s+(?:and|&)\s+)(?:wallace|wallis)\b", re.IGNORECASE), r"\1Lois"),
+    (re.compile(r"\b(?:wallace|wallis)(\s+(?:and|&)\s+hillsborough)\b", re.IGNORECASE), r"Lois\1"),
     # "2908 S Ellis Dr" came out "LS drive" / "L.S. drive".
     (re.compile(r"\b(?:l\.?\s?s\.?|l-s)\s+(?:drive|dr)\b\.?", re.IGNORECASE), "Ellis Dr"),
 ]
@@ -116,6 +126,27 @@ _SIGNOFF_ANY = "|".join(
 SIGNOFF_WHOLE_RE = re.compile(
     rf"^\s*(?:(?:{_SIGNOFF_ANY})[\s,.!?-]*)+(?:bye[\s,.!?-]*)*$", re.IGNORECASE
 )
+# YouTube-style narration Whisper hallucinates on near-silence/noise
+# (2026-10-01, DISP-5: a 158-char transcript from one 4s chunk, "So, I'm going
+# to do a little bit of a quick look at the video and see how it loo[ks]...").
+# Unlike the sign-offs above, these are matched ANYWHERE in the chunk and the
+# whole chunk is dropped: the phrases are video-creator narration that does not
+# occur in dispatch radio, and a chunk that produced one is hallucinated
+# throughout. Each pattern is deliberately multi-word so ordinary radio talk
+# about video evidence ("pull the surveillance video", "take a quick look at
+# the video from the store", "the male in this video is...") never matches.
+_VIDEO_NARRATION = (
+    # "a little bit of a quick look at the video" (the DISP-5 hallucination)
+    r"\ba\s+little\s+bit\s+of\s+a\s+quick\s+look\s+at\s+(?:the|this|my)\s+video\b",
+    # "...look at the video and see how it looks" (editing-vlog narration)
+    r"\blook\s+at\s+(?:the|this|my)\s+video\s+and\s+see\s+how\s+it\s+looks?\b",
+    # "In this video, I'm going to show you..." / "In today's video we'll..."
+    rf"\bin\s+(?:this|today{_AP}?s)\s+video\s*,?\s+(?:i|we)(?:{_AP}m|{_AP}re|{_AP}ll|\s+am|\s+are|\s+will)?\s+"
+    r"(?:going\s+to|gonna|show|talk|take|be)\b",
+    # "Welcome back to my channel"
+    r"\bwelcome\s+back\s+to\s+(?:my|the|our)\s+channel\b",
+)
+VIDEO_NARRATION_RE = re.compile("|".join(_VIDEO_NARRATION), re.IGNORECASE)
 # "Bye bye" (two or more) as the entire chunk. A single "Bye." is kept.
 BYE_BYE_RE = re.compile(r"^\s*bye(?:[\s,.!?-]+bye)+[\s,.!?-]*$", re.IGNORECASE)
 # Trailing strip: only the unmistakable YouTube phrases, and only after a
@@ -133,6 +164,8 @@ def is_blocklisted_chunk(text: str) -> bool:
     if norm in HALLUCINATION_BLOCKLIST:
         return True
     if norm and REPEATABLE_WHOLE_RE.match(norm):
+        return True
+    if VIDEO_NARRATION_RE.search(text):
         return True
     return bool(SIGNOFF_WHOLE_RE.match(text) or BYE_BYE_RE.match(text))
 

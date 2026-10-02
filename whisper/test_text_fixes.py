@@ -43,6 +43,17 @@ CASES = [
     ("Signal 4 and something in the LS drive.", "Signal 4 and something in the Ellis Dr"),
     ("south end at 2908 L.S. Drive", "south end at 2908 Ellis Dr"),
     ("crash at del mabry and columbus", "crash at Dale Mabry and columbus"),
+    ("signal 4 at dale may be and henderson", "signal 4 at Dale Mabry and henderson"),
+    ("no signal for Dale may be thank you", "no signal for Dale Mabry thank you"),
+    ("crash at dale may be.", "crash at Dale Mabry."),
+    # Lois Ave misheard as Wallace/Wallis at Hillsborough Ave (2026-10-02, DISP-1)
+    ("Signal 4 Hillsborough and Wallace", "Signal 4 Hillsborough and Lois"),
+    ("signal 4 hillsborough and wallace.", "signal 4 hillsborough and Lois."),
+    ("SIGNAL 4 HILLSBOROUGH AND WALLACE", "SIGNAL 4 HILLSBOROUGH AND Lois"),
+    ("crash at Hillsborough & Wallace, northbound", "crash at Hillsborough & Lois, northbound"),
+    ("Signal 4, Wallace and Hillsborough.", "Signal 4, Lois and Hillsborough."),
+    ("signal 4 at hillsborough and wallis", "signal 4 at hillsborough and Lois"),
+    ("Wallis & Hillsborough", "Lois & Hillsborough"),
     # --- negatives: must be unchanged ---
     ("single car crash on the ramp", None),
     ("we have a single unit on scene", None),
@@ -61,6 +72,15 @@ CASES = [
     ("attack on the floor", None),
     ("tampa police", None),
     ("els drive", None),
+    ("officer dale may be late", None),
+    ("dale may be on scene shortly", None),
+    ("officer Wallace is on scene", None),
+    ("Wallace Avenue and Florida", None),
+    ("Hillsborough and Florida, Signal 4", None),
+    ("Hillsborough County deputy Wallace responding", None),
+    ("Hillsborough and Wallaceton", None),
+    ("caller is Wallace Hillsborough", None),
+    ("Signal 4 Hillsborough and Lois", None),
 ]
 
 BLOCK_CASES = [
@@ -130,6 +150,23 @@ BLOCK_CASES = [
     ("10-4, I'll see you in the next one hour at 30th Street.", False),
     ("Thanks for watching the door, Kilo 71.", False),
     ("Subscriber called in a Signal 4 at Fowler.", False),
+    # --- YouTube-style narration (2026-10-01, DISP-5 4s chunk -> 158 chars) ---
+    ("So, I'm going to do a little bit of a quick look at the video and see how it loo", True),
+    ("So, I'm going to do a little bit of a quick look at the video and see how it looks. "
+     "I'm going to start with the color and then the audio.", True),
+    ("Let's look at the video and see how it looks.", True),
+    ("In this video, I'm going to show you how to set up your camera.", True),
+    ("In today\u2019s video we're going to talk about lighting.", True),
+    ("Hey guys, welcome back to my channel.", True),
+    # negative: real dispatch talk about video evidence / everyday phrasing
+    ("Pull the surveillance video from the Circle K on Fowler.", False),
+    ("I'm going to take a quick look at the video from the store camera.", False),
+    ("We're going to do a little bit of traffic control at Fowler and 30th.", False),
+    ("Suspect is on video at the gas station, Signal 4.", False),
+    ("Can you check this video and see if it shows the tag?", False),
+    ("The male in this video is wearing a red hoodie.", False),
+    ("Welcome back, Henry 4.", False),
+    ("Video is in the case file, 10-4.", False),
 ]
 
 STRIP_CASES = [

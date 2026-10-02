@@ -96,6 +96,32 @@ HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bbush(?:ed)?\b", re.IGNORECASE), "Busch"),
     # "eastbound" heard as two words, "bound" swallowing the "t".
     (re.compile(r"\beach\s+bound\b", re.IGNORECASE), "eastbound"),
+    # Selmon/Crosstown Expressway (2026-09-30, real DISP-5 quarantine miss:
+    # "settlement expressway" for "Selmon Expressway"; also "salmon"/
+    # "sandman"/"sellman"). When "expressway"/"expy" is actually said, keep
+    # it in the fixed text. Real dispatchers say it bare ~98% of the time
+    # (user, 2026-09-30) — the bare fallback below (must run AFTER this one:
+    # once "expressway"/"expy" is consumed here, it can't double-match) is
+    # what catches the common case.
+    (re.compile(r"\b(?:settlement|salmon|sandman|sellman)\s+(?:expressway|expy)\b", re.IGNORECASE), "Selmon Expressway"),
+    (re.compile(r"\b(?:settlement|salmon|sandman|sellman)\b", re.IGNORECASE), "Selmon"),
+    # "Dale Labrie" for "Dale Mabry" (2026-09-30, real DISP-2 quarantine
+    # miss). No Anderson -> Henderson rewrite: both are real Tampa roads
+    # (owner decision 2026-10-01).
+    (re.compile(r"\bdale\s+labrie\b", re.IGNORECASE), "Dale Mabry"),
+    # "304 East Handler" (2026-10-01, real quarantine misses across
+    # DISP-1/2/5/7, user-confirmed canonical name). "Tambler" is the
+    # mishearing; "Handler" itself is already correct when heard right.
+    (re.compile(r"\btambler\b", re.IGNORECASE), "Handler"),
+    # Armenia Ave & Broad St (2026-10-01, real DISP-2/3 quarantine misses,
+    # user-confirmed). "Barat" for "Broad" only in a street context
+    # ("Barat Street", "West Barat") - it is also a surname. "Armenian" (the
+    # nationality adjective, a real word that could describe a person)
+    # requires "Avenue"/"Ave" - matches how it appeared in both real
+    # transcripts.
+    (re.compile(r"\bbarat(?=\s+(?:st|street)\b)", re.IGNORECASE), "Broad"),
+    (re.compile(r"\b(north|south|east|west)\s+barat\b", re.IGNORECASE), r"\1 Broad"),
+    (re.compile(r"\barmenian\s+(?:avenue|ave)\b", re.IGNORECASE), "Armenia Avenue"),
     # Street-name garbles (2026-09-18 call review, 500 events).
     (re.compile(r"\bmckin\w*\b", re.IGNORECASE), "McKinley"),
     (re.compile(r"\bmcdill+\b", re.IGNORECASE), "MacDill"),

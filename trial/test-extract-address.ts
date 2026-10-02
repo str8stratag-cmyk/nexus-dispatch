@@ -18,6 +18,57 @@ const cases: [string, string | null, string | null][] = [
   // "bushed" (2026-09-30 call review, real missed/garbled call): \bbush\b
   // alone doesn't match "bushed" - no word boundary between "bush" and "ed".
   ["there's a signal 4 with injuries, eastbound bushed", "eastbound Busch Blvd", null],
+  // Selmon/Crosstown Expressway (2026-09-30 call review, real DISP-5 event
+  // that went to quarantine instead of resolving): Whisper heard "Selmon"
+  // as "settlement".
+  ["this is 22nd street and settlement expressway also known as the crosstown expressway", "22nd street", "Selmon Expy"],
+  ["signal 4 on the crosstown expressway", "Selmon Expy", null],
+  ["signal 4 on the crosstown", "Selmon Expy", null],
+  // "Dale Labrie" -> Dale Mabry (2026-09-30, real DISP-2 quarantine miss).
+  ["signal 4, Dale Labrie and Henderson", "Dale Mabry", "Henderson"],
+  // Anderson and Henderson are both real Tampa roads: "Anderson" is never
+  // rewritten to "Henderson" (owner decision 2026-10-01).
+  ["signal our Dale Labrie Anderson, signal 4, Dale Labrie Anderson", "Dale Mabry", null],
+  ["signal 4 at Dale Mabry and Anderson", "Dale Mabry", null],
+  ["unit responding, officer Anderson on scene", null, null],
+  // negative: "Henderson" as a person's name is not a street
+  ["unit responding, officer Henderson on scene", null, null],
+  // "Dale may be" (2026-09-30, live DISP-5 quarantine miss, near-verbatim)
+  ["no signal for Dale may be thank you for your 25th progress to residents", "Dale Mabry", null],
+  // negative: a person named Dale must not become Dale Mabry
+  ["officer dale may be late to the briefing", null, null],
+  // "304 East Handler" (2026-10-01, real quarantine misses across
+  // DISP-1/2/5/7, user-confirmed canonical name; near-verbatim transcripts)
+  ["signal 304 East handler, 304 East handler. Signal 4 at 304 East Handler.", "304 East handler", null],
+  ["Signal. 304 East Tambler, 304 East Tambler. signal 4 at 304 East and", "304 East Handler", null],
+  // Armenia Ave & Broad St (2026-10-01, real DISP-2/3 quarantine misses,
+  // user-confirmed; near-verbatim transcript)
+  ["Broad Street, Siegel 4, Armenia and Broad Street. Signal 4, Barat Street and Armenian Avenue.", "Broad Street", "Armenia Ave"],
+  // negative: "Armenian" without "Avenue" (e.g. describing a person) must NOT rewrite
+  ["suspect described as an Armenian male", null, null],
+  // Broad St only in a street context
+  ["signal 4 at armenia and broad", "Armenia Ave", "Broad St"],
+  ["signal 4 at west broad", "Broad St", null],
+  // negatives: bare "broad"/"barat" and "handler" as an ordinary word
+  ["they did it in broad daylight", null, null],
+  ["a broad range of units responding", null, null],
+  ["caller is mr barat on scene", null, null],
+  ["k9 handler responding", null, null],
+  ["the k9 handler is on scene with the deputy", null, null],
+  ["officer kenney on scene", null, null],
+  // Delmarie/"South down Mabry" and Kenney (2026-10-01, real quarantine misses)
+  ["1406, North Delmarie Highway and Run 4", "1406, North Dale Mabry Hwy", "Run"],
+  ["south down Maybury, good 1-6-5", "Dale Mabry", null],
+  ["signal for West Shore, Louisville, and Kenney Boulevard", "West Shore Blvd", "Kennedy Blvd"],
+  ["signal 4 on the salmon expressway", "Selmon Expy", null],
+  ["signal 4 on the sandman expressway", "Selmon Expy", null],
+  ["signal 4 on the sellman expressway", "Selmon Expy", null],
+  // Bare, no "expressway" said - the common case (user, 2026-09-30: ~98% of
+  // real traffic omits it). Accepted tradeoff: this also means a literal,
+  // unrelated "salmon"/"sandman" mention would get rewritten too - judged
+  // unlikely enough in dispatch-radio context to be worth it.
+  ["signal 4 on the salmon", "Selmon Expy", null],
+  ["signal 4 on sandman", "Selmon Expy", null],
   ["on floribraska near sligh", "Nebraska Ave", "Sligh Ave"],
   ["signal four at fowler fletcher", "Fletcher Ave", "Fowler Ave"],
   ["two fifty eastbounder on 50th", "50th St", null],
@@ -71,6 +122,8 @@ const roadCases: [string, boolean][] = [
   ["the state of Florida highway patrol is assisting", false],
   ["Hillsborough County Sheriff clear of the call", false],
   ["signal 4 at bruce viana", false], // not in MAJOR_ROAD_RE; extraction still works
+  ["they did it in broad daylight", false],
+  ["officer dale may be late to the briefing", false],
 ];
 for (const [t, want] of roadCases) {
   const got = containsMajorRoad(t);
