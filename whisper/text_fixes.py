@@ -47,6 +47,13 @@ EXTRA_HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     # "Dale may be" (2026-09-30, live in the DISP-5 quarantine queue). Only in
     # a street position, so a person named Dale ("Dale may be late") is left alone.
     (re.compile(r"\bdale\s+may\s+be\b(?=\s*(?:[,.;:!?]|$)|\s+(?:&|(?:and|at|highway|hwy|north|south|east|west|northbound|southbound|thank)\b))", re.IGNORECASE), "Dale Mabry"),
+    # Lois Ave heard as "Wallace"/"Wallis" at Hillsborough Ave (2026-10-02,
+    # DISP-1: radio "Signal 4 Hillsborough and Lois" -> "Hillsborough and
+    # Wallace"). Only rewritten when directly paired with Hillsborough via
+    # "and"/"&", in either order, so "Wallace" anywhere else (a surname,
+    # "Hillsborough County ... Wallace") is left alone.
+    (re.compile(r"\b(hillsborough\s+(?:and|&)\s+)(?:wallace|wallis)\b", re.IGNORECASE), r"\1Lois"),
+    (re.compile(r"\b(?:wallace|wallis)(\s+(?:and|&)\s+hillsborough)\b", re.IGNORECASE), r"Lois\1"),
     # "2908 S Ellis Dr" came out "LS drive" / "L.S. drive".
     (re.compile(r"\b(?:l\.?\s?s\.?|l-s)\s+(?:drive|dr)\b\.?", re.IGNORECASE), "Ellis Dr"),
 ]
