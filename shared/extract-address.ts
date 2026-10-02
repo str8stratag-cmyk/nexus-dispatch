@@ -174,7 +174,10 @@ const ADDRESS_HOMOPHONES: [RegExp, string][] = [
   // "at Busch and 56th"). Canonicalize bare mentions to their full form so
   // they extract as addresses. Optional-suffix groups keep already-suffixed
   // forms canonical without doubling up.
-  [/(?<!\bof\s)\bflorida(?:\s+ave(?:nue)?)?\b(?!\s+state)/gi, "Florida Ave"],
+  // "Florida tag" / "Florida plate" is a plate read, never Florida Ave
+  // (2026-10-02 quarantine review: 4 quarantined + 14 stored events had a
+  // plate read turned into a "Florida Ave" address / Road Mention).
+  [/(?<!\bof\s)\bflorida(?:\s+ave(?:nue)?)?\b(?!\s+(?:state|tags?|plates?|temp(?:orary)?|dealer|registration|license|licence)\b)/gi, "Florida Ave"],
   [/\bfloribraska\b/gi, "Nebraska Ave"],
   [/\bpalesboro\b/gi, "Hillsborough"],
   [/\bhillsbough\b/gi, "Hillsborough"],
@@ -244,15 +247,27 @@ function isStreetSuffix(word: string): boolean {
   return STREET_SUFFIXES.has(cleanWord(word));
 }
 
+// "Union <n>" is a unit callsign ("Union 2, Union 3, copy that update",
+// "Union 5-1 to me"), not a street ending in the "union" suffix (2026-10-02
+// quarantine review: three items parsed as "Union 2, Union" / "Union").
+// Real "Union St" addresses keep a suffix after "Union" and are unaffected.
+const CALLSIGN_SUFFIXES = new Set(["union"]);
+const CALLSIGN_NUMBER_RE = /^(?:\d[\d-]*|one|two|three|four|five|six|seven|eight|nine|ten)[.,;:]?$/i;
+
+function isCallsign(words: string[], index: number): boolean {
+  if (!CALLSIGN_SUFFIXES.has(cleanWord(words[index] ?? ""))) return false;
+  const next = words[index + 1];
+  return next !== undefined && CALLSIGN_NUMBER_RE.test(next);
+}
+
 function tokenize(text: string): Token[] {
   // Split on whitespace but keep slashes and ampersands as standalone tokens.
-  return text
-    .split(/\s+/)
-    .map((text, index) => ({
-      text,
-      index,
-      isSuffix: isStreetSuffix(text),
-    }));
+  const words = text.split(/\s+/);
+  return words.map((text, index) => ({
+    text,
+    index,
+    isSuffix: isStreetSuffix(text) && !isCallsign(words, index),
+  }));
 }
 
 function isNumberToken(word: string): boolean {
@@ -285,6 +300,8 @@ function buildStreetCandidate(tokens: Token[], suffixIndex: number): StreetCandi
 
     // Stop at obvious break words.
     if (STOP_WORDS.has(cleaned)) break;
+    // Never absorb a unit callsign ("Union 2") into a street name.
+    if (isCallsign(tokens.map((t) => t.text), i)) break;
 
     // Stop at punctuation-only tokens.
     if (!/^\w/.test(token.text)) break;
@@ -480,9 +497,12 @@ const KNOWN_STREET_FALLBACK: [RegExp, string][] = [
   [/\bhyde\s+park\b/i, "Hyde Park"],
   [/\bdale\s+mabry\b/i, "Dale Mabry"],
   [/\bwest\s*shore\b/i, "Westshore Blvd"],
-  [/\bhillsborough\b|\bhillsboro\b/i, "Hillsborough Ave"],
+  // Never "Hillsborough County ..." (Sheriff's Office, Fire Rescue, county
+  // line) - the agency name was being read as Hillsborough Ave (2026-10-02
+  // quarantine review). ADDRESS_HOMOPHONES already had this guard.
+  [/\bhillsborough\b(?!\s+county)|\bhillsboro\b(?!\s+county)/i, "Hillsborough Ave"],
   [/\bfloribraska\b/i, "Floribraska Ave"],
-  [/\bflorida\b/i, "N Florida Ave"],
+  [/\bflorida\b(?!\s+(?:state|tags?|plates?|temp(?:orary)?|dealer|registration|license|licence)\b)/i, "N Florida Ave"],
   [/\bnebraska\b/i, "Nebraska Ave"],
   [/\bkennedy\b/i, "Kennedy Blvd"],
   [/\bfowler\b|\bfouler\b|\bfowlers\b/i, "Fowler Ave"],
