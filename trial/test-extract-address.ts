@@ -90,6 +90,25 @@ const cases: [string, string | null, string | null][] = [
   ["bruce is on scene, the car is upside down", null, null],
   ["ups and downs all morning", null, null],
   ["that smells sour, and fine by me", null, null],
+  // 2026-10-02 quarantine review - parser false positives (real quarantined
+  // transcripts, near-verbatim). "Florida tag/plate" is a plate read, not
+  // Florida Ave; "Union <n>" is a unit callsign, not a street; "Hillsborough
+  // County Sheriff's office" is the agency, not Hillsborough Ave.
+  ["In the West Shore and Wal-Craft It's not Florida tag, but I can't see what the state is.", "West Shore Blvd", null],
+  ["Times, Florida tag, Kilo Zoo, Edward, IDA-17, South Black, Jared", null, null],
+  ["I'm going to be on a white Honda. That's a pilot. Thanks, Lorcan. You can't be as worried as I am. Florida tag", null, null],
+  ["running a florida plate on a silver BMW", null, null],
+  ["Union 2, Union 3, copy that update in your home. You can be turned off the signal 3, can you help me out the signal 8 now?", null, null],
+  ["Union 5-1 to me. for tax and clean might we get And that's it. 54 for wreck injury, Apollo 13.", null, null],
+  ["I'm going to give her a 9.9. Stand apart. I hope our commander, Hillsborough County Sheriff's office.", null, null],
+  // ...while real Florida Ave / Union St / Hillsborough Ave addresses still extract
+  ["signal 4 at florida and fowler", "Florida Ave", "Fowler Ave"],
+  ["Signal 4 at Hillsborough and Florida", "Hillsborough Ave", "Florida Ave"],
+  ["crash at 9000 north florida avenue", "9000 north Florida Ave", null],
+  ["signal 4 at 1200 Union Street", "1200 Union Street", null],
+  ["signal 4 at union street and rome avenue", "union street", "rome avenue"],
+  ["signal 4 at 3415 West Hillsborough Avenue", "3415 West Hillsborough Ave", null],
+  ["signal 4 on hillsborough near the county line", "Hillsborough Ave", null],
   // Protected phrases must NOT extract
   ["Hillsborough County Sheriff units clear", null, null],
   ["the state of Florida highway patrol", "Florida highway", null],
@@ -121,6 +140,10 @@ const roadCases: [string, boolean][] = [
   ["thank you, bye-bye, static", false],
   ["the state of Florida highway patrol is assisting", false],
   ["Hillsborough County Sheriff clear of the call", false],
+  ["Times, Florida tag, Kilo Zoo, Edward, IDA-17", false],
+  ["It's not Florida tag, but I can't see what the state is.", false],
+  ["I hope our commander, Hillsborough County Sheriff's office.", false],
+  ["signal 4 at florida and fowler", true],
   ["signal 4 at bruce viana", false], // not in MAJOR_ROAD_RE; extraction still works
   ["they did it in broad daylight", false],
   ["officer dale may be late to the briefing", false],
