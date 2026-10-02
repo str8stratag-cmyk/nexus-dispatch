@@ -54,6 +54,63 @@ EXTRA_HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     # "Hillsborough County ... Wallace") is left alone.
     (re.compile(r"\b(hillsborough\s+(?:and|&)\s+)(?:wallace|wallis)\b", re.IGNORECASE), r"\1Lois"),
     (re.compile(r"\b(?:wallace|wallis)(\s+(?:and|&)\s+hillsborough)\b", re.IGNORECASE), r"Lois\1"),
+    # --- 2026-10-02 quarantine review (187 items, 2026-09-30..10-02). Each
+    # rule below was confirmed against a manual / other-desk push of the same
+    # call within +-10 min. Already handled on main and NOT repeated here:
+    # "Dale Labrie", "Dale may be", "Tambler"->Handler, "Barat Street"/"West
+    # Barat"->Broad, "Armenian Avenue"->Armenia, salmon/sellman/settlement->
+    # Selmon (whisper_service.py HOMOPHONE_FIXES), "high park"->Hyde Park and
+    # "maybury"/"mayberry" (shared/extract-address.ts). Deliberately NOT added:
+    # Anderson/Peterson->Henderson (owner decision 2026-10-01, both are real
+    # roads) and Handler->Hanlon ("Handler" is the user-confirmed name).
+    #
+    # Dale Mabry with "South" fused or garbled (DISP-1/5/7 2026-09-30 15:10,
+    # confirmed by #1341): "Southdale, Mayberry", "Southdale, Avery",
+    # "south deal bay", "south day of Adrian".
+    (re.compile(r"\bsouth\s*dale,?\s+(?:mayberry|maybury|avery|bay)\b", re.IGNORECASE), "South Dale Mabry"),
+    (re.compile(r"\bsouth\s+(?:deal|day\s+of)\s+(?:bay|adrian|mabry)\b", re.IGNORECASE), "South Dale Mabry"),
+    # "Dale Magree and Peterson" / "down they bring in Anderson" (DISP-1/3
+    # 2026-09-30 16:50; DISP-5 manual push #1364 "DALE MABRY AND HENDERSON").
+    # The cross street is left as heard (see Anderson note above).
+    (re.compile(r"\bdale\s+(?:magree|maybury|mayberry)\b", re.IGNORECASE), "Dale Mabry"),
+    (re.compile(r"\bdown\s+they\s+bring\b", re.IGNORECASE), "Dale Mabry"),
+    # Armenia Ave (2026-10-01, confirmed by #1376 and the 10-01 19:48 bike
+    # crash): "Armanium" is not a word -> always Armenia. "Armenian" (a real
+    # adjective) only when directly paired with a known Armenia Ave cross street
+    # ("Armenian Broad", "Armenian and Waters", "Waters on Armenian") - never
+    # "an Armenian male" / "Armenian community".
+    (re.compile(r"\barmanium\b", re.IGNORECASE), "Armenia"),
+    (re.compile(r"\barmenian(?=\s+(?:(?:and|&|at)\s+)?(?:broad|waters|hillsborough|columbus|kennedy|cypress|spruce|"
+                r"sligh|busch|linebaugh|lambright|osborne|buffalo|mlk|martin|tampa\s+bay|swann|platt|main|"
+                r"chestnut|fig|lemon|gray|azeele|bay\s+to\s+bay)\b)", re.IGNORECASE), "Armenia"),
+    (re.compile(r"\b((?:broad|waters|hillsborough|columbus|kennedy|cypress|sligh|busch|linebaugh)\s+(?:and|&|at|on)\s+)armenian\b",
+                re.IGNORECASE), r"\1Armenia"),
+    # "Barat" for Broad when paired with Armenia (main already handles
+    # "Barat Street" / "West Barat").
+    (re.compile(r"\bbarat(?=\s+(?:and|&|at)\s+armenia)", re.IGNORECASE), "Broad"),
+    (re.compile(r"\b(armenia(?:n)?(?:\s+(?:ave|avenue))?\s+(?:and|&|at)\s+)barat\b", re.IGNORECASE), r"\1Broad"),
+    # Selmon Expressway (2026-10-01 08:48, confirmed by #1383 "SELMON
+    # EXPRESSWAY AND 50TH STREET"): "Selman" (not in main's list) and
+    # "Southern Express(way)" - the latter currently MIS-GEOCODES to Sulphur
+    # Springs. "Southern" alone is a real word, so only with "express".
+    (re.compile(r"\b(?:selman|southern)\s+express(?:\s*way)?\b", re.IGNORECASE), "Selmon Expressway"),
+    (re.compile(r"\bselman\b", re.IGNORECASE), "Selmon"),
+    # "Signal 4" heard as "signal for" (9 quarantined + 12 stored events),
+    # only when an injury / report-type word follows - "signal for you" and
+    # "signal for a bicycle" are left alone. "Siegel 4" (DISP-2 10-01 07:42).
+    (re.compile(r"\bsignal\s+for(?=\s+(?:(?:an?|no|unknown|other|any)\s+)?(?:injur\w*|short[- ]form|long[- ]form)\b)",
+                re.IGNORECASE), "Signal 4"),
+    (re.compile(r"\b(?:siegel|seagull)\s+(?:4|four)\b", re.IGNORECASE), "Signal 4"),
+    # Bayshore Blvd: two-word "Bay Shore" fails geocoding (DISP-1 09-30 18:49
+    # "Bay Shore and Hyde Park"); "Space shore in Ganyan" = Bayshore & Gandy.
+    (re.compile(r"\b(?:bay|space)\s+shore\b", re.IGNORECASE), "Bayshore"),
+    # One-off confirmed calls: Spruce & Himes (#1452), Bruce B Downs (#1331),
+    # 46th & Fowler (#1415), Platt St (#1373), 3415 W Hillsborough (#1428).
+    (re.compile(r"\bspruce\s+(?:in|and|&)\s+(?:high|hines|hymes)\b", re.IGNORECASE), "Spruce and Himes"),
+    (re.compile(r"\bbrew\s+speed\s+downs?\b", re.IGNORECASE), "Bruce B Downs"),
+    (re.compile(r"\b(\d{1,3}(?:st|nd|rd|th))\s+(?:in|and|&)\s+pallor\b", re.IGNORECASE), r"\1 and Fowler"),
+    (re.compile(r"\bplatte\b", re.IGNORECASE), "Platt"),
+    (re.compile(r"\bhillsboro\b", re.IGNORECASE), "Hillsborough"),
     # "2908 S Ellis Dr" came out "LS drive" / "L.S. drive".
     (re.compile(r"\b(?:l\.?\s?s\.?|l-s)\s+(?:drive|dr)\b\.?", re.IGNORECASE), "Ellis Dr"),
 ]
