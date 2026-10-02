@@ -101,6 +101,8 @@ CASES = [
     ("high speed down the interstate", None),
     ("he looks pale, pallor noted", None),
     ("Barat and Mrs. Jones on scene", None),
+    # "Dale Mabry" fused into one word (2026-10-01 Cypress & Dale Mabry call, DISP-1)
+    ("on the corner of Cypress and Delmigras", "on the corner of Cypress and Dale Mabry"),
     # --- negatives: must be unchanged ---
     ("single car crash on the ramp", None),
     ("we have a single unit on scene", None),
