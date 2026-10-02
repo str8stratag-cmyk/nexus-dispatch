@@ -46,6 +46,14 @@ CASES = [
     ("signal 4 at dale may be and henderson", "signal 4 at Dale Mabry and henderson"),
     ("no signal for Dale may be thank you", "no signal for Dale Mabry thank you"),
     ("crash at dale may be.", "crash at Dale Mabry."),
+    # Lois Ave misheard as Wallace/Wallis at Hillsborough Ave (2026-10-02, DISP-1)
+    ("Signal 4 Hillsborough and Wallace", "Signal 4 Hillsborough and Lois"),
+    ("signal 4 hillsborough and wallace.", "signal 4 hillsborough and Lois."),
+    ("SIGNAL 4 HILLSBOROUGH AND WALLACE", "SIGNAL 4 HILLSBOROUGH AND Lois"),
+    ("crash at Hillsborough & Wallace, northbound", "crash at Hillsborough & Lois, northbound"),
+    ("Signal 4, Wallace and Hillsborough.", "Signal 4, Lois and Hillsborough."),
+    ("signal 4 at hillsborough and wallis", "signal 4 at hillsborough and Lois"),
+    ("Wallis & Hillsborough", "Lois & Hillsborough"),
     # --- negatives: must be unchanged ---
     ("single car crash on the ramp", None),
     ("we have a single unit on scene", None),
@@ -66,6 +74,13 @@ CASES = [
     ("els drive", None),
     ("officer dale may be late", None),
     ("dale may be on scene shortly", None),
+    ("officer Wallace is on scene", None),
+    ("Wallace Avenue and Florida", None),
+    ("Hillsborough and Florida, Signal 4", None),
+    ("Hillsborough County deputy Wallace responding", None),
+    ("Hillsborough and Wallaceton", None),
+    ("caller is Wallace Hillsborough", None),
+    ("Signal 4 Hillsborough and Lois", None),
 ]
 
 BLOCK_CASES = [
