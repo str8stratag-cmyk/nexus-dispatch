@@ -13,6 +13,17 @@ import { getWhisperModel } from "./whisper";
 
 const sseClients = new Set<Response>();
 
+const serverStartedAt = Date.now();
+let lastCaptureHeartbeat: {
+  at: number;
+  source: string | null;
+  capturing: boolean;
+  autoCapture: boolean;
+  lock: string | null;
+  lastChunkAgoMs: number | null;
+  lastSentAgoMs: number | null;
+} | null = null;
+
 function broadcastEvent(event: DispatchEvent): void {
   const data = JSON.stringify(event);
   const clients = Array.from(sseClients);
@@ -795,6 +806,34 @@ export async function registerRoutes(
   // after a restart without manual entry.
   app.get("/api/machine", (_req, res) => {
     res.json({ hostname: hostname() });
+  });
+
+  // Capture-page liveness (2026-10-03). The capture tab POSTs a heartbeat
+  // every 60s; the desk watchdog reads /api/capture/status and reopens the
+  // page only when NO heartbeat has arrived for a long time (tab closed,
+  // crashed, or stuck on a blank screen). In-memory only, local to this box.
+  app.post("/api/capture/heartbeat", (req, res) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.round(v) : null);
+    lastCaptureHeartbeat = {
+      at: Date.now(),
+      source: typeof b.source === "string" ? b.source.slice(0, 64) : null,
+      capturing: b.capturing === true,
+      autoCapture: b.autoCapture !== false,
+      lock: typeof b.lock === "string" ? b.lock.slice(0, 16) : null,
+      lastChunkAgoMs: num(b.lastChunkAgoMs),
+      lastSentAgoMs: num(b.lastSentAgoMs),
+    };
+    res.json({ ok: true });
+  });
+
+  app.get("/api/capture/status", (_req, res) => {
+    const now = Date.now();
+    res.json({
+      uptimeMs: now - serverStartedAt,
+      lastHeartbeatAgoMs: lastCaptureHeartbeat ? now - lastCaptureHeartbeat.at : null,
+      last: lastCaptureHeartbeat,
+    });
   });
 
   // Get all dispatch events

@@ -271,6 +271,31 @@ function Start-Browser($url) {
     }
 }
 
+# Capture-page liveness (2026-10-03). The capture tab POSTs a heartbeat to the
+# app every 60s and restarts its own capture after reloads/updates (see
+# audio-panel.tsx). This only covers the case the page cannot fix itself: NO
+# heartbeat at all for 15 min while the app has been up 15+ min (tab closed,
+# renderer crashed, stuck blank). Then open the capture page again, at most
+# once every 2h. localhost (not 127.0.0.1) because Chrome's mic permission is
+# per origin and the desks granted it on http://localhost:5000. Any doubt --
+# app down, old server without the endpoint, request error -- means "leave it".
+$captureSilentLimit = [TimeSpan]::FromMinutes(15)
+$captureReopenGap = [TimeSpan]::FromHours(2)
+$lastCaptureReopen = [DateTime]::MinValue
+$captureUrl = "http://localhost:5000"
+
+function Test-CapturePageSilent($port) {
+    try {
+        $status = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/capture/status" -Method GET -TimeoutSec 15
+    } catch {
+        return $false
+    }
+    $limitMs = $captureSilentLimit.TotalMilliseconds
+    if ($null -eq $status.uptimeMs -or [double]$status.uptimeMs -lt $limitMs) { return $false }
+    if ($null -eq $status.lastHeartbeatAgoMs) { return $true }
+    return ([double]$status.lastHeartbeatAgoMs -gt $limitMs)
+}
+
 # Always log to a file, including the -NoInitialStart self-update path: the
 # watchdog runs in a hidden window, so console-only output was lost. The
 # transcript captures Write-Host/Write-Warning output. Size-capped like the
@@ -332,6 +357,16 @@ while ($true) {
 
     # Restart apps if their DB-backed endpoint stops responding
     Restart-AppIfDead "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
+
+    # Reopen the capture page if no tab has heartbeated for a long time.
+    if (Test-CapturePageSilent 5000) {
+        $sinceReopen = ([DateTime]::Now) - $lastCaptureReopen
+        if ($sinceReopen -gt $captureReopenGap) {
+            Write-Host "$(Get-Date) No capture-page heartbeat for $($captureSilentLimit.TotalMinutes) min; reopening $captureUrl" -ForegroundColor Yellow
+            Start-Browser $captureUrl
+            $lastCaptureReopen = Get-Date
+        }
+    }
 
     # Pull git updates periodically
     if (($now - $lastGitPull) -gt $gitPullInterval) {

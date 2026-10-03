@@ -280,6 +280,33 @@ not yet purged — purge on request.
    edits; the watchdog will do it if you kill the 8178 process).
 3. **Then any other tasks.**
 
+## Capture survives desk updates (2026-10-03, PR fix/capture-survives-updates)
+
+Capture stopped on every desk update (2026-09-24, 2026-10-02): a watchdog
+`git pull` hot-patched the live page through Vite HMR / React Fast Refresh,
+which re-ran effects (mic released) while the one-shot auto-start never ran
+again; app restarts made the Vite client reload the tab, sometimes into a
+blank white page. Now:
+- **HMR is off by default** (`server/vite.ts`; set `DM_HMR=1` in `.env` on a dev
+  box to get it back). Pulls and app restarts no longer touch the open page;
+  new client code arrives at the page's existing 2h self-reload.
+- **Capture supervisor** (`audio-panel.tsx`, `lib/capture-supervisor.ts`):
+  auto-capture is ON unless an operator presses **Stop** (stored in
+  `localStorage["dispatch.autoCapture"]`; Start turns it back on). Every 2s it
+  restarts capture when wanted but not running (load, HMR, mic stream ended,
+  recorder error), restarts a pipeline that has produced no chunk for ~20s,
+  and as a last resort reloads the page (max once per 10 min).
+- **One capturing tab per desk origin** (`lib/capture-lock.ts`, Web Locks);
+  extra tabs show "Standby" and take over if the capturing tab closes.
+- **No more blank screen:** `components/error-boundary.tsx` shows the error and
+  reloads with backoff; an inline boot guard in `client/index.html` reloads a
+  page whose JS never started.
+- **Watchdog:** reopens `http://localhost:5000` when the app has been up 15+ min
+  and no capture tab has heartbeated (`/api/capture/status`) for 15 min, at
+  most once per 2h.
+- E2E check: `trial/e2e-capture-recovery.mjs` (see header; needs Chrome and a
+  free :8178, so never on a desk running Whisper). Unit: `npx tsx trial/test-capture-supervisor.ts`.
+
 ## Recent changes (2026-09-22) — Watchdog restart storm + 10 review findings; committed cb72223, pushed
 
 See `CLAUDE.md` for the full write-up (root causes, verification steps,
