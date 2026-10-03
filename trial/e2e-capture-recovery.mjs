@@ -94,11 +94,23 @@ try {
   await startServer();
   const context = await browser.newContext();
   await context.grantPermissions(["microphone"], { origin: ORIGIN });
+  await context.grantPermissions(["microphone"], { origin: ORIGIN.replace("localhost", "127.0.0.1") });
   await context.addInitScript(() => {
     const n = Number(sessionStorage.getItem("e2e.loads") || "0") + 1;
     sessionStorage.setItem("e2e.loads", String(n));
     window.__e2eLoads = n;
     window.__dmStreams = [];
+    // Track recorders currently recording, to catch duplicate capture loops.
+    window.__recording = new Set();
+    window.__maxRecording = 0;
+    const origStart = MediaRecorder.prototype.start;
+    MediaRecorder.prototype.start = function (...a) {
+      const r = origStart.apply(this, a);
+      window.__recording.add(this);
+      window.__maxRecording = Math.max(window.__maxRecording, window.__recording.size);
+      this.addEventListener("stop", () => window.__recording.delete(this));
+      return r;
+    };
     const orig = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     navigator.mediaDevices.getUserMedia = async (c) => {
       const s = await orig(c);
@@ -237,6 +249,48 @@ try {
   record("G. Start re-arms capture", await waitFor(capturing, 10_000));
   await page.reload();
   record("G. ...and it auto-resumes after the next reload", await waitFor(capturing, 20_000));
+
+  // H. Rapid Stop/Start (and a start racing an in-flight start) must never
+  // leave two recorder loops on the same audio (DISP-2, 2026-10-03).
+  const toggle = page.locator('[data-testid="capture-toggle"]');
+  for (let i = 0; i < 3; i++) {
+    await toggle.click();
+    await sleep(150);
+    await toggle.click();
+    await sleep(150);
+  }
+  // Double-click Start: the second click lands while getUserMedia from the
+  // first is still pending (old code started two loops here).
+  await waitFor(capturing, 10_000);
+  await toggle.click();
+  await waitFor(async () => !(await capturing()), 5_000);
+  await toggle.dblclick();
+  await waitFor(capturing, 10_000);
+  // A stopping recorder may overlap the new one for a few ms; what matters
+  // is that only one loop keeps running afterwards.
+  await sleep(2_000);
+  let maxRec = 0;
+  for (let i = 0; i < 40; i++) {
+    maxRec = Math.max(maxRec, await page.evaluate(() => window.__recording.size));
+    await sleep(250);
+  }
+  record("H. rapid Stop/Start + double-click Start leave exactly one capture loop", maxRec === 1 && (await capturing()), `max concurrent recorders over 10s=${maxRec}`);
+
+  // I. A tab on the OTHER origin (127.0.0.1 vs localhost) must not capture
+  // in parallel (server lease), and takes over when the capturing tab closes.
+  const page3 = await context.newPage();
+  await page3.goto(ORIGIN.replace("localhost", "127.0.0.1") + "/");
+  await sleep(12_000);
+  const p3cap = async () => (await page3.locator('[data-testid="capture-toggle"]').textContent().catch(() => ""))?.includes("Stop Capture");
+  record("I. other-origin tab stays on standby (server lease)", !(await p3cap()) && (await page3.locator('[data-testid="capture-standby"]').count()) === 1 && (await capturing()));
+  await page.close();
+  t = Date.now();
+  record("I. other-origin tab takes over when the capturing tab closes", await (async () => {
+    const end = Date.now() + 40_000;
+    while (Date.now() < end) { if (await p3cap()) return true; await sleep(500); }
+    return false;
+  })(), `${Date.now() - t}ms`);
+  record("I. chunks flowing from the takeover tab", await postsFlowing(20_000));
 } catch (err) {
   record("harness error", false, String(err && err.stack || err));
 } finally {

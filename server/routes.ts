@@ -10,10 +10,12 @@ import { extractAddress } from "@shared/extract-address";
 import { getDatabase, isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
 import { getWhisperModel } from "./whisper";
+import { decideLease, releaseLease, type CaptureLease } from "@shared/capture-lease";
 
 const sseClients = new Set<Response>();
 
 const serverStartedAt = Date.now();
+let captureLease: CaptureLease | null = null;
 let lastCaptureHeartbeat: {
   at: number;
   source: string | null;
@@ -833,7 +835,36 @@ export async function registerRoutes(
       uptimeMs: now - serverStartedAt,
       lastHeartbeatAgoMs: lastCaptureHeartbeat ? now - lastCaptureHeartbeat.at : null,
       last: lastCaptureHeartbeat,
+      leaseHolder: captureLease && captureLease.expiresAt > now ? captureLease.tabId : null,
     });
+  });
+
+  // One capturing tab per box, across origins (shared/capture-lease.ts).
+  app.post("/api/capture/lease", (req, res) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const tabId = typeof b.tabId === "string" ? b.tabId.slice(0, 64) : "";
+    const decision = decideLease(
+      captureLease,
+      { tabId, capturing: b.capturing === true, force: b.force === true },
+      Date.now(),
+    );
+    if (decision.lease?.tabId !== captureLease?.tabId && decision.granted) {
+      console.log(`[capture] lease -> ${tabId}${b.force === true ? " (Start pressed)" : ""}`);
+    }
+    captureLease = decision.lease;
+    res.json({ granted: decision.granted, ttlMs: decision.lease ? decision.lease.expiresAt - Date.now() : 0 });
+  });
+
+  app.post("/api/capture/lease/release", express.text({ type: "*/*" }), (req, res) => {
+    let tabId = "";
+    try {
+      const raw = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+      tabId = typeof raw?.tabId === "string" ? raw.tabId : "";
+    } catch {
+      // ignore malformed beacon
+    }
+    captureLease = releaseLease(captureLease, tabId);
+    res.json({ ok: true });
   });
 
   // Get all dispatch events

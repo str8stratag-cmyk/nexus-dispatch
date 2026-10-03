@@ -296,8 +296,17 @@ blank white page. Now:
   restarts capture when wanted but not running (load, HMR, mic stream ended,
   recorder error), restarts a pipeline that has produced no chunk for ~20s,
   and as a last resort reloads the page (max once per 10 min).
-- **One capturing tab per desk origin** (`lib/capture-lock.ts`, Web Locks);
-  extra tabs show "Standby" and take over if the capturing tab closes.
+- **One capture loop per desk:** within a page, a start guard + session
+  token stop double-clicks / Stop-Start races / HMR from running two recorder
+  loops on the same audio (seen on DISP-2 2026-10-03). Across tabs, a Web Lock
+  (same origin, `lib/capture-lock.ts`) plus a server lease
+  (`/api/capture/lease`, `shared/capture-lease.ts`) that also covers
+  `127.0.0.1:5000` vs `localhost:5000` tabs. Extra tabs show "Standby" and
+  take over if the capturing tab closes; pressing Start in a tab takes over.
+- **Changing VITE_CHUNK_MS / VITE_SILENCE_RMS:** restart the app as before. The
+  open tab keeps capturing on the old value (no forced reload) and picks up the
+  new one at its next reload (the 2h self-reload, or reload the tab); capture
+  resumes by itself after any reload.
 - **No more blank screen:** `components/error-boundary.tsx` shows the error and
   reloads with backoff; an inline boot guard in `client/index.html` reloads a
   page whose JS never started.

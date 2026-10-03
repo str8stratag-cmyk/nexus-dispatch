@@ -15,6 +15,7 @@ import {
 } from "../client/src/lib/capture-supervisor";
 import { crashReloadDelayMs } from "../client/src/components/error-boundary";
 import { isHmrEnabled } from "../server/vite";
+import { decideLease, releaseLease, LEASE_TTL_MS } from "../shared/capture-lease";
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -110,6 +111,33 @@ check("HMR default off", isHmrEnabled({} as NodeJS.ProcessEnv), false);
 check("HMR DM_HMR=1", isHmrEnabled({ DM_HMR: "1" } as NodeJS.ProcessEnv), true);
 check("HMR DM_HMR=true", isHmrEnabled({ DM_HMR: "true" } as NodeJS.ProcessEnv), true);
 check("HMR DM_HMR=0", isHmrEnabled({ DM_HMR: "0" } as NodeJS.ProcessEnv), false);
+
+// Per-box capture lease: one capturing tab across origins.
+{
+  const later = 100_000;
+  let d = decideLease(null, { tabId: "A", capturing: false }, later);
+  check("lease: first claimant after grace wins", d.granted, true);
+  const leaseA = d.lease;
+  d = decideLease(leaseA, { tabId: "B", capturing: false }, later + 1_000);
+  check("lease: second tab denied", d.granted, false);
+  check("lease: holder unchanged", d.lease?.tabId, "A");
+  d = decideLease(leaseA, { tabId: "B", capturing: true }, later + 1_000);
+  check("lease: second tab denied even if capturing", d.granted, false);
+  d = decideLease(leaseA, { tabId: "A", capturing: true }, later + 10_000);
+  check("lease: holder renews", d.granted && d.lease?.expiresAt === later + 10_000 + LEASE_TTL_MS, true);
+  d = decideLease(leaseA, { tabId: "B", capturing: false }, later + LEASE_TTL_MS + 1);
+  check("lease: expired lease taken over", d.granted && d.lease?.tabId === "B", true);
+  d = decideLease(leaseA, { tabId: "B", capturing: false, force: true }, later + 1_000);
+  check("lease: Start pressed (force) takes over", d.granted && d.lease?.tabId === "B", true);
+  d = decideLease(null, { tabId: "B", capturing: false }, 10_000);
+  check("lease: after restart, a lone fresh page is granted at once", d.granted, true);
+  d = decideLease(d.lease, { tabId: "A", capturing: true }, 12_000);
+  check("lease: ...and the old capturer is then denied (single capturer)", d.granted, false);
+  d = decideLease(null, { tabId: "", capturing: true }, later);
+  check("lease: empty tab id refused", d.granted, false);
+  check("lease: release by holder", releaseLease(leaseA, "A"), null);
+  check("lease: release by other tab ignored", releaseLease(leaseA, "B")?.tabId, "A");
+}
 
 console.log(failures ? `${failures} FAILURES` : "all capture-supervisor tests passed");
 process.exit(failures ? 1 : 0);

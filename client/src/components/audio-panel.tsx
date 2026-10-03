@@ -12,6 +12,8 @@ import {
   isPermissionError,
 } from "@/lib/capture-supervisor";
 import { getCaptureLockState, subscribeCaptureLock } from "@/lib/capture-lock";
+import { requestLease, hookLeaseRelease, releaseLeaseNow, type LeaseState } from "@/lib/capture-lease";
+import { LEASE_RENEW_MS } from "@shared/capture-lease";
 import { useDispatchBuffer } from "@/hooks/use-dispatch-buffer";
 import { useKeywords } from "@/hooks/use-keywords";
 import RmsMeter from "./rms-meter";
@@ -193,6 +195,15 @@ export default function AudioPanel({
   autoCaptureRef.current = autoCapture;
   const lockStateRef = useRef(lockState);
   lockStateRef.current = lockState;
+  // Cross-origin single-capturer lease from the server (127.0.0.1 vs
+  // localhost tabs on one box). "unknown" = server unreachable/old: fail open.
+  const [leaseState, setLeaseStateValue] = useState<LeaseState>("unknown");
+  const leaseRef = useRef<LeaseState>("unknown");
+  const leaseCheckedRef = useRef(false);
+  const setLeaseState = useCallback((next: LeaseState) => {
+    leaseRef.current = next;
+    setLeaseStateValue(next);
+  }, []);
   const startRef = useRef(start);
   startRef.current = start;
   const stopRef = useRef(stop);
@@ -223,14 +234,26 @@ export default function AudioPanel({
       const now = Date.now();
       const tickGap = now - lastTickAt;
       lastTickAt = now;
-      if (!autoCaptureRef.current || lockStateRef.current !== "held") {
+      const health = getHealthRef.current();
+      // Another tab on this box (other origin) holds the capture lease: never
+      // run a second capture loop on the same audio.
+      if (leaseRef.current === "denied") {
+        if (health.startedAt > 0) {
+          console.warn("[capture-supervisor] another tab holds the capture lease; stopping this tab's capture");
+          stopRef.current();
+        }
+        sup.failures = 0;
+        sup.recoveries = 0;
+        sup.unhealthySince = 0;
+        return;
+      }
+      if (!autoCaptureRef.current || lockStateRef.current !== "held" || !leaseCheckedRef.current) {
         sup.failures = 0;
         sup.recoveries = 0;
         sup.unhealthySince = 0;
         return;
       }
 
-      const health = getHealthRef.current();
       if (health.startedAt > 0) {
         if (isStalled(health, now, CHUNK_DURATION_MS, tickGap)) {
           // Recorder stopped finishing chunks (silent ones included): the
@@ -308,6 +331,30 @@ export default function AudioPanel({
     };
   }, [isInIframe, supported]);
 
+  // Lease renewal. Only a tab that wants to capture asks for the lease.
+  useEffect(() => {
+    if (isInIframe) return;
+    hookLeaseRelease();
+    let disposed = false;
+    const renew = async () => {
+      const capturingNow = getHealthRef.current().startedAt > 0;
+      if (!autoCaptureRef.current && !capturingNow) {
+        leaseCheckedRef.current = true;
+        return;
+      }
+      const next = await requestLease(capturingNow);
+      if (disposed) return;
+      leaseCheckedRef.current = true;
+      if (next !== "unknown") setLeaseState(next);
+    };
+    void renew();
+    const timer = window.setInterval(() => void renew(), LEASE_RENEW_MS);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [isInIframe, setLeaseState]);
+
   // Liveness heartbeat for the desk watchdog: it reopens the page only when
   // NO heartbeat arrives at all (tab closed, crashed, or stuck blank). A page
   // that is alive but not capturing is the supervisor's job, not the watchdog's.
@@ -326,6 +373,7 @@ export default function AudioPanel({
           capturing: health.startedAt > 0,
           autoCapture: autoCaptureRef.current,
           lock: lockStateRef.current,
+          lease: leaseRef.current,
           lastChunkAgoMs: health.lastChunkAt ? now - health.lastChunkAt : null,
           lastSentAgoMs: health.lastSentAt ? now - health.lastSentAt : null,
         }),
@@ -339,6 +387,10 @@ export default function AudioPanel({
   const handleStart = async () => {
     setAutoCapture(true);
     resetSupervisor();
+    // The tab the operator clicked wins: take the lease over from any other tab.
+    setLeaseState("granted");
+    leaseCheckedRef.current = true;
+    void requestLease(false, true);
     try {
       await start();
       setMicBlocked(false);
@@ -353,6 +405,8 @@ export default function AudioPanel({
     // An explicit Stop is the only thing that turns auto-capture off.
     setAutoCapture(false);
     resetSupervisor();
+    releaseLeaseNow();
+    setLeaseState("unknown");
     flush().finally(() => stop());
   }, [flush, stop, setAutoCapture, resetSupervisor]);
 
@@ -459,7 +513,7 @@ export default function AudioPanel({
         </div>
       )}
 
-      {autoCapture && lockState === "standby" && !isCapturing && (
+      {autoCapture && (lockState === "standby" || leaseState === "denied") && !isCapturing && (
         <div className="text-xs text-sky-400 p-2 rounded bg-sky-950/30 border border-sky-900/40" data-testid="capture-standby">
           Standby: another Dispatch Monitor tab on this desk is capturing. This tab takes over automatically if that one closes.
         </div>
