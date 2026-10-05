@@ -10,6 +10,11 @@ import { extractAddress } from "@shared/extract-address";
 import { getDatabase, isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
 import { getWhisperModel } from "./whisper";
+import {
+  parseAcceptCallbackData,
+  formatTelegramAccepterName,
+  isTelegramAcceptPollEnabled,
+} from "./telegram-accept-helpers";
 
 const sseClients = new Set<Response>();
 
@@ -1478,7 +1483,13 @@ function formatTelegramMessage(event: DispatchEvent, options: FormatOptions = {}
   return msg;
 }
 
-async function handleTelegramUpdate(update: any): Promise<void> {
+export {
+  parseAcceptCallbackData,
+  formatTelegramAccepterName,
+  isTelegramAcceptPollEnabled,
+} from "./telegram-accept-helpers";
+
+export async function handleTelegramUpdate(update: any): Promise<void> {
   if (!update.callback_query) return;
 
   const callback = update.callback_query;
@@ -1487,18 +1498,17 @@ async function handleTelegramUpdate(update: any): Promise<void> {
   const messageId = callback.message?.message_id;
 
   if (!data || !chatId || !messageId) return;
-  if (!data.startsWith("accept_")) return;
 
-  const eventId = parseInt(data.replace("accept_", ""), 10);
-  if (Number.isNaN(eventId)) return;
+  const eventId = parseAcceptCallbackData(data);
+  if (eventId == null) return;
 
   const { botToken, chatId: configuredChatId } = await getTelegramCredentials();
   if (!botToken || !configuredChatId || String(chatId) !== configuredChatId) {
     return;
   }
 
-  const event = await storage.getEvent(eventId);
-  if (!event) {
+  const existing = await storage.getEvent(eventId);
+  if (!existing) {
     await telegramApiCall(botToken, "answerCallbackQuery", {
       callback_query_id: callback.id,
       text: "This dispatch no longer exists.",
@@ -1507,7 +1517,7 @@ async function handleTelegramUpdate(update: any): Promise<void> {
     return;
   }
 
-  if (event.status === "accepted") {
+  if (existing.status === "accepted") {
     await telegramApiCall(botToken, "answerCallbackQuery", {
       callback_query_id: callback.id,
       text: "This call has already been accepted.",
@@ -1516,14 +1526,27 @@ async function handleTelegramUpdate(update: any): Promise<void> {
     return;
   }
 
-  const accepter = callback.from
-    ? callback.from.username
-      ? `@${callback.from.username}`
-      : callback.from.first_name || `User ${callback.from.id}`
-    : "A driver";
+  if (existing.status !== "active") {
+    await telegramApiCall(botToken, "answerCallbackQuery", {
+      callback_query_id: callback.id,
+      text: "This dispatch is no longer available to accept.",
+      show_alert: true,
+    });
+    return;
+  }
 
-  const updated = await storage.updateEventStatus(eventId, "accepted");
-  if (!updated) return;
+  const accepter = formatTelegramAccepterName(callback.from);
+
+  // Atomic claim — if another tap (or desk) already accepted, treat as already taken.
+  const updated = await storage.claimEventAccepted(eventId, accepter);
+  if (!updated) {
+    await telegramApiCall(botToken, "answerCallbackQuery", {
+      callback_query_id: callback.id,
+      text: "This call has already been accepted.",
+      show_alert: true,
+    });
+    return;
+  }
   broadcastEvent(updated);
 
   // Edit the original dispatch message to show it's taken and remove the accept button.
@@ -1583,3 +1606,128 @@ export async function deleteTelegramWebhook(): Promise<{ success: boolean; descr
   }
   return { success: data.ok, description: data.description };
 }
+
+
+// ---------------------------------------------------------------------------
+// Accept-button long-poll (Disp-1 only via TELEGRAM_ACCEPT_POLL=1)
+// ---------------------------------------------------------------------------
+// Desks have no public HTTPS URL, so Telegram cannot push callback_query to
+// /api/telegram/webhook. Exactly one designated desk (preferred: Disp-1) sets
+// TELEGRAM_ACCEPT_POLL=1 and long-polls getUpdates. All other desks leave the
+// flag unset/off so they never compete for the bot's update stream.
+//
+// If two desks somehow poll the same bot: Telegram returns 409 Conflict to the
+// loser (we back off). The shared Mongo offset (telegram_poll_offset) and the
+// atomic claimEventAccepted() guard prevent double-accept on the board.
+//
+// Webhook path (TELEGRAM_WEBHOOK_URL) is for a future public host
+// (AWS / app.StrataG.app). Webhook and polling are mutually exclusive for a
+// bot — if both env vars are set, webhook wins and polling stays off.
+
+const TELEGRAM_POLL_OFFSET_KEY = "telegram_poll_offset";
+let telegramPollingStarted = false;
+
+export function startTelegramPolling(): void {
+  if (telegramPollingStarted) return;
+  telegramPollingStarted = true;
+  void telegramPollLoop();
+}
+
+async function telegramPollLoop(): Promise<void> {
+  let backoffMs = 5_000;
+  for (;;) {
+    const { botToken } = await getTelegramCredentials();
+    if (!botToken) {
+      console.warn("[telegram] Accept poll: bot token missing — retry in 60s");
+      await new Promise((r) => setTimeout(r, 60_000));
+      continue;
+    }
+
+    let data: { ok: boolean; result?: any[]; description?: string };
+    try {
+      const storedRaw = (await storage.getSetting(TELEGRAM_POLL_OFFSET_KEY))?.value ?? "0";
+      const stored = parseInt(storedRaw, 10);
+      const offset = Number.isFinite(stored) && stored > 0 ? stored : undefined;
+      // Long-poll ~25s. Node fetch waits; allowed_updates keeps the queue to Accept taps.
+      data = await telegramApiCall(botToken, "getUpdates", {
+        offset,
+        timeout: 25,
+        allowed_updates: ["callback_query"],
+      });
+    } catch (err: any) {
+      console.error(
+        `[telegram] getUpdates failed: ${err?.message ?? err} — retry in ${backoffMs / 1000}s`,
+      );
+      await new Promise((r) => setTimeout(r, backoffMs));
+      backoffMs = Math.min(backoffMs * 2, 120_000);
+      continue;
+    }
+
+    if (!data.ok) {
+      // 409 = another consumer holds the bot (webhook still set, or another desk polling).
+      console.error(
+        `[telegram] getUpdates: ${data.description} — backing off ${backoffMs / 1000}s`,
+      );
+      await new Promise((r) => setTimeout(r, backoffMs));
+      backoffMs = Math.min(backoffMs * 2, 120_000);
+      continue;
+    }
+
+    backoffMs = 5_000;
+    for (const update of data.result ?? []) {
+      try {
+        await handleTelegramUpdate(update);
+      } catch (err) {
+        console.error("[telegram] callback handling failed:", err);
+      }
+      // Advance offset even on handler failure so a poison update cannot wedge the loop.
+      await storage.upsertSetting({
+        key: TELEGRAM_POLL_OFFSET_KEY,
+        value: String(update.update_id + 1),
+      });
+    }
+  }
+}
+
+/**
+ * Start Telegram Accept transport for this process.
+ * - TELEGRAM_WEBHOOK_URL set → register webhook (future public host).
+ * - else TELEGRAM_ACCEPT_POLL=1 → delete any leftover webhook once, then long-poll.
+ * - else → no Accept receiver on this desk (send still works; taps go nowhere).
+ */
+export async function initTelegramAcceptTransport(): Promise<void> {
+  const webhookUrl = process.env.TELEGRAM_WEBHOOK_URL?.trim();
+  const poll = isTelegramAcceptPollEnabled();
+
+  if (webhookUrl) {
+    if (poll) {
+      console.warn(
+        "[telegram] TELEGRAM_WEBHOOK_URL and TELEGRAM_ACCEPT_POLL are both set — using webhook; polling stays off",
+      );
+    }
+    await setTelegramWebhook(webhookUrl);
+    return;
+  }
+
+  if (!poll) {
+    console.log(
+      "[telegram] Accept receiver idle (set TELEGRAM_ACCEPT_POLL=1 on exactly one desk, preferred Disp-1, or TELEGRAM_WEBHOOK_URL for a public host)",
+    );
+    return;
+  }
+
+  const { botToken } = await getTelegramCredentials();
+  if (!botToken) {
+    console.warn("[telegram] TELEGRAM_ACCEPT_POLL set but bot token not configured — not polling");
+    return;
+  }
+
+  // Clear a leftover webhook once at setup of the polling desk so getUpdates works.
+  // Do NOT call this on every desk or as the default "no webhook URL" path.
+  const cleared = await deleteTelegramWebhook();
+  console.log(
+    `[telegram] TELEGRAM_ACCEPT_POLL enabled — long-polling Accept callbacks (webhook cleared: ${cleared.success})`,
+  );
+  startTelegramPolling();
+}
+

@@ -29,6 +29,7 @@ interface DispatchEventRow {
   isManual: boolean;
   geocodedRoad: string | null;
   locationApprox: boolean;
+  acceptedBy?: string | null;
   createdAt: string;
 }
 
@@ -45,6 +46,7 @@ function eventsToCSV(events: DispatchEventRow[]): string {
     "Latitude",
     "Longitude",
     "Status",
+    "Accepted By",
     "Manual Dispatch",
     "Keywords",
     "Description",
@@ -68,6 +70,7 @@ function eventsToCSV(events: DispatchEventRow[]): string {
       e.lat ?? "",
       e.lng ?? "",
       e.status || "",
+      e.acceptedBy || "",
       e.isManual ? "Yes" : "No",
       parsedKeywords.map((k: any) => k.signalType).join("; "),
       e.description || "",
@@ -297,6 +300,11 @@ export default function EventLog() {
               <div className="flex items-center gap-1 text-[10px] text-red-400 font-semibold uppercase tracking-wider">
                 <ShieldAlert className="h-3 w-3" />
                 Accepted
+                {event.acceptedBy ? (
+                  <span className="normal-case tracking-normal font-medium text-red-300/80">
+                    · {event.acceptedBy}
+                  </span>
+                ) : null}
               </div>
             </div>
             {event.address && (

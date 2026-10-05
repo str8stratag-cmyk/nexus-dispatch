@@ -19,6 +19,8 @@ export interface DispatchEvent {
   geocodedRoad: string | null;
   whisperModel: string | null;
   locationApprox: boolean;
+  /** Telegram (or board) acceptor identity when status became accepted. */
+  acceptedBy: string | null;
   createdAt: string;
 }
 
@@ -46,6 +48,7 @@ export const insertDispatchEventSchema = z.object({
   geocodedRoad: z.string().nullable().optional(),
   whisperModel: z.string().nullable().optional(),
   locationApprox: z.boolean().default(false),
+  acceptedBy: z.string().nullable().optional(),
   // Intake-only flag: when true, skip the near-duplicate suppression below.
   // Used by the manual entry form so dispatchers can always log a call.
   // Stripped before the event is stored.

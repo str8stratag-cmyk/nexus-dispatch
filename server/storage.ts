@@ -23,6 +23,7 @@ interface DispatchEventDocument {
   geocodedRoad: string | null;
   whisperModel: string | null;
   locationApprox?: boolean;
+  acceptedBy?: string | null;
   createdAt: Date;
 }
 
@@ -52,6 +53,7 @@ function mapEvent(row: DispatchEventDocument): DispatchEvent {
     geocodedRoad: row.geocodedRoad ?? null,
     whisperModel: row.whisperModel ?? null,
     locationApprox: row.locationApprox ?? false,
+    acceptedBy: row.acceptedBy ?? null,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -65,6 +67,8 @@ export interface IStorage {
   getEvent(id: number): Promise<DispatchEvent | undefined>;
   createEvent(event: InsertDispatchEvent): Promise<DispatchEvent>;
   updateEventStatus(id: number, status: string): Promise<DispatchEvent | undefined>;
+  /** Atomically claim an active event as accepted. Returns undefined if missing or already accepted. */
+  claimEventAccepted(id: number, acceptedBy: string | null): Promise<DispatchEvent | undefined>;
   updateEventTelegramMessageId(id: number, telegramMessageId: string): Promise<DispatchEvent | undefined>;
   getSetting(key: string): Promise<Setting | undefined>;
   upsertSetting(setting: InsertSettings): Promise<Setting>;
@@ -123,6 +127,7 @@ export class DatabaseStorage implements IStorage {
       geocodedRoad: event.geocodedRoad ?? null,
       whisperModel: event.whisperModel ?? null,
       locationApprox: event.locationApprox ?? false,
+      acceptedBy: event.acceptedBy ?? null,
       createdAt: new Date(),
     };
     await database.collection<DispatchEventDocument>("dispatchEvents").insertOne(document);
@@ -134,6 +139,18 @@ export class DatabaseStorage implements IStorage {
     const event = await database.collection<DispatchEventDocument>("dispatchEvents").findOneAndUpdate(
       { id },
       { $set: { status } },
+      { returnDocument: "after" },
+    );
+    return event ? mapEvent(event) : undefined;
+  }
+
+  async claimEventAccepted(id: number, acceptedBy: string | null): Promise<DispatchEvent | undefined> {
+    const database = await getDatabase();
+    // Only claim currently-active events so a late tap cannot revive a
+    // resolved/cleared call, and two concurrent Accept taps cannot both win.
+    const event = await database.collection<DispatchEventDocument>("dispatchEvents").findOneAndUpdate(
+      { id, status: "active" },
+      { $set: { status: "accepted", acceptedBy } },
       { returnDocument: "after" },
     );
     return event ? mapEvent(event) : undefined;
