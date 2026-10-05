@@ -48,7 +48,8 @@ app.use((req, res, next) => {
 
   res.on("finish", () => {
     const duration = Date.now() - start;
-    if (path.startsWith("/api")) {
+    // The capture page heartbeats/renews its lease constantly; don't log each.
+    if (path.startsWith("/api") && !path.startsWith("/api/capture/")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       // GET bodies (the polled /api/events feed) are not logged: each one
       // stringified the full event array, grew the log to 1GB in days, and

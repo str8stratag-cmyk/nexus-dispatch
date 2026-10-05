@@ -12,7 +12,30 @@
     />
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div id="dm-boot" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font:14px system-ui,sans-serif;color:#94a3b8;background:#0b0f17">Loading Dispatch Monitor…</div></div>
+    <script>
+      // Boot guard (2026-10-03): if the app never mounts -- e.g. the page was
+      // reloaded into a freshly restarted dev server whose module graph or
+      // dependency pre-bundle failed to load -- the tab used to sit blank white
+      // until someone noticed (DISP-4, 2026-10-02). Reload with backoff
+      // (20s, 40s, 80s ... max 5 min) until it boots. The error boundary in
+      // client/src/components/error-boundary.tsx sets __dmBooted and resets
+      // the backoff after a minute of clean running. Plain inline script so it
+      // runs even when every module fails.
+      (function () {
+        var KEY = "dm.bootReloads";
+        var n = 0;
+        try { n = parseInt(sessionStorage.getItem(KEY) || "0", 10) || 0; } catch (e) {}
+        var wait = Math.min(20000 * Math.pow(2, Math.min(n, 10)), 300000);
+        setTimeout(function () {
+          if (window.__dmBooted) return;
+          try { sessionStorage.setItem(KEY, String(n + 1)); } catch (e) {}
+          var el = document.getElementById("dm-boot");
+          if (el) el.textContent = "Dispatch Monitor did not start — reloading…";
+          location.reload();
+        }, wait);
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
