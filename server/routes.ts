@@ -1,12 +1,15 @@
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import type { Server } from "node:http";
 import { hostname } from "node:os";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import rateLimit from "express-rate-limit";
 import { ObjectId } from "mongodb";
 import { storage } from "./storage";
 import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent, type InsertDispatchEvent } from "@shared/schema";
 import { normalizeKeywordEntry } from "@shared/keywords";
 import { extractAddress } from "@shared/extract-address";
+import { suggestStreets, levenshtein, type StreetDictionary } from "@shared/street-match";
 import { getDatabase, isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
 import { getWhisperModel } from "./whisper";
@@ -165,6 +168,9 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   [/\bdale\s+labrie\b/gi, "Dale Mabry Hwy"],
   [/\bdale\s+may\s+be\b(?=\s*(?:[,.;:!?]|$)|\s+(?:&|(?:and|at|highway|hwy|north|south|east|west|northbound|southbound|thank)\b))/gi, "Dale Mabry Hwy"],
   [/\bhenderson(?:\s+blvd|\s+boulevard)?\b/gi, "Henderson Blvd"],
+  // Whisper fuses "Dale Mabry" into one word (2026-10-01: "Cypress and
+  // Delmigras" was a real Cypress & Dale Mabry call that never dispatched).
+  [/\bdelmigras\b/gi, "Dale Mabry Hwy"],
   [/\bcolumbus(?:\s+ave(?:nue)?)?\b/gi, "Columbus Ave"],
   [/\barmenia(?:\s+ave(?:nue)?)?\b/gi, "Armenia Ave"],
   // Armenia Ave & Broad St, "304 East Handler" (2026-10-01, real quarantine
@@ -750,6 +756,24 @@ async function roadMentionedRecently(address: string | null | undefined): Promis
   });
 }
 
+// Street dictionary for fuzzy-matching garbled street names against real
+// Tampa/Hillsborough roads (shared/street-match.ts). Generated once by
+// scripts/generate-street-dictionary.ts and committed; loaded lazily. Feature
+// is off when the file is missing (e.g. dictionary not generated on a box).
+let streetDictionary: StreetDictionary | null | undefined;
+function getStreetDictionary(): StreetDictionary | null {
+  if (streetDictionary !== undefined) return streetDictionary;
+  try {
+    streetDictionary = JSON.parse(
+      readFileSync(path.join(process.cwd(), "shared", "tampa-street-dictionary.json"), "utf8"),
+    ) as StreetDictionary;
+  } catch {
+    streetDictionary = null;
+    console.log("[street-match] tampa-street-dictionary.json not found — fuzzy street matching disabled");
+  }
+  return streetDictionary;
+}
+
 // Rejected auto-dispatches go to a quarantine collection instead of being
 // silently dropped, so a real call killed by a false-positive gate (spam
 // filter, address resolution) can be reviewed and recovered afterwards.
@@ -1013,6 +1037,27 @@ export async function registerRoutes(
         }
       }
 
+      // Street-dictionary correction: when geocoding failed, match the garbled
+      // street against real Tampa roads and re-geocode the corrected query.
+      // geocodeAddress only returns once the provider's match contains the
+      // queried road, so a non-null result IS the verification — a wrong
+      // guess can't produce a pin. Score floor 0.85: live corrections publish
+      // immediately.
+      if (!lat && !lng && parsed.address) {
+        const [suggestion] = suggestStreets(parsed.address, getStreetDictionary());
+        if (suggestion && suggestion.score >= 0.85) {
+          const correctedGeo = await geocodeAddress(suggestion.correctedAddress);
+          if (correctedGeo) {
+            console.log(
+              `[streetfix] "${parsed.address}" -> "${suggestion.correctedAddress}" (score ${suggestion.score})`,
+            );
+            parsed.address = suggestion.correctedAddress;
+            lat = correctedGeo.lat;
+            lng = correctedGeo.lng;
+          }
+        }
+      }
+
       // Cross-reference the resolved coordinates against the actual road name.
       if (lat && lng) {
         geocodedRoad = await reverseGeocodeRoad(lat, lng);
@@ -1078,21 +1123,7 @@ export async function registerRoutes(
         // equality misses re-broadcasts of the same call. Fuzzy fallback:
         // substring, token overlap, or near-levenshtein. Numbered streets must
         // match exactly — "50th st" vs "56th st" is a different incident.
-        const levenshtein = (a: string, b: string): number => {
-          let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
-          for (let i = 1; i <= a.length; i++) {
-            let cur = [i];
-            for (let j = 1; j <= b.length; j++) {
-              cur[j] = Math.min(
-                prev[j] + 1,
-                cur[j - 1] + 1,
-                prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
-              );
-            }
-            prev = cur;
-          }
-          return prev[b.length];
-        };
+        // levenshtein imported from @shared/street-match.
         const addressesSimilar = (a: string, b: string): boolean => {
           if (a.includes(b) || b.includes(a)) return true;
           const numsA = a.split(" ").filter((t) => /^\d/.test(t));
