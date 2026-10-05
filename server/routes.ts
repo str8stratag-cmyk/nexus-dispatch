@@ -1,16 +1,24 @@
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import type { Server } from "node:http";
 import { hostname } from "node:os";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import rateLimit from "express-rate-limit";
 import { ObjectId } from "mongodb";
 import { storage } from "./storage";
 import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent, type InsertDispatchEvent } from "@shared/schema";
 import { normalizeKeywordEntry } from "@shared/keywords";
 import { extractAddress } from "@shared/extract-address";
+import { suggestStreets, levenshtein, type StreetDictionary } from "@shared/street-match";
 import { getDatabase, isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
 import { getWhisperModel } from "./whisper";
 import { decideLease, releaseLease, type CaptureLease } from "@shared/capture-lease";
+import {
+  parseAcceptCallbackData,
+  formatTelegramAccepterName,
+  isTelegramAcceptPollEnabled,
+} from "./telegram-accept-helpers";
 
 const sseClients = new Set<Response>();
 
@@ -173,6 +181,9 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   [/\bdale\s+labrie\b/gi, "Dale Mabry Hwy"],
   [/\bdale\s+may\s+be\b(?=\s*(?:[,.;:!?]|$)|\s+(?:&|(?:and|at|highway|hwy|north|south|east|west|northbound|southbound|thank)\b))/gi, "Dale Mabry Hwy"],
   [/\bhenderson(?:\s+blvd|\s+boulevard)?\b/gi, "Henderson Blvd"],
+  // Whisper fuses "Dale Mabry" into one word (2026-10-01: "Cypress and
+  // Delmigras" was a real Cypress & Dale Mabry call that never dispatched).
+  [/\bdelmigras\b/gi, "Dale Mabry Hwy"],
   [/\bcolumbus(?:\s+ave(?:nue)?)?\b/gi, "Columbus Ave"],
   [/\barmenia(?:\s+ave(?:nue)?)?\b/gi, "Armenia Ave"],
   // Armenia Ave & Broad St, "304 East Handler" (2026-10-01, real quarantine
@@ -758,6 +769,24 @@ async function roadMentionedRecently(address: string | null | undefined): Promis
   });
 }
 
+// Street dictionary for fuzzy-matching garbled street names against real
+// Tampa/Hillsborough roads (shared/street-match.ts). Generated once by
+// scripts/generate-street-dictionary.ts and committed; loaded lazily. Feature
+// is off when the file is missing (e.g. dictionary not generated on a box).
+let streetDictionary: StreetDictionary | null | undefined;
+function getStreetDictionary(): StreetDictionary | null {
+  if (streetDictionary !== undefined) return streetDictionary;
+  try {
+    streetDictionary = JSON.parse(
+      readFileSync(path.join(process.cwd(), "shared", "tampa-street-dictionary.json"), "utf8"),
+    ) as StreetDictionary;
+  } catch {
+    streetDictionary = null;
+    console.log("[street-match] tampa-street-dictionary.json not found — fuzzy street matching disabled");
+  }
+  return streetDictionary;
+}
+
 // Rejected auto-dispatches go to a quarantine collection instead of being
 // silently dropped, so a real call killed by a false-positive gate (spam
 // filter, address resolution) can be reviewed and recovered afterwards.
@@ -1078,6 +1107,27 @@ export async function registerRoutes(
         }
       }
 
+      // Street-dictionary correction: when geocoding failed, match the garbled
+      // street against real Tampa roads and re-geocode the corrected query.
+      // geocodeAddress only returns once the provider's match contains the
+      // queried road, so a non-null result IS the verification — a wrong
+      // guess can't produce a pin. Score floor 0.85: live corrections publish
+      // immediately.
+      if (!lat && !lng && parsed.address) {
+        const [suggestion] = suggestStreets(parsed.address, getStreetDictionary());
+        if (suggestion && suggestion.score >= 0.85) {
+          const correctedGeo = await geocodeAddress(suggestion.correctedAddress);
+          if (correctedGeo) {
+            console.log(
+              `[streetfix] "${parsed.address}" -> "${suggestion.correctedAddress}" (score ${suggestion.score})`,
+            );
+            parsed.address = suggestion.correctedAddress;
+            lat = correctedGeo.lat;
+            lng = correctedGeo.lng;
+          }
+        }
+      }
+
       // Cross-reference the resolved coordinates against the actual road name.
       if (lat && lng) {
         geocodedRoad = await reverseGeocodeRoad(lat, lng);
@@ -1143,21 +1193,7 @@ export async function registerRoutes(
         // equality misses re-broadcasts of the same call. Fuzzy fallback:
         // substring, token overlap, or near-levenshtein. Numbered streets must
         // match exactly — "50th st" vs "56th st" is a different incident.
-        const levenshtein = (a: string, b: string): number => {
-          let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
-          for (let i = 1; i <= a.length; i++) {
-            let cur = [i];
-            for (let j = 1; j <= b.length; j++) {
-              cur[j] = Math.min(
-                prev[j] + 1,
-                cur[j - 1] + 1,
-                prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
-              );
-            }
-            prev = cur;
-          }
-          return prev[b.length];
-        };
+        // levenshtein imported from @shared/street-match.
         const addressesSimilar = (a: string, b: string): boolean => {
           if (a.includes(b) || b.includes(a)) return true;
           const numsA = a.split(" ").filter((t) => /^\d/.test(t));
@@ -1548,7 +1584,13 @@ function formatTelegramMessage(event: DispatchEvent, options: FormatOptions = {}
   return msg;
 }
 
-async function handleTelegramUpdate(update: any): Promise<void> {
+export {
+  parseAcceptCallbackData,
+  formatTelegramAccepterName,
+  isTelegramAcceptPollEnabled,
+} from "./telegram-accept-helpers";
+
+export async function handleTelegramUpdate(update: any): Promise<void> {
   if (!update.callback_query) return;
 
   const callback = update.callback_query;
@@ -1557,18 +1599,17 @@ async function handleTelegramUpdate(update: any): Promise<void> {
   const messageId = callback.message?.message_id;
 
   if (!data || !chatId || !messageId) return;
-  if (!data.startsWith("accept_")) return;
 
-  const eventId = parseInt(data.replace("accept_", ""), 10);
-  if (Number.isNaN(eventId)) return;
+  const eventId = parseAcceptCallbackData(data);
+  if (eventId == null) return;
 
   const { botToken, chatId: configuredChatId } = await getTelegramCredentials();
   if (!botToken || !configuredChatId || String(chatId) !== configuredChatId) {
     return;
   }
 
-  const event = await storage.getEvent(eventId);
-  if (!event) {
+  const existing = await storage.getEvent(eventId);
+  if (!existing) {
     await telegramApiCall(botToken, "answerCallbackQuery", {
       callback_query_id: callback.id,
       text: "This dispatch no longer exists.",
@@ -1577,7 +1618,7 @@ async function handleTelegramUpdate(update: any): Promise<void> {
     return;
   }
 
-  if (event.status === "accepted") {
+  if (existing.status === "accepted") {
     await telegramApiCall(botToken, "answerCallbackQuery", {
       callback_query_id: callback.id,
       text: "This call has already been accepted.",
@@ -1586,14 +1627,27 @@ async function handleTelegramUpdate(update: any): Promise<void> {
     return;
   }
 
-  const accepter = callback.from
-    ? callback.from.username
-      ? `@${callback.from.username}`
-      : callback.from.first_name || `User ${callback.from.id}`
-    : "A driver";
+  if (existing.status !== "active") {
+    await telegramApiCall(botToken, "answerCallbackQuery", {
+      callback_query_id: callback.id,
+      text: "This dispatch is no longer available to accept.",
+      show_alert: true,
+    });
+    return;
+  }
 
-  const updated = await storage.updateEventStatus(eventId, "accepted");
-  if (!updated) return;
+  const accepter = formatTelegramAccepterName(callback.from);
+
+  // Atomic claim — if another tap (or desk) already accepted, treat as already taken.
+  const updated = await storage.claimEventAccepted(eventId, accepter);
+  if (!updated) {
+    await telegramApiCall(botToken, "answerCallbackQuery", {
+      callback_query_id: callback.id,
+      text: "This call has already been accepted.",
+      show_alert: true,
+    });
+    return;
+  }
   broadcastEvent(updated);
 
   // Edit the original dispatch message to show it's taken and remove the accept button.
@@ -1653,3 +1707,128 @@ export async function deleteTelegramWebhook(): Promise<{ success: boolean; descr
   }
   return { success: data.ok, description: data.description };
 }
+
+
+// ---------------------------------------------------------------------------
+// Accept-button long-poll (Disp-1 only via TELEGRAM_ACCEPT_POLL=1)
+// ---------------------------------------------------------------------------
+// Desks have no public HTTPS URL, so Telegram cannot push callback_query to
+// /api/telegram/webhook. Exactly one designated desk (preferred: Disp-1) sets
+// TELEGRAM_ACCEPT_POLL=1 and long-polls getUpdates. All other desks leave the
+// flag unset/off so they never compete for the bot's update stream.
+//
+// If two desks somehow poll the same bot: Telegram returns 409 Conflict to the
+// loser (we back off). The shared Mongo offset (telegram_poll_offset) and the
+// atomic claimEventAccepted() guard prevent double-accept on the board.
+//
+// Webhook path (TELEGRAM_WEBHOOK_URL) is for a future public host
+// (AWS / app.StrataG.app). Webhook and polling are mutually exclusive for a
+// bot — if both env vars are set, webhook wins and polling stays off.
+
+const TELEGRAM_POLL_OFFSET_KEY = "telegram_poll_offset";
+let telegramPollingStarted = false;
+
+export function startTelegramPolling(): void {
+  if (telegramPollingStarted) return;
+  telegramPollingStarted = true;
+  void telegramPollLoop();
+}
+
+async function telegramPollLoop(): Promise<void> {
+  let backoffMs = 5_000;
+  for (;;) {
+    const { botToken } = await getTelegramCredentials();
+    if (!botToken) {
+      console.warn("[telegram] Accept poll: bot token missing — retry in 60s");
+      await new Promise((r) => setTimeout(r, 60_000));
+      continue;
+    }
+
+    let data: { ok: boolean; result?: any[]; description?: string };
+    try {
+      const storedRaw = (await storage.getSetting(TELEGRAM_POLL_OFFSET_KEY))?.value ?? "0";
+      const stored = parseInt(storedRaw, 10);
+      const offset = Number.isFinite(stored) && stored > 0 ? stored : undefined;
+      // Long-poll ~25s. Node fetch waits; allowed_updates keeps the queue to Accept taps.
+      data = await telegramApiCall(botToken, "getUpdates", {
+        offset,
+        timeout: 25,
+        allowed_updates: ["callback_query"],
+      });
+    } catch (err: any) {
+      console.error(
+        `[telegram] getUpdates failed: ${err?.message ?? err} — retry in ${backoffMs / 1000}s`,
+      );
+      await new Promise((r) => setTimeout(r, backoffMs));
+      backoffMs = Math.min(backoffMs * 2, 120_000);
+      continue;
+    }
+
+    if (!data.ok) {
+      // 409 = another consumer holds the bot (webhook still set, or another desk polling).
+      console.error(
+        `[telegram] getUpdates: ${data.description} — backing off ${backoffMs / 1000}s`,
+      );
+      await new Promise((r) => setTimeout(r, backoffMs));
+      backoffMs = Math.min(backoffMs * 2, 120_000);
+      continue;
+    }
+
+    backoffMs = 5_000;
+    for (const update of data.result ?? []) {
+      try {
+        await handleTelegramUpdate(update);
+      } catch (err) {
+        console.error("[telegram] callback handling failed:", err);
+      }
+      // Advance offset even on handler failure so a poison update cannot wedge the loop.
+      await storage.upsertSetting({
+        key: TELEGRAM_POLL_OFFSET_KEY,
+        value: String(update.update_id + 1),
+      });
+    }
+  }
+}
+
+/**
+ * Start Telegram Accept transport for this process.
+ * - TELEGRAM_WEBHOOK_URL set → register webhook (future public host).
+ * - else TELEGRAM_ACCEPT_POLL=1 → delete any leftover webhook once, then long-poll.
+ * - else → no Accept receiver on this desk (send still works; taps go nowhere).
+ */
+export async function initTelegramAcceptTransport(): Promise<void> {
+  const webhookUrl = process.env.TELEGRAM_WEBHOOK_URL?.trim();
+  const poll = isTelegramAcceptPollEnabled();
+
+  if (webhookUrl) {
+    if (poll) {
+      console.warn(
+        "[telegram] TELEGRAM_WEBHOOK_URL and TELEGRAM_ACCEPT_POLL are both set — using webhook; polling stays off",
+      );
+    }
+    await setTelegramWebhook(webhookUrl);
+    return;
+  }
+
+  if (!poll) {
+    console.log(
+      "[telegram] Accept receiver idle (set TELEGRAM_ACCEPT_POLL=1 on exactly one desk, preferred Disp-1, or TELEGRAM_WEBHOOK_URL for a public host)",
+    );
+    return;
+  }
+
+  const { botToken } = await getTelegramCredentials();
+  if (!botToken) {
+    console.warn("[telegram] TELEGRAM_ACCEPT_POLL set but bot token not configured — not polling");
+    return;
+  }
+
+  // Clear a leftover webhook once at setup of the polling desk so getUpdates works.
+  // Do NOT call this on every desk or as the default "no webhook URL" path.
+  const cleared = await deleteTelegramWebhook();
+  console.log(
+    `[telegram] TELEGRAM_ACCEPT_POLL enabled — long-polling Accept callbacks (webhook cleared: ${cleared.success})`,
+  );
+  startTelegramPolling();
+}
+
