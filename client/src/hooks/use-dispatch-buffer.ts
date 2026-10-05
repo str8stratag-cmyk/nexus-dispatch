@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { detectKeywords, type KeywordEntry } from "@/lib/constants";
-import { extractAddress, type ExtractedAddress } from "@/lib/extract-address";
+import { extractAddress, containsMajorRoad, type ExtractedAddress } from "@/lib/extract-address";
 
 export interface DispatchPayload {
   transcript: string;
@@ -35,8 +35,20 @@ export function useDispatchBuffer({
 
   const buildPayload = useCallback((chunks: string[]): DispatchPayload & ExtractedAddress => {
     const transcript = chunks.join(" ");
-    const keywords = detectKeywords(transcript, keywordList);
+    let keywords = detectKeywords(transcript, keywordList);
     const { address, crossStreet } = extractAddress(transcript);
+    // Major road named, no crash/signal keyword ("Road Mention"): the server
+    // already has dedicated gating for this (corroboration regex, per-road
+    // 15-min cooldown, stale sweeper — see server/routes.ts) but nothing
+    // client-side ever triggered it, so it was dead code (found 2026-10-05:
+    // "on Nebraska and Hillsborough, a green Honda Element Florida tag"
+    // never even reached the server, let alone quarantine, because
+    // detectKeywords alone gates every dispatch attempt below). Synthesize
+    // the keyword so the existing server-side path actually runs; the
+    // server still decides whether it has enough corroboration to keep.
+    if (keywords.length === 0 && containsMajorRoad(transcript)) {
+      keywords = [{ keyword: "Road Mention", signalType: "Road Mention" }];
+    }
     return { transcript, keywords, address, crossStreet };
   }, [keywordList]);
 
