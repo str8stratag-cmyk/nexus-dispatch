@@ -82,6 +82,11 @@ BLOCKLIST_ENABLED = _env_flag("WHISPER_BLOCKLIST")
 # review surfaces a recurring mis-transcription (e.g. the street "Ola Ave"
 # comes out as "alla").
 HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
+    # "8401 North Carolina Street" (2026-10-01, real quarantine misses on
+    # four independent boxes) - real address is "3401 S Carolina St"
+    # (user-confirmed 2026-10-02). Optional leading "4" catches "Signal 4"
+    # fusing into "8401" with no space ("48401 North Carolina Street").
+    (re.compile(r"\b4?8401\s+north\s+carolina(?:\s+st(?:reet)?)?\b", re.IGNORECASE), "3401 S Carolina St"),
     (re.compile(r"\balla\b", re.IGNORECASE), "Ola"),
     # "amd" is Whisper's mis-hearing of "and" between street names; the junk
     # token breaks intersection parsing ("AZEELE AMD TAMPANIA").

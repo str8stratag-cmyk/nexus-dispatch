@@ -12,6 +12,24 @@ they're incident history, not a TODO list.
 
 ---
 
+## 2026-10-05 — Telegram Accept-button long-poll (Disp-1 only)
+
+**What was broken:** STGAPPBOT sends Accept inline buttons on DISPATCH RELAY
+alerts, and `/api/telegram/webhook` + `handleTelegramUpdate` already exist, but
+no desk had a public HTTPS URL and nothing polled `getUpdates`, so taps went
+nowhere.
+
+**What changed (PR `fix/telegram-accept-poll`, do not merge/promote yet):**
+- Env-gated long-poll: `TELEGRAM_ACCEPT_POLL=1` on exactly one desk (preferred
+  Disp-1). Default off so other desks never compete for the bot.
+- On that desk only: delete leftover webhook once at setup, then poll
+  `callback_query`. Shared Mongo offset + atomic `claimEventAccepted`.
+- Persist `acceptedBy` on the event; board/CSV show it. Webhook path still for
+  future AWS / app.StrataG.app (`TELEGRAM_WEBHOOK_URL`).
+- Deliberately not reusing PR #18's "delete webhook whenever no URL" design.
+
+**Still open:** merge + set env on Disp-1 after review; webhook cutover later.
+
 ## 2026-09-29 (later) — Reconciled with PR #13 (DISP-4's identity fix, merged); adopted `device-identity.local`
 
 **What happened:** DISP-4 was independently building the same fix (see

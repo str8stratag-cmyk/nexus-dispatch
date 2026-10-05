@@ -75,6 +75,16 @@ const CROSS_LINKERS = new Set(["and", "amd", "at", "in", "near", "by", "/", "bet
 // These are corrected BEFORE street extraction so "mcdull and mlk" becomes
 // "mcdill and mlk" and the address parser can find the real street names.
 const ADDRESS_HOMOPHONES: [RegExp, string][] = [
+  // "8401 North Carolina Street" (2026-10-01, real quarantine misses on
+  // FOUR independent boxes, consistently - the real address is "3401 S
+  // Carolina St", user-confirmed 2026-10-02. Extraction/geocoding both
+  // "worked" (found a street, failed to geocode it) because the wrong
+  // number/direction were transcribed, not a parsing bug. The optional
+  // leading "4" catches "Signal 4" fusing into "8401" with no space/comma
+  // ("48401 North Carolina Street") - the same artifact as the comma-gated
+  // digit-leak fix elsewhere in this file, just with no pause at all this
+  // time so that guard doesn't catch it.
+  [/\b4?8401\s+north\s+carolina(?:\s+st(?:reet)?)?\b/gi, "3401 S Carolina St"],
   // "304 East Handler" (2026-10-01, real quarantine misses across DISP-1/
   // 2/5/7, user-confirmed canonical name 2026-10-01). "Tambler" is the
   // mishearing to fix; "Handler" itself is already correct when heard right.

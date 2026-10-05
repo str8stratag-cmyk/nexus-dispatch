@@ -60,6 +60,11 @@ const cases: [string, string | null, string | null][] = [
   ["1406, North Delmarie Highway and Run 4", "1406, North Dale Mabry Hwy", "Run"],
   ["south down Maybury, good 1-6-5", "Dale Mabry", null],
   ["signal for West Shore, Louisville, and Kenney Boulevard", "West Shore Blvd", "Kennedy Blvd"],
+  // "8401 North Carolina Street" (2026-10-01, real quarantine misses on
+  // four independent boxes, near-verbatim) - real address is "3401 S
+  // Carolina St" (user-confirmed 2026-10-02).
+  ["signal 48401 North Carolina Street Signal 4 at 8401 North Carolina Street.", "3401 S Carolina St", null],
+  ["There are no injuries. 8401 North Carolina Street.", "3401 S Carolina St", null],
   ["signal 4 on the salmon expressway", "Selmon Expy", null],
   ["signal 4 on the sandman expressway", "Selmon Expy", null],
   ["signal 4 on the sellman expressway", "Selmon Expy", null],
