@@ -6,6 +6,15 @@ interface UseAudioCaptureOptions {
   onTranscript?: (text: string, isFinal: boolean) => void;
 }
 
+export interface AudioCaptureHealth {
+  /** ms epoch when the current capture started, 0 when not capturing. */
+  startedAt: number;
+  /** ms epoch when the recorder last finished a chunk, 0 if none yet. */
+  lastChunkAt: number;
+  /** ms epoch of the last successful Whisper POST, 0 if none yet. */
+  lastSentAt: number;
+}
+
 interface UseAudioCaptureReturn {
   isCapturing: boolean;
   rms: number;
@@ -14,6 +23,8 @@ interface UseAudioCaptureReturn {
   start: () => Promise<void>;
   stop: () => void;
   refreshDevices: () => Promise<void>;
+  /** Snapshot of pipeline progress for the capture supervisor (audio-panel). */
+  getHealth: () => AudioCaptureHealth;
   supported: boolean;
 }
 
@@ -26,7 +37,7 @@ function parseChunkMs(raw: unknown): number {
   const value = typeof raw === "string" ? Number.parseInt(raw, 10) : NaN;
   return Number.isFinite(value) && value >= 2_000 && value <= 15_000 ? value : DEFAULT_CHUNK_MS;
 }
-const CHUNK_DURATION_MS = parseChunkMs(import.meta.env.VITE_CHUNK_MS);
+export const CHUNK_DURATION_MS = parseChunkMs(import.meta.env.VITE_CHUNK_MS);
 const WHISPER_SERVICE_URL = import.meta.env.VITE_WHISPER_SERVICE_URL || "http://127.0.0.1:8178";
 const WHISPER_API_KEY = import.meta.env.VITE_WHISPER_API_KEY;
 
@@ -82,6 +93,23 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
   const onTranscriptRef = useRef(onTranscript);
   const isCapturingRef = useRef(false);
   const startRecordingRef = useRef<() => void>(() => undefined);
+  const startingRef = useRef(false);
+  // Bumped on every teardown: a chunk finishing after a stop/restart must not
+  // chain a second recorder onto the new session's stream.
+  const sessionRef = useRef(0);
+  const startedAtRef = useRef(0);
+  const lastChunkAtRef = useRef(0);
+  const lastSentAtRef = useRef(0);
+  // Keywords and device are read through refs so transcribe/start keep a
+  // stable identity. Before 2026-10-03 `keywords` was a fresh array on every
+  // render, so start() changed identity every render and the auto-start
+  // effect in audio-panel was cancelled by the very next re-render while it
+  // was still in flight -- after a reload capture often never came back.
+  const keywordsRef = useRef(keywords);
+  keywordsRef.current = keywords;
+  const deviceIdRef = useRef(deviceId);
+  deviceIdRef.current = deviceId;
+  const teardownRef = useRef<(reason: string | null) => void>(() => undefined);
 
   useEffect(() => {
     onTranscriptRef.current = onTranscript;
@@ -112,9 +140,10 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     form.set("audio", audio, "dispatch.webm");
     // Keep this prompt generic. Whisper treats initial_prompt as prior context and
     // will hallucinate a concrete call example into unrelated audio.
+    const kw = keywordsRef.current;
     form.set(
       "prompt",
-      keywords.length ? `Dispatch radio terminology: ${keywords.join(", ")}.` : "Dispatch radio terminology."
+      kw.length ? `Dispatch radio terminology: ${kw.join(", ")}.` : "Dispatch radio terminology."
     );
 
     try {
@@ -125,6 +154,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       if (!response.ok) {
         throw new Error(result.message || "Local Whisper transcription failed.");
       }
+      lastSentAtRef.current = Date.now();
       if (result.text?.trim()) {
         onTranscriptRef.current?.(result.text.trim(), true);
       }
@@ -145,13 +175,25 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
         setError(message);
       }
     }
-  }, [keywords]);
+  }, []);
 
   const startRecording = useCallback(() => {
     const stream = streamRef.current;
     if (!stream || !isCapturingRef.current) return;
+    const session = sessionRef.current;
 
-    const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+    // A recorder that cannot be created (ended/invalid stream) used to throw
+    // inside the previous chunk's onstop and silently end the chunk chain
+    // while the UI still said "capturing". Tear down instead, so the
+    // supervisor sees capture stopped and restarts it.
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+    } catch (err) {
+      console.error("MediaRecorder could not start:", err);
+      teardownRef.current("Recorder failed to start — restarting capture automatically.");
+      return;
+    }
     const chunks: Blob[] = [];
     let peakRms = 0;
     recorderRef.current = recorder;
@@ -175,10 +217,20 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) chunks.push(event.data);
     };
-    recorder.onstop = () => {
-      recorderRef.current = null;
-      recorderTimerRef.current = null;
+    recorder.onerror = (event) => {
+      console.error("MediaRecorder error:", event);
       clearInterval(rmsInterval);
+      if (sessionRef.current === session) {
+        teardownRef.current("Recorder error — restarting capture automatically.");
+      }
+    };
+    recorder.onstop = () => {
+      if (recorderRef.current === recorder) {
+        recorderRef.current = null;
+        recorderTimerRef.current = null;
+      }
+      clearInterval(rmsInterval);
+      lastChunkAtRef.current = Date.now();
       // Gate on the chunk's PEAK sample, not the average (2026-09-30 call
       // review: a real Signal 4 was almost missed because a short, loud
       // transmission inside an otherwise-quiet 4s chunk got diluted below
@@ -186,7 +238,12 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       // before ever reaching Whisper). A chunk is silent only if even its
       // loudest 200ms sample stayed under the gate; this only ever sends
       // MORE audio to Whisper than the old average-based gate did, never less.
-      const isSilent = peakRms < SILENCE_RMS;
+      // If the AudioContext is not running (Chrome autoplay policy can keep
+      // a gesture-less context suspended) the analyser reads flat zero, which
+      // would gate EVERY chunk as silence while the UI shows capturing. Send
+      // the audio instead of dropping it when the meter can't be trusted.
+      const meterLive = audioContextRef.current?.state === "running";
+      const isSilent = meterLive && peakRms < SILENCE_RMS;
       const blob = new Blob(chunks, { type: "audio/webm" });
       if (transcribePendingRef.current < 2) {
         transcribePendingRef.current += 1;
@@ -198,16 +255,55 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       }
       // Dropping a saturated chunk must NOT skip this — it schedules the
       // next recording chunk; returning early here silently kills capture.
-      if (isCapturingRef.current) startRecordingRef.current();
+      if (isCapturingRef.current && sessionRef.current === session) startRecordingRef.current();
     };
-    recorder.start();
+    try {
+      recorder.start();
+    } catch (err) {
+      console.error("MediaRecorder.start failed:", err);
+      clearInterval(rmsInterval);
+      teardownRef.current("Recorder failed to start — restarting capture automatically.");
+      return;
+    }
     recorderTimerRef.current = window.setTimeout(() => {
       if (recorder.state === "recording") recorder.stop();
     }, CHUNK_DURATION_MS);
   }, [transcribe]);
   startRecordingRef.current = startRecording;
 
+  // Release everything. `reason` set = an unexpected pipeline failure (shown
+  // to the operator; the audio-panel supervisor restarts capture).
+  const teardown = useCallback((reason: string | null) => {
+    sessionRef.current += 1;
+    isCapturingRef.current = false;
+    startedAtRef.current = 0;
+    if (recorderTimerRef.current) {
+      clearTimeout(recorderTimerRef.current);
+      recorderTimerRef.current = null;
+    }
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    if (recorder && recorder.state === "recording") {
+      try { recorder.stop(); } catch { /* already stopped */ }
+    }
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => {
+      track.onended = null;
+      track.stop();
+    });
+    streamRef.current = null;
+    void audioContextRef.current?.close().catch(() => undefined);
+    audioContextRef.current = null;
+    analyserRef.current = null;
+    setRms(0);
+    setIsCapturing(false);
+    if (reason) setError(reason);
+  }, []);
+  teardownRef.current = teardown;
+
   const start = useCallback(async () => {
+    if (isCapturingRef.current || startingRef.current) return;
     setError(null);
     if (!supported) {
       const message = "Audio recording is not supported in this browser. Use Chrome or Edge.";
@@ -215,7 +311,9 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       throw new Error(message);
     }
 
+    startingRef.current = true;
     try {
+      const deviceId = deviceIdRef.current;
       const constraints: MediaStreamConstraints = {
         audio: deviceId
           ? { ...RAW_AUDIO_CONSTRAINTS, deviceId: { exact: deviceId } }
@@ -223,9 +321,30 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       };
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
+      // Mic released underneath us (device unplugged, Chrome revoked/reset
+      // the capture, driver hiccup): tear down so the supervisor restarts.
+      stream.getAudioTracks().forEach((track) => {
+        track.onended = () => {
+          if (streamRef.current === stream) {
+            teardownRef.current("Microphone stream ended — restarting capture automatically.");
+          }
+        };
+      });
 
       const audioContext = new AudioContext();
       audioContextRef.current = audioContext;
+      // Gesture-less starts (auto-capture after a reload) may leave the
+      // context suspended under Chrome's autoplay policy; try to resume, and
+      // resume on the first click/key if it stays suspended. The silence gate
+      // fails open while it is suspended (see recorder.onstop).
+      if (audioContext.state !== "running") {
+        void audioContext.resume().catch(() => undefined);
+        const resumeOnGesture = () => {
+          void audioContext.resume().catch(() => undefined);
+        };
+        window.addEventListener("pointerdown", resumeOnGesture, { once: true });
+        window.addEventListener("keydown", resumeOnGesture, { once: true });
+      }
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 2048;
@@ -246,10 +365,18 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       updateRms();
 
       isCapturingRef.current = true;
+      startedAtRef.current = Date.now();
+      lastChunkAtRef.current = 0;
       startRecording();
-      await refreshDevices();
+      if (!isCapturingRef.current) {
+        throw new Error("Recorder failed to start.");
+      }
       setIsCapturing(true);
+      void refreshDevices();
     } catch (err: unknown) {
+      // Release a half-built pipeline (mic acquired but recorder failed) so
+      // the next attempt starts clean and Chrome's mic indicator is truthful.
+      teardownRef.current(null);
       const message = err instanceof Error ? err.message : "Failed to access microphone.";
       const inIframe = typeof window !== "undefined" && window.self !== window.top;
       if (err instanceof DOMException && (err.name === "NotAllowedError" || err.name === "SecurityError")) {
@@ -261,26 +388,22 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       }
       console.error("Audio capture error:", err);
       throw err;
+    } finally {
+      startingRef.current = false;
     }
-  }, [deviceId, refreshDevices, startRecording, supported]);
+  }, [refreshDevices, startRecording, supported]);
 
-  const stop = useCallback(() => {
-    isCapturingRef.current = false;
-    if (recorderTimerRef.current) {
-      clearTimeout(recorderTimerRef.current);
-      recorderTimerRef.current = null;
-    }
-    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
-    void audioContextRef.current?.close();
-    audioContextRef.current = null;
-    setRms(0);
-    setIsCapturing(false);
-  }, []);
+  const stop = useCallback(() => teardown(null), [teardown]);
 
+  const getHealth = useCallback((): AudioCaptureHealth => ({
+    startedAt: startedAtRef.current,
+    lastChunkAt: lastChunkAtRef.current,
+    lastSentAt: lastSentAtRef.current,
+  }), []);
+
+  // Unmount (and React Fast Refresh, which re-runs effects) releases the mic.
+  // Capture coming back afterwards is the audio-panel supervisor's job.
   useEffect(() => stop, [stop]);
 
-  return { isCapturing, rms, error, devices, start, stop, refreshDevices, supported };
+  return { isCapturing, rms, error, devices, start, stop, refreshDevices, getHealth, supported };
 }

@@ -1,5 +1,19 @@
-import { useState, useCallback, useRef, useEffect } from "react";
-import { useAudioCapture } from "@/hooks/use-audio-capture";
+import { useState, useCallback, useRef, useEffect, useSyncExternalStore } from "react";
+import { useAudioCapture, CHUNK_DURATION_MS } from "@/hooks/use-audio-capture";
+import {
+  readAutoCapture,
+  writeAutoCapture,
+  startBackoffMs,
+  isStalled,
+  stallThresholdMs,
+  shouldForceReload,
+  readLastForcedReload,
+  writeLastForcedReload,
+  isPermissionError,
+} from "@/lib/capture-supervisor";
+import { getCaptureLockState, subscribeCaptureLock } from "@/lib/capture-lock";
+import { requestLease, hookLeaseRelease, releaseLeaseNow, type LeaseState } from "@/lib/capture-lease";
+import { LEASE_RENEW_MS } from "@shared/capture-lease";
 import { useDispatchBuffer } from "@/hooks/use-dispatch-buffer";
 import { useKeywords } from "@/hooks/use-keywords";
 import RmsMeter from "./rms-meter";
@@ -129,7 +143,7 @@ export default function AudioPanel({
 
   const isInIframe = typeof window !== "undefined" && window.self !== window.top;
 
-  const { isCapturing, rms, error, devices, start, stop, supported } = useAudioCapture({
+  const { isCapturing, rms, error, devices, start, stop, getHealth, supported } = useAudioCapture({
     deviceId: selectedDevice || undefined,
     keywords: keywordList.map((keyword) => keyword.pattern),
     onTranscript: handleTranscript,
@@ -140,6 +154,8 @@ export default function AudioPanel({
   // Self-reload before Chrome kills the tab with "Error code: Out of
   // Memory" — the V8 heap only resets on navigation and capture
   // auto-resumes after reload, so a preemptive reload beats a crashed tab.
+  // With desk HMR off (server/vite.ts) this 2h reload is also how a pulled
+  // client update reaches the page; the supervisor resumes capture after it.
   // Crash dumps showed the RENDERER ballooning far beyond the JS heap, so
   // reload periodically to bound any slow leak. A DOM-node guard was tried
   // here and removed: EventLog legitimately renders ~30k+ nodes with the
@@ -163,79 +179,236 @@ export default function AudioPanel({
     return () => window.clearInterval(timer);
   }, []);
 
-  // Auto-resume capture after restarts. getUserMedia can run without a user
-  // gesture once mic permission is granted for this origin; if permission is
-  // still 'prompt', we show a note and fall back to one manual Start press.
-  const autoStartTriedRef = useRef(false);
-  const [autoStartNote, setAutoStartNote] = useState<string | null>(null);
+  // ---- Capture supervisor (2026-10-03) -------------------------------------
+  // Replaces the old one-shot auto-start, which (a) was skipped forever after a
+  // Vite HMR / React Fast Refresh update because its "tried" ref survives the
+  // refresh while the hook's cleanup stopped the mic, and (b) was cancelled by
+  // any re-render while in flight. Now: a persisted auto-capture intent (ON
+  // unless an operator pressed Stop) and a 2s supervisor tick that starts
+  // capture whenever it is wanted but not running -- after page load, HMR,
+  // a server restart, a mic stream ending, or a stalled recorder -- with
+  // backoff, never giving up. Last resort: a rate-limited page reload.
+  const lockState = useSyncExternalStore(subscribeCaptureLock, getCaptureLockState);
+  const [autoCapture, setAutoCaptureState] = useState(() => readAutoCapture(window.localStorage));
+  const [supervisorNote, setSupervisorNote] = useState<string | null>(null);
+  const autoCaptureRef = useRef(autoCapture);
+  autoCaptureRef.current = autoCapture;
+  const lockStateRef = useRef(lockState);
+  lockStateRef.current = lockState;
+  // Cross-origin single-capturer lease from the server (127.0.0.1 vs
+  // localhost tabs on one box). "unknown" = server unreachable/old: fail open.
+  const [leaseState, setLeaseStateValue] = useState<LeaseState>("unknown");
+  const leaseRef = useRef<LeaseState>("unknown");
+  const leaseCheckedRef = useRef(false);
+  const setLeaseState = useCallback((next: LeaseState) => {
+    leaseRef.current = next;
+    setLeaseStateValue(next);
+  }, []);
+  const startRef = useRef(start);
+  startRef.current = start;
+  const stopRef = useRef(stop);
+  stopRef.current = stop;
+  const getHealthRef = useRef(getHealth);
+  getHealthRef.current = getHealth;
+  const supRef = useRef({ failures: 0, nextAttemptAt: 0, attempting: false, recoveries: 0, unhealthySince: 0 });
+
+  const setAutoCapture = useCallback((on: boolean) => {
+    writeAutoCapture(window.localStorage, on);
+    autoCaptureRef.current = on;
+    setAutoCaptureState(on);
+  }, []);
+
+  const resetSupervisor = useCallback(() => {
+    supRef.current = { failures: 0, nextAttemptAt: 0, attempting: false, recoveries: 0, unhealthySince: 0 };
+    setSupervisorNote(null);
+  }, []);
 
   useEffect(() => {
-    if (autoStartTriedRef.current || isInIframe || !supported) return;
-    autoStartTriedRef.current = true;
-    let cancelled = false;
+    if (isInIframe || !supported) return;
+    let disposed = false;
+    let lastTickAt = Date.now();
 
-    (async () => {
+    const tick = async () => {
+      if (disposed) return;
+      const sup = supRef.current;
+      const now = Date.now();
+      const tickGap = now - lastTickAt;
+      lastTickAt = now;
+      const health = getHealthRef.current();
+      // Another tab on this box (other origin) holds the capture lease: never
+      // run a second capture loop on the same audio.
+      if (leaseRef.current === "denied") {
+        if (health.startedAt > 0) {
+          console.warn("[capture-supervisor] another tab holds the capture lease; stopping this tab's capture");
+          stopRef.current();
+        }
+        sup.failures = 0;
+        sup.recoveries = 0;
+        sup.unhealthySince = 0;
+        return;
+      }
+      if (!autoCaptureRef.current || lockStateRef.current !== "held" || !leaseCheckedRef.current) {
+        sup.failures = 0;
+        sup.recoveries = 0;
+        sup.unhealthySince = 0;
+        return;
+      }
+
+      if (health.startedAt > 0) {
+        if (isStalled(health, now, CHUNK_DURATION_MS, tickGap)) {
+          // Recorder stopped finishing chunks (silent ones included): the
+          // pipeline is wedged even though the UI says capturing.
+          console.warn("[capture-supervisor] no audio chunk for", now - Math.max(health.startedAt, health.lastChunkAt), "ms; restarting capture");
+          sup.recoveries += 1;
+          if (!sup.unhealthySince) sup.unhealthySince = now;
+          sup.nextAttemptAt = now + 1_000;
+          setSupervisorNote(`Capture stalled (no audio for ${Math.round(stallThresholdMs(CHUNK_DURATION_MS) / 1000)}s+) — restarting automatically…`);
+          stopRef.current();
+        } else if (health.lastChunkAt > health.startedAt) {
+          sup.failures = 0;
+          sup.recoveries = 0;
+          sup.unhealthySince = 0;
+          setSupervisorNote((prev) => (prev === null ? prev : null));
+        }
+        return;
+      }
+
+      // Wanted but not running.
+      if (!sup.unhealthySince) sup.unhealthySince = now;
+      if (shouldForceReload({
+        now,
+        recoveriesSinceHealthy: sup.recoveries,
+        unhealthySince: sup.unhealthySince,
+        lastForcedReloadAt: readLastForcedReload(window.localStorage),
+      })) {
+        console.warn("[capture-supervisor] in-page restarts keep failing; reloading the page");
+        writeLastForcedReload(window.localStorage, now);
+        window.location.reload();
+        return;
+      }
+      if (sup.attempting || now < sup.nextAttemptAt) return;
+
+      sup.attempting = true;
       try {
-        const perm = await navigator.permissions.query({ name: "microphone" as PermissionName });
-        if (perm.state !== "granted") {
-          if (!cancelled) {
-            setAutoStartNote("Microphone permission not granted yet — press Start Capture once to enable auto-start.");
-          }
+        let permState: PermissionState | "unknown" = "unknown";
+        try {
+          permState = (await navigator.permissions.query({ name: "microphone" as PermissionName })).state;
+        } catch {
+          // Permissions API unavailable: attempt the start anyway.
+        }
+        if (disposed) return;
+        if (permState === "prompt" || permState === "denied") {
+          sup.failures += 1;
+          sup.nextAttemptAt = Date.now() + 60_000;
+          setMicBlocked(permState === "denied");
+          setSupervisorNote(permState === "denied"
+            ? "Microphone access denied — allow it in the browser site settings (auto-capture rechecks every minute)."
+            : "Microphone permission not granted yet — press Start Capture once to enable auto-capture.");
           return;
         }
-      } catch {
-        // Permissions API unavailable — attempt start anyway.
+        await startRef.current();
+        sup.failures = 0;
+        setMicBlocked(false);
+        setSupervisorNote(null);
+      } catch (err) {
+        sup.failures += 1;
+        sup.recoveries += 1;
+        const denied = isPermissionError(err);
+        const delay = denied ? 60_000 : startBackoffMs(sup.failures);
+        sup.nextAttemptAt = Date.now() + delay;
+        if (denied) setMicBlocked(true);
+        setSupervisorNote(`Auto-capture could not start (attempt ${sup.failures}); retrying in ${Math.round(delay / 1000)}s…`);
+      } finally {
+        sup.attempting = false;
       }
-      if (cancelled) return;
-
-      // The app may still be booting after a watchdog restart — retry with backoff.
-      const attempt = async (triesLeft: number, delayMs: number) => {
-        if (cancelled) return;
-        try {
-          await start();
-          setMicBlocked(false);
-          setAutoStartNote(null);
-        } catch (err: any) {
-          const denied =
-            err?.name === "NotAllowedError" ||
-            err?.message?.includes("not allowed") ||
-            err?.message?.includes("permission");
-          if (denied) {
-            if (!cancelled) {
-              setMicBlocked(true);
-              setAutoStartNote("Microphone access denied — allow it in the browser site settings, then press Start Capture.");
-            }
-            return;
-          }
-          if (triesLeft > 0) {
-            window.setTimeout(() => attempt(triesLeft - 1, delayMs + 4000), delayMs);
-          } else if (!cancelled) {
-            setAutoStartNote("Auto-start failed — press Start Capture manually.");
-          }
-        }
-      };
-      attempt(4, 3000);
-    })();
-
-    return () => {
-      cancelled = true;
     };
-  }, [supported, isInIframe, start]);
+
+    const timer = window.setInterval(() => void tick(), 2_000);
+    void tick();
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [isInIframe, supported]);
+
+  // Lease renewal. Only a tab that wants to capture asks for the lease.
+  useEffect(() => {
+    if (isInIframe) return;
+    hookLeaseRelease();
+    let disposed = false;
+    const renew = async () => {
+      const capturingNow = getHealthRef.current().startedAt > 0;
+      if (!autoCaptureRef.current && !capturingNow) {
+        leaseCheckedRef.current = true;
+        return;
+      }
+      const next = await requestLease(capturingNow);
+      if (disposed) return;
+      leaseCheckedRef.current = true;
+      if (next !== "unknown") setLeaseState(next);
+    };
+    void renew();
+    const timer = window.setInterval(() => void renew(), LEASE_RENEW_MS);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [isInIframe, setLeaseState]);
+
+  // Liveness heartbeat for the desk watchdog: it reopens the page only when
+  // NO heartbeat arrives at all (tab closed, crashed, or stuck blank). A page
+  // that is alive but not capturing is the supervisor's job, not the watchdog's.
+  const heartbeatSourceRef = useRef(sourceName || district);
+  heartbeatSourceRef.current = sourceName || district;
+  useEffect(() => {
+    if (isInIframe) return;
+    const beat = () => {
+      const health = getHealthRef.current();
+      const now = Date.now();
+      void fetch("/api/capture/heartbeat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: heartbeatSourceRef.current,
+          capturing: health.startedAt > 0,
+          autoCapture: autoCaptureRef.current,
+          lock: lockStateRef.current,
+          lease: leaseRef.current,
+          lastChunkAgoMs: health.lastChunkAt ? now - health.lastChunkAt : null,
+          lastSentAgoMs: health.lastSentAt ? now - health.lastSentAt : null,
+        }),
+      }).catch(() => undefined);
+    };
+    beat();
+    const timer = window.setInterval(beat, 60_000);
+    return () => window.clearInterval(timer);
+  }, [isInIframe]);
 
   const handleStart = async () => {
+    setAutoCapture(true);
+    resetSupervisor();
+    // The tab the operator clicked wins: take the lease over from any other tab.
+    setLeaseState("granted");
+    leaseCheckedRef.current = true;
+    void requestLease(false, true);
     try {
       await start();
       setMicBlocked(false);
-    } catch (err: any) {
-      if (err?.name === "NotAllowedError" || err?.message?.includes("not allowed") || err?.message?.includes("permission")) {
+    } catch (err: unknown) {
+      if (isPermissionError(err)) {
         setMicBlocked(true);
       }
     }
   };
 
   const handleStop = useCallback(() => {
+    // An explicit Stop is the only thing that turns auto-capture off.
+    setAutoCapture(false);
+    resetSupervisor();
+    releaseLeaseNow();
+    setLeaseState("unknown");
     flush().finally(() => stop());
-  }, [flush, stop]);
+  }, [flush, stop, setAutoCapture, resetSupervisor]);
 
   return (
     <div className="flex flex-col h-full gap-3" data-testid="audio-panel">
@@ -334,9 +507,21 @@ export default function AudioPanel({
         </div>
       )}
 
-      {autoStartNote && !isCapturing && (
+      {!isCapturing && !autoCapture && (
+        <div className="text-xs text-yellow-500 p-2 rounded bg-yellow-950/30 border border-yellow-900/40" data-testid="auto-capture-off">
+          Auto-capture is OFF because Stop was pressed. Press Start Capture to resume; it then restarts by itself after updates and reloads.
+        </div>
+      )}
+
+      {autoCapture && (lockState === "standby" || leaseState === "denied") && !isCapturing && (
+        <div className="text-xs text-sky-400 p-2 rounded bg-sky-950/30 border border-sky-900/40" data-testid="capture-standby">
+          Standby: another Dispatch Monitor tab on this desk is capturing. This tab takes over automatically if that one closes.
+        </div>
+      )}
+
+      {supervisorNote && autoCapture && (
         <div className="text-xs text-yellow-500 p-2 rounded bg-yellow-950/30 border border-yellow-900/40" data-testid="auto-start-note">
-          {autoStartNote}
+          {supervisorNote}
         </div>
       )}
 

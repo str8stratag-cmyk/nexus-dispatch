@@ -280,6 +280,42 @@ not yet purged — purge on request.
    edits; the watchdog will do it if you kill the 8178 process).
 3. **Then any other tasks.**
 
+## Capture survives desk updates (2026-10-03, PR fix/capture-survives-updates)
+
+Capture stopped on every desk update (2026-09-24, 2026-10-02): a watchdog
+`git pull` hot-patched the live page through Vite HMR / React Fast Refresh,
+which re-ran effects (mic released) while the one-shot auto-start never ran
+again; app restarts made the Vite client reload the tab, sometimes into a
+blank white page. Now:
+- **HMR is off by default** (`server/vite.ts`; set `DM_HMR=1` in `.env` on a dev
+  box to get it back). Pulls and app restarts no longer touch the open page;
+  new client code arrives at the page's existing 2h self-reload.
+- **Capture supervisor** (`audio-panel.tsx`, `lib/capture-supervisor.ts`):
+  auto-capture is ON unless an operator presses **Stop** (stored in
+  `localStorage["dispatch.autoCapture"]`; Start turns it back on). Every 2s it
+  restarts capture when wanted but not running (load, HMR, mic stream ended,
+  recorder error), restarts a pipeline that has produced no chunk for ~20s,
+  and as a last resort reloads the page (max once per 10 min).
+- **One capture loop per desk:** within a page, a start guard + session
+  token stop double-clicks / Stop-Start races / HMR from running two recorder
+  loops on the same audio (seen on DISP-2 2026-10-03). Across tabs, a Web Lock
+  (same origin, `lib/capture-lock.ts`) plus a server lease
+  (`/api/capture/lease`, `shared/capture-lease.ts`) that also covers
+  `127.0.0.1:5000` vs `localhost:5000` tabs. Extra tabs show "Standby" and
+  take over if the capturing tab closes; pressing Start in a tab takes over.
+- **Changing VITE_CHUNK_MS / VITE_SILENCE_RMS:** restart the app as before. The
+  open tab keeps capturing on the old value (no forced reload) and picks up the
+  new one at its next reload (the 2h self-reload, or reload the tab); capture
+  resumes by itself after any reload.
+- **No more blank screen:** `components/error-boundary.tsx` shows the error and
+  reloads with backoff; an inline boot guard in `client/index.html` reloads a
+  page whose JS never started.
+- **Watchdog:** reopens `http://localhost:5000` when the app has been up 15+ min
+  and no capture tab has heartbeated (`/api/capture/status`) for 15 min, at
+  most once per 2h.
+- E2E check: `trial/e2e-capture-recovery.mjs` (see header; needs Chrome and a
+  free :8178, so never on a desk running Whisper). Unit: `npx tsx trial/test-capture-supervisor.ts`.
+
 ## Recent changes (2026-09-22) — Watchdog restart storm + 10 review findings; committed cb72223, pushed
 
 See `CLAUDE.md` for the full write-up (root causes, verification steps,
