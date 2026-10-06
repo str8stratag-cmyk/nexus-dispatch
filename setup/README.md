@@ -48,5 +48,6 @@ Run `scripts/watchdog.ps1` to automatically:
 - Restart Whisper every 4 hours
 - Pull GitHub updates for both repos a few times per day
 - Restart apps when code changes
+- After a reboot/logon, wait up to 5 min (`APP_BOOT_WAIT_SEC` in `watchdog.local`) for the app before opening the capture page
 
 Run `scripts/review-calls.ps1` once a day to get a summary of odd/nonsense dispatch calls for fine-tuning.
