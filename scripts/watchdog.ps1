@@ -11,6 +11,7 @@ param([switch]$NoInitialStart)
 #   WHISPER_ROOT=C:\path\to\checkout-with-.venv-whisper   (default: this repo)
 #   NEXUS_DISPATCH=C:\path\to\nexus-dispatch              (default: sibling dir)
 #   DEPLOY_BRANCH=release                                  (default: release)
+#   APP_BOOT_WAIT_SEC=300                                  (default: 300; see boot grace below)
 $dispatchMonitor = Split-Path -Parent $PSScriptRoot
 $whisperRoot = $dispatchMonitor
 $nexusDispatch = Join-Path (Split-Path -Parent $dispatchMonitor) "nexus-dispatch"
@@ -18,14 +19,20 @@ $nexusDispatch = Join-Path (Split-Path -Parent $dispatchMonitor) "nexus-dispatch
 # main -- including anything a bot pushes -- never reach the boxes until the
 # owner promotes them: scripts\promote-release.ps1 (or git push origin main:release).
 $deployBranch = "release"
+$appBootWaitSec = 300
 $watchdogLocal = Join-Path $dispatchMonitor "watchdog.local"
 if (Test-Path $watchdogLocal) {
     foreach ($line in Get-Content $watchdogLocal) {
-        if ($line -match '^\s*(WHISPER_ROOT|NEXUS_DISPATCH|DEPLOY_BRANCH)\s*=\s*(.+?)\s*$') {
+        if ($line -match '^\s*(WHISPER_ROOT|NEXUS_DISPATCH|DEPLOY_BRANCH|APP_BOOT_WAIT_SEC)\s*=\s*(.+?)\s*$') {
             switch ($Matches[1]) {
                 "WHISPER_ROOT" { $whisperRoot = $Matches[2] }
                 "NEXUS_DISPATCH" { $nexusDispatch = $Matches[2] }
                 "DEPLOY_BRANCH" { $deployBranch = $Matches[2] }
+                "APP_BOOT_WAIT_SEC" {
+                    # Ignore junk / tiny values rather than break the boot wait.
+                    $parsedWait = 0
+                    if ([int]::TryParse($Matches[2], [ref]$parsedWait) -and $parsedWait -ge 30) { $appBootWaitSec = $parsedWait }
+                }
             }
         }
     }
@@ -236,13 +243,27 @@ function Wait-ForPort($port, $timeoutSec = 30) {
     return $false
 }
 
+# The cmd.exe launcher started for each app (Start-Process -PassThru). It
+# lives exactly as long as "npm run dev" does, so an exited launcher with
+# nothing on the port means the app process really died -- as opposed to
+# still starting up slowly, which is normal for minutes after a reboot.
+$appLauncher = @{}
+
+function Test-AppProcessDead($title, $port) {
+    $launcher = $appLauncher[$title]
+    if ($null -eq $launcher) { return $false }   # unknown -> assume still starting
+    $launcher.Refresh()
+    if (-not $launcher.HasExited) { return $false }
+    return -not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
+}
+
 function Restart-App($title, $directory, $port, $command, $log) {
     Write-Host "$(Get-Date) Restarting $title..." -ForegroundColor Cyan
     Stop-ProcessOnPort $port
     Stop-AppLauncher $title $directory
     New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
     Limit-LogSize $log
-    Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command >> `"$log`" 2>&1" -WindowStyle Hidden
+    $appLauncher[$title] = Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command >> `"$log`" 2>&1" -WindowStyle Hidden -PassThru
     if (Wait-ForPort $port) { Set-ServicePriority $port 'AboveNormal' $title }
 }
 
@@ -252,7 +273,7 @@ function Start-App($title, $directory, $port, $command, $log) {
     Stop-AppLauncher $title $directory
     New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
     Limit-LogSize $log
-    Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command >> `"$log`" 2>&1" -WindowStyle Hidden
+    $appLauncher[$title] = Start-Process cmd -ArgumentList "/c", "cd /d `"$directory`" && $command >> `"$log`" 2>&1" -WindowStyle Hidden -PassThru
     if (Wait-ForPort $port) { Set-ServicePriority $port 'AboveNormal' $title }
 }
 
@@ -296,6 +317,143 @@ function Test-CapturePageSilent($port) {
     return ([double]$status.lastHeartbeatAgoMs -gt $limitMs)
 }
 
+# Boot grace (2026-10-06). After a reboot the whole box takes minutes to come
+# up: on DISP-1 (11:18 reboot) Whisper was ready at 11:30, the app was started
+# at 11:31 and had not bound :5000 within the old 30s wait, so the capture page
+# was never opened, and the first loop restarted both Whisper ("scheduled",
+# because the 4h timer started at DateTime.MinValue) and the still-booting app.
+# Now, on the initial (logon) start:
+#   - the app gets up to $appBootWait to answer (polled with backoff), and is
+#     NOT restarted during that window unless its process has actually exited;
+#   - once it answers, the capture page is opened unless a tab already holds
+#     the capture lease or heartbeated recently (Chrome often restores the tab
+#     itself) -- and if it is still unconfirmed, later loops retry instead of
+#     giving up for good;
+#   - the 4h Whisper schedule starts from this start, not from MinValue.
+$appBootWait = [TimeSpan]::FromSeconds($appBootWaitSec)
+# Boot-time open of the capture page (kept on 127.0.0.1 like the original
+# boot open; the 15-min no-heartbeat reopen above still uses $captureUrl).
+$bootCaptureUrl = "http://127.0.0.1:5000"
+# How long to give an existing/restored tab to check in before opening one.
+$captureConfirmWait = [TimeSpan]::FromSeconds(90)
+# A heartbeat this recent means a live capture page (tabs beat every 60s).
+$captureFreshHeartbeat = [TimeSpan]::FromSeconds(150)
+$captureRetryGap = [TimeSpan]::FromMinutes(5)
+$captureMaxOpenAttempts = 3
+# Hard cap on the pending state (it also defers the git pull), e.g. when the
+# app never comes up at all.
+$capturePendingMax = [TimeSpan]::FromMinutes(30)
+$capturePending = @{ Active = $false; Since = [DateTime]::MinValue; Attempts = 0; LastAttempt = [DateTime]::MinValue; AnsweredAt = $null; Unsupported = $false }
+
+# The status object, or $null when it can't be read (app down/starting/slow).
+# Sets $capturePending.Unsupported when the server answered but has no
+# /api/capture/status (404, or the SPA catch-all returning HTML).
+function Get-CaptureStatus($port) {
+    try {
+        $status = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/capture/status" -Method GET -TimeoutSec 10 -UseBasicParsing
+    } catch {
+        $code = $null
+        try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+        if ($code -eq 404) { $capturePending.Unsupported = $true }
+        return $null
+    }
+    if ($null -eq $status -or $null -eq $status.uptimeMs) {
+        $capturePending.Unsupported = $true
+        return $null
+    }
+    $capturePending.Unsupported = $false
+    return $status
+}
+
+function Test-CaptureConfirmed($status) {
+    if ($null -eq $status) { return $false }
+    if ($status.leaseHolder) { return $true }
+    if ($null -ne $status.lastHeartbeatAgoMs -and [double]$status.lastHeartbeatAgoMs -lt $captureFreshHeartbeat.TotalMilliseconds) { return $true }
+    return $false
+}
+
+# Poll the app with backoff until it answers, its process dies, or $timeout
+# passes. "Answers" = Test-AppAlive, the same DB-backed check the loop's
+# restart rule uses, so the grace can't end while the loop would still see the
+# app as dead (e.g. Mongo/network slow right after boot). Each probe has its
+# own 15s timeout, so a wedged-but-listening app still ends at the deadline.
+# Returns "ready", "dead", or "timeout".
+function Wait-AppReady($title, $port, [TimeSpan]$timeout) {
+    $deadline = ([DateTime]::Now) + $timeout
+    $delay = 2
+    Write-Host "$(Get-Date) Waiting for $title to answer on :$port (up to $([int]$timeout.TotalSeconds)s, boot grace)..." -ForegroundColor Cyan
+    while ($true) {
+        if (Test-AppAlive $port) {
+            Write-Host "$(Get-Date) $title is answering on :$port." -ForegroundColor Green
+            return "ready"
+        }
+        if (Test-AppProcessDead $title $port) {
+            Write-Warning "$(Get-Date) $title process exited before answering on :$port."
+            return "dead"
+        }
+        $left = ($deadline - ([DateTime]::Now)).TotalSeconds
+        if ($left -le 0) { return "timeout" }
+        Start-Sleep -Seconds ([int][Math]::Max(1, [Math]::Min($delay, $left)))
+        $delay = [Math]::Min($delay * 2, 20)
+    }
+}
+
+# Open the boot capture page once the app answers, unless a tab already holds
+# the lease / heartbeats. Called with -Block on the initial start (waits up to
+# $captureConfirmWait for a restored tab), and once per loop while pending.
+function Step-BootCapturePage($port, [switch]$Block) {
+    if (-not $capturePending.Active) { return }
+    if ((([DateTime]::Now) - $capturePending.Since) -gt $capturePendingMax) {
+        Write-Warning "$(Get-Date) Boot capture page still unconfirmed after $([int]$capturePendingMax.TotalMinutes) min; leaving it to the 15-min no-heartbeat check."
+        $capturePending.Active = $false
+        return
+    }
+    $status = Get-CaptureStatus $port
+    if ($Block) {
+        $until = ([DateTime]::Now) + $captureConfirmWait
+        if (-not $capturePending.AnsweredAt) { $capturePending.AnsweredAt = Get-Date }
+        while (-not (Test-CaptureConfirmed $status) -and ([DateTime]::Now) -lt $until) {
+            Start-Sleep -Seconds 5
+            $status = Get-CaptureStatus $port
+        }
+    }
+    if (Test-CaptureConfirmed $status) {
+        Write-Host "$(Get-Date) Capture page confirmed (lease: $($status.leaseHolder), last heartbeat: $($status.lastHeartbeatAgoMs) ms ago); not opening another." -ForegroundColor Green
+        $capturePending.Active = $false
+        return
+    }
+    if ($null -eq $status) {
+        # Not answering (yet), or a slow/failed status read: try next loop.
+        if (-not $capturePending.Unsupported) { return }
+        if (-not (Test-AppAlive $port)) { return }
+        # Server without /api/capture/status: old behavior, open once.
+        if ($capturePending.Attempts -eq 0) { Start-Browser $bootCaptureUrl; $script:lastCaptureReopen = Get-Date }
+        $capturePending.Active = $false
+        return
+    }
+    $now = Get-Date
+    if (-not $capturePending.AnsweredAt) {
+        # First loop that sees the app answer: let a restored tab check in first.
+        $capturePending.AnsweredAt = $now
+        Write-Host "$(Get-Date) App answering; giving an existing capture tab $([int]$captureConfirmWait.TotalSeconds)s to check in before opening one." -ForegroundColor Cyan
+        return
+    }
+    if (($now - $capturePending.AnsweredAt) -lt $captureConfirmWait) { return }
+    if (($now - $capturePending.LastAttempt) -lt $captureRetryGap) { return }
+    if ($capturePending.Attempts -ge $captureMaxOpenAttempts) {
+        Write-Warning "$(Get-Date) Capture page still not confirmed after $($capturePending.Attempts) opens; leaving it to the 15-min no-heartbeat check."
+        $capturePending.Active = $false
+        return
+    }
+    $capturePending.Attempts++
+    Write-Host "$(Get-Date) No capture tab holds the lease or heartbeated; opening capture page (boot attempt $($capturePending.Attempts)/$captureMaxOpenAttempts)." -ForegroundColor Yellow
+    Start-Browser $bootCaptureUrl
+    $capturePending.LastAttempt = $now
+    # Counts as a reopen for the 2h no-heartbeat gap, so the two paths can't
+    # stack extra tabs on a page that never manages to heartbeat.
+    $script:lastCaptureReopen = $now
+}
+
 # Always log to a file, including the -NoInitialStart self-update path: the
 # watchdog runs in a hidden window, so console-only output was lost. The
 # transcript captures Write-Host/Write-Warning output. Size-capped like the
@@ -317,10 +475,25 @@ if (-not $NoInitialStart) {
     $dmLog = Join-Path $dispatchMonitor "logs\dispatch-monitor.log"
     # Nexus Dispatch is dormant fleet-wide (user, 2026-09-17): repo keeps
     # pulling below so it stays current, but the app is not started/supervised.
+    # The 4h Whisper schedule starts now (boot/logon), not at MinValue --
+    # otherwise the first loop reloaded a just-loaded model ~3 min after boot.
+    $lastWhisperRestart = Get-Date
     Start-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
-    if (Wait-ForPort 5000 30) {
-        Start-Sleep -Seconds 3
-        Start-Browser "http://127.0.0.1:5000"
+    $lastAppRestart["Dispatch Monitor"] = Get-Date
+    $capturePending.Active = $true
+    $capturePending.Since = Get-Date
+    # Boot grace: block here (like Start-Whisper's model wait) until the app
+    # answers. Returns early only if the app process exits, so a slow-booting
+    # app is never killed and restarted mid-startup.
+    $appReady = Wait-AppReady "Dispatch Monitor" 5000 $appBootWait
+    if ($appReady -eq "ready") {
+        # Start-App's own 30s port wait may have missed a slow bind.
+        Set-ServicePriority 5000 'AboveNormal' 'Dispatch Monitor'
+        Step-BootCapturePage 5000 -Block
+    } else {
+        # Grace is over: the loop's normal dead-app rule restarts it, and the
+        # capture page stays pending until the app answers.
+        Write-Warning "$(Get-Date) Dispatch Monitor not answering after boot wait ($appReady); the loop will restart it if needed and open the capture page once it answers."
     }
 } else {
     # Services are already running (self-update path) -- stamp the timers so
@@ -358,8 +531,11 @@ while ($true) {
     # Restart apps if their DB-backed endpoint stops responding
     Restart-AppIfDead "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
 
+    # Boot capture page not confirmed yet: retry (lease/heartbeat-checked).
+    Step-BootCapturePage 5000
+
     # Reopen the capture page if no tab has heartbeated for a long time.
-    if (Test-CapturePageSilent 5000) {
+    if (-not $capturePending.Active -and (Test-CapturePageSilent 5000)) {
         $sinceReopen = ([DateTime]::Now) - $lastCaptureReopen
         if ($sinceReopen -gt $captureReopenGap) {
             Write-Host "$(Get-Date) No capture-page heartbeat for $($captureSilentLimit.TotalMinutes) min; reopening $captureUrl" -ForegroundColor Yellow
@@ -368,8 +544,10 @@ while ($true) {
         }
     }
 
-    # Pull git updates periodically
-    if (($now - $lastGitPull) -gt $gitPullInterval) {
+    # Pull git updates periodically. Not while the boot capture page is still
+    # pending (at most ~15 min): a pull can restart the app or hand off to a
+    # new watchdog instance (-NoInitialStart), which would drop that state.
+    if (-not $capturePending.Active -and ($now - $lastGitPull) -gt $gitPullInterval) {
         $dmUpdated = Pull-Repo $dispatchMonitor $deployBranch
         # nexus-dispatch is dormant on the fleet (never started), so it keeps
         # tracking main; switch it to $deployBranch before re-enabling it.
