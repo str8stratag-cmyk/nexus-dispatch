@@ -33,6 +33,16 @@ interface DispatchEventRow {
   createdAt: string;
 }
 
+function neutralizeCsvCell(value: unknown): string {
+  const v = String(value ?? "");
+  // Prevent CSV/formula injection: a cell starting with =, +, -, or @ can be
+  // interpreted as a formula by Excel/Sheets. Prefix with a quote to force text.
+  if (/^[\t\r\n ]*[=+\-@]/.test(v)) {
+    return `'${v}`;
+  }
+  return v;
+}
+
 function eventsToCSV(events: DispatchEventRow[]): string {
   const headers = [
     "Date",
@@ -79,7 +89,7 @@ function eventsToCSV(events: DispatchEventRow[]): string {
   });
 
   const csv = [headers, ...rows]
-    .map((row) => row.map((cell) => `"${cell}"`).join(","))
+    .map((row) => row.map((cell) => `"${neutralizeCsvCell(cell)}"`).join(","))
     .join("\n");
 
   return csv;

@@ -1737,55 +1737,72 @@ export function startTelegramPolling(): void {
 async function telegramPollLoop(): Promise<void> {
   let backoffMs = 5_000;
   for (;;) {
-    const { botToken } = await getTelegramCredentials();
-    if (!botToken) {
-      console.warn("[telegram] Accept poll: bot token missing — retry in 60s");
-      await new Promise((r) => setTimeout(r, 60_000));
-      continue;
-    }
-
-    let data: { ok: boolean; result?: any[]; description?: string };
+    // Everything below (credential lookup, offset read/write) can throw on a
+    // storage/Mongo blip. This loop is started fire-and-forget via
+    // `void telegramPollLoop()`, so an uncaught throw here would kill Accept
+    // polling permanently until process restart. Catch at the outer level
+    // and back off instead of exiting.
     try {
-      const storedRaw = (await storage.getSetting(TELEGRAM_POLL_OFFSET_KEY))?.value ?? "0";
-      const stored = parseInt(storedRaw, 10);
-      const offset = Number.isFinite(stored) && stored > 0 ? stored : undefined;
-      // Long-poll ~25s. Node fetch waits; allowed_updates keeps the queue to Accept taps.
-      data = await telegramApiCall(botToken, "getUpdates", {
-        offset,
-        timeout: 25,
-        allowed_updates: ["callback_query"],
-      });
+      const { botToken } = await getTelegramCredentials();
+      if (!botToken) {
+        console.warn("[telegram] Accept poll: bot token missing — retry in 60s");
+        await new Promise((r) => setTimeout(r, 60_000));
+        continue;
+      }
+
+      let data: { ok: boolean; result?: any[]; description?: string };
+      try {
+        const storedRaw = (await storage.getSetting(TELEGRAM_POLL_OFFSET_KEY))?.value ?? "0";
+        const stored = parseInt(storedRaw, 10);
+        const offset = Number.isFinite(stored) && stored > 0 ? stored : undefined;
+        // Long-poll ~25s. Node fetch waits; allowed_updates keeps the queue to Accept taps.
+        data = await telegramApiCall(botToken, "getUpdates", {
+          offset,
+          timeout: 25,
+          allowed_updates: ["callback_query"],
+        });
+      } catch (err: any) {
+        console.error(
+          `[telegram] getUpdates failed: ${err?.message ?? err} — retry in ${backoffMs / 1000}s`,
+        );
+        await new Promise((r) => setTimeout(r, backoffMs));
+        backoffMs = Math.min(backoffMs * 2, 120_000);
+        continue;
+      }
+
+      if (!data.ok) {
+        // 409 = another consumer holds the bot (webhook still set, or another desk polling).
+        console.error(
+          `[telegram] getUpdates: ${data.description} — backing off ${backoffMs / 1000}s`,
+        );
+        await new Promise((r) => setTimeout(r, backoffMs));
+        backoffMs = Math.min(backoffMs * 2, 120_000);
+        continue;
+      }
+
+      backoffMs = 5_000;
+      for (const update of data.result ?? []) {
+        try {
+          await handleTelegramUpdate(update);
+        } catch (err) {
+          console.error("[telegram] callback handling failed:", err);
+        }
+        try {
+          // Advance offset even on handler failure so a poison update cannot wedge the loop.
+          await storage.upsertSetting({
+            key: TELEGRAM_POLL_OFFSET_KEY,
+            value: String(update.update_id + 1),
+          });
+        } catch (err) {
+          console.error("[telegram] failed to persist poll offset:", err);
+        }
+      }
     } catch (err: any) {
       console.error(
-        `[telegram] getUpdates failed: ${err?.message ?? err} — retry in ${backoffMs / 1000}s`,
+        `[telegram] accept poll loop error: ${err?.message ?? err} — retry in ${backoffMs / 1000}s`,
       );
       await new Promise((r) => setTimeout(r, backoffMs));
       backoffMs = Math.min(backoffMs * 2, 120_000);
-      continue;
-    }
-
-    if (!data.ok) {
-      // 409 = another consumer holds the bot (webhook still set, or another desk polling).
-      console.error(
-        `[telegram] getUpdates: ${data.description} — backing off ${backoffMs / 1000}s`,
-      );
-      await new Promise((r) => setTimeout(r, backoffMs));
-      backoffMs = Math.min(backoffMs * 2, 120_000);
-      continue;
-    }
-
-    backoffMs = 5_000;
-    for (const update of data.result ?? []) {
-      try {
-        await handleTelegramUpdate(update);
-      } catch (err) {
-        console.error("[telegram] callback handling failed:", err);
-      }
-      // Advance offset even on handler failure so a poison update cannot wedge the loop.
-      await storage.upsertSetting({
-        key: TELEGRAM_POLL_OFFSET_KEY,
-        value: String(update.update_id + 1),
-      });
     }
   }
 }
