@@ -316,6 +316,27 @@ blank white page. Now:
 - E2E check: `trial/e2e-capture-recovery.mjs` (see header; needs Chrome and a
   free :8178, so never on a desk running Whisper). Unit: `npx tsx trial/test-capture-supervisor.ts`.
 
+## Watchdog boot grace (2026-10-06, PR fix/watchdog-boot-grace)
+
+After the DISP-1 reboot on 2026-10-06 (11:18 Windows Update) the watchdog
+started the app at 11:31, gave it 30s, skipped opening the capture page, then
+restarted Whisper ("scheduled", ~3 min after it loaded) and the still-booting
+app. `scripts/watchdog.ps1` now, on the initial (logon) start only:
+- waits up to `APP_BOOT_WAIT_SEC` (default 300, per-box in `watchdog.local`)
+  for the app's DB-backed route, polling with backoff; it returns early only if
+  the app's launcher process exits (then the loop restarts it as before);
+- once the app answers, checks `/api/capture/status` and opens
+  `http://127.0.0.1:5000` only if no tab holds the capture lease or heartbeated
+  in the last 150s (gives a Chrome-restored tab 90s to check in first). If
+  still unconfirmed, later loops retry every 5 min, max 3 opens / 30 min, then
+  the existing 15-min no-heartbeat reopen takes over. Git pulls wait until this
+  settles;
+- starts the 4h Whisper schedule from boot (no restart on the first loop).
+Pick-up: the running watchdog only reloads its script after a pull of
+`origin/release` changes it (self-update, `-NoInitialStart`) or at the next
+logon. The boot path only runs at logon, so the fix first acts on the reboot
+AFTER the desk has pulled it.
+
 ## Recent changes (2026-09-22) — Watchdog restart storm + 10 review findings; committed cb72223, pushed
 
 See `CLAUDE.md` for the full write-up (root causes, verification steps,
