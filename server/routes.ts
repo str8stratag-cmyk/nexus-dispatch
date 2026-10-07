@@ -18,6 +18,7 @@ import {
   parseAcceptCallbackData,
   formatTelegramAccepterName,
   isTelegramAcceptPollEnabled,
+  retryUntilSuccess,
 } from "./telegram-accept-helpers";
 
 const sseClients = new Set<Response>();
@@ -1808,12 +1809,14 @@ async function telegramPollLoop(): Promise<void> {
 }
 
 /**
- * Start Telegram Accept transport for this process.
+ * One attempt at setting up the Accept transport for this process.
  * - TELEGRAM_WEBHOOK_URL set → register webhook (future public host).
  * - else TELEGRAM_ACCEPT_POLL=1 → delete any leftover webhook once, then long-poll.
  * - else → no Accept receiver on this desk (send still works; taps go nowhere).
+ * Throws when Mongo (credential lookup) or the Telegram API is unreachable;
+ * initTelegramAcceptTransport() retries it.
  */
-export async function initTelegramAcceptTransport(): Promise<void> {
+async function setupTelegramAcceptTransportOnce(): Promise<void> {
   const webhookUrl = process.env.TELEGRAM_WEBHOOK_URL?.trim();
   const poll = isTelegramAcceptPollEnabled();
 
@@ -1849,3 +1852,32 @@ export async function initTelegramAcceptTransport(): Promise<void> {
   startTelegramPolling();
 }
 
+// Accept setup retry (2026-10-07). Disp-1 rebooted at 3:26 PM; at 3:40:50 the
+// one-shot setup failed with "Server selection timed out after 8000 ms" (Mongo
+// not reachable yet) and Accept polling stayed dead until a manual app
+// restart. Setup now retries in the background (5s doubling to 120s, no
+// limit). Single flight: a second call returns the same in-flight/finished
+// promise, and startTelegramPolling() itself refuses to start a second loop.
+let telegramAcceptInit: Promise<boolean> | null = null;
+const telegramAcceptInitAbort = new AbortController();
+
+/**
+ * Start the Telegram Accept transport for this process, retrying setup until
+ * it succeeds (or stopTelegramAcceptInit() is called). Returns a promise
+ * that resolves true once set up, false if stopped; never
+ * rejects, and never delays app startup (callers need not await it).
+ */
+export function initTelegramAcceptTransport(): Promise<boolean> {
+  if (!telegramAcceptInit) {
+    telegramAcceptInit = retryUntilSuccess(setupTelegramAcceptTransportOnce, {
+      label: "[telegram] Accept transport setup",
+      signal: telegramAcceptInitAbort.signal,
+    });
+  }
+  return telegramAcceptInit;
+}
+
+/** Stop pending Accept setup retries (shutdown hook; no-op once set up). */
+export function stopTelegramAcceptInit(): void {
+  telegramAcceptInitAbort.abort();
+}
