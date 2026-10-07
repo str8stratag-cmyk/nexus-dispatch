@@ -127,8 +127,11 @@ app.use((req, res, next) => {
       // Accept-button transport: webhook if TELEGRAM_WEBHOOK_URL is set (future
       // public host), else long-poll getUpdates only when TELEGRAM_ACCEPT_POLL=1
       // (exactly one desk — preferred Disp-1). Other desks leave the flag off.
-      initTelegramAcceptTransport().catch((err) =>
-        log(`Telegram Accept transport setup failed: ${err.message}`, "telegram"),
+      // Fire-and-forget: setup retries in the background (5s doubling to 120s)
+      // until Mongo/Telegram are reachable, logging each failure; it never
+      // rejects, the .catch is only a belt-and-braces guard.
+      void initTelegramAcceptTransport().catch((err) =>
+        log(`Telegram Accept transport setup failed: ${err?.message ?? err}`, "telegram"),
       );
     },
   );
