@@ -30,8 +30,12 @@ interface DispatchEventRow {
   geocodedRoad: string | null;
   locationApprox: boolean;
   acceptedBy?: string | null;
+  /** Address recovered from surrounding audio rather than the call's own transcript. */
+  addressFromContext?: boolean;
   createdAt: string;
 }
+
+const ADDRESS_FROM_CONTEXT_NOTE = "Address from surrounding audio — verify.";
 
 function neutralizeCsvCell(value: unknown): string {
   const v = String(value ?? "");
@@ -58,6 +62,7 @@ function eventsToCSV(events: DispatchEventRow[]): string {
     "Status",
     "Accepted By",
     "Manual Dispatch",
+    "Address From Context",
     "Keywords",
     "Description",
     "Transcript",
@@ -82,6 +87,7 @@ function eventsToCSV(events: DispatchEventRow[]): string {
       e.status || "",
       e.acceptedBy || "",
       e.isManual ? "Yes" : "No",
+      e.addressFromContext ? "Yes" : "No",
       parsedKeywords.map((k: any) => k.signalType).join("; "),
       e.description || "",
       (e.transcript || "").replace(/"/g, '""'),
@@ -251,6 +257,11 @@ export default function EventLog() {
                 {event.crossStreet ? `${event.address} & ${event.crossStreet}` : event.address}
               </div>
             )}
+            {event.addressFromContext && (
+              <div className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-[11px] font-bold text-amber-400">
+                ⚠️ {ADDRESS_FROM_CONTEXT_NOTE}
+              </div>
+            )}
             {event.locationApprox && (
               <div className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-amber-400">
                 ⚠️ Approximate location — single cross street named, may need to search exact location. Read dispatch for context.
@@ -323,6 +334,11 @@ export default function EventLog() {
                 {event.crossStreet ? `${event.address} & ${event.crossStreet}` : event.address}
               </div>
             )}
+            {event.addressFromContext && (
+              <div className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-[11px] font-bold text-amber-400">
+                ⚠️ {ADDRESS_FROM_CONTEXT_NOTE}
+              </div>
+            )}
             {event.locationApprox && (
               <div className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-amber-400">
                 ⚠️ Approximate location — single cross street named, may need to search exact location. Read dispatch for context.
@@ -374,6 +390,11 @@ export default function EventLog() {
               <div className="flex items-center gap-1 text-xs font-mono text-muted-foreground">
                 <MapPin className="h-3 w-3 shrink-0" />
                 {event.address}
+              </div>
+            )}
+            {event.addressFromContext && (
+              <div className="text-[10px] font-bold text-amber-500">
+                ⚠️ {ADDRESS_FROM_CONTEXT_NOTE}
               </div>
             )}
             {event.locationApprox && (

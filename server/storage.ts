@@ -24,6 +24,9 @@ interface DispatchEventDocument {
   whisperModel: string | null;
   locationApprox?: boolean;
   acceptedBy?: string | null;
+  addressFromContext?: boolean;
+  audioStartedAt?: Date | null;
+  audioEndedAt?: Date | null;
   createdAt: Date;
 }
 
@@ -54,6 +57,9 @@ function mapEvent(row: DispatchEventDocument): DispatchEvent {
     whisperModel: row.whisperModel ?? null,
     locationApprox: row.locationApprox ?? false,
     acceptedBy: row.acceptedBy ?? null,
+    addressFromContext: row.addressFromContext ?? false,
+    audioStartedAt: row.audioStartedAt ? row.audioStartedAt.toISOString() : null,
+    audioEndedAt: row.audioEndedAt ? row.audioEndedAt.toISOString() : null,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -128,6 +134,9 @@ export class DatabaseStorage implements IStorage {
       whisperModel: event.whisperModel ?? null,
       locationApprox: event.locationApprox ?? false,
       acceptedBy: event.acceptedBy ?? null,
+      addressFromContext: event.addressFromContext ?? false,
+      audioStartedAt: typeof event.audioStartedAt === "number" ? new Date(event.audioStartedAt) : null,
+      audioEndedAt: typeof event.audioEndedAt === "number" ? new Date(event.audioEndedAt) : null,
       createdAt: new Date(),
     };
     await database.collection<DispatchEventDocument>("dispatchEvents").insertOne(document);

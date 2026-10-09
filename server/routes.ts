@@ -1,7 +1,7 @@
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import type { Server } from "node:http";
 import { hostname } from "node:os";
-import { readFileSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync, statSync, renameSync } from "node:fs";
 import path from "node:path";
 import rateLimit from "express-rate-limit";
 import { ObjectId } from "mongodb";
@@ -9,10 +9,19 @@ import { storage } from "./storage";
 import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent, type InsertDispatchEvent } from "@shared/schema";
 import { normalizeKeywordEntry } from "@shared/keywords";
 import { extractAddress } from "@shared/extract-address";
+import { backfillAddressFromContext } from "@shared/address-context";
 import { suggestStreets, levenshtein, type StreetDictionary } from "@shared/street-match";
 import { getDatabase, isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
 import { getWhisperModel } from "./whisper";
+import {
+  HARD_PRODUCTION_PHRASES,
+  DISPATCH_SIGNALS,
+  isSignalCountingRun,
+  normalizeText,
+  containsTvVideoPhrase,
+  isInvalidAutoAddress,
+} from "@shared/audio-gates";
 import { decideLease, releaseLease, type CaptureLease } from "@shared/capture-lease";
 import {
   parseAcceptCallbackData,
@@ -33,7 +42,58 @@ let lastCaptureHeartbeat: {
   lock: string | null;
   lastChunkAgoMs: number | null;
   lastSentAgoMs: number | null;
+  /** Capture-client counters (holds, context saves, cooldown/chunk drops), cumulative since page load. */
+  counters: Record<string, number> | null;
 } | null = null;
+
+// Intake counters since process start (GET /api/health, logged every 5 min).
+// They exist to answer "26 rejected but only 2 quarantined": every rejection
+// increments `rejected`; the quarantine insert then increments exactly one of
+// `quarantined` / `quarantineFailed`, so rejected === quarantined + failed.
+const dispatchCounters = {
+  since: new Date().toISOString(),
+  rejected: 0,
+  quarantined: 0,
+  quarantineFailed: 0,
+  quarantineFallbackWrites: 0,
+  zod400: 0,
+  dedupSuppressed: 0,
+  repeatRequestIdsIgnored: 0,
+  addressContextSaves: 0,
+  addressContextNone: 0,
+};
+
+function sanitizeCounters(v: unknown): Record<string, number> | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const out: Record<string, number> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>).slice(0, 16)) {
+    if (/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(k) && typeof val === "number" && Number.isFinite(val)) {
+      out[k] = Math.round(val);
+    }
+  }
+  return out;
+}
+
+// Client-supplied capture times are hints: accept only a sane window around
+// "now" (the client and this server share one clock on a desk).
+function clampAudioMs(v: unknown): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  const now = Date.now();
+  return v >= now - 10 * 60_000 && v <= now + 60_000 ? Math.round(v) : null;
+}
+
+// Recently seen clientRequestId values (double-dispatch guard), in memory.
+const seenRequestIds = new Map<string, number>();
+const REQUEST_ID_TTL_MS = 2 * 60_000;
+function seenRecently(id: string | undefined): boolean {
+  if (!id) return false;
+  const now = Date.now();
+  for (const [k, at] of Array.from(seenRequestIds.entries())) if (now - at > REQUEST_ID_TTL_MS) seenRequestIds.delete(k);
+  if (seenRequestIds.has(id)) return true;
+  seenRequestIds.set(id, now);
+  if (seenRequestIds.size > 500) seenRequestIds.delete(seenRequestIds.keys().next().value as string);
+  return false;
+}
 
 function broadcastEvent(event: DispatchEvent): void {
   const data = JSON.stringify(event);
@@ -577,109 +637,6 @@ async function reverseGeocodeRoad(lat: number, lng: number): Promise<string | nu
   return null;
 }
 
-// Phrases that almost always mean the audio captured a TV/video instead of dispatch.
-const TV_VIDEO_PHRASES = [
-  "thank you for watching",
-  "thanks for watching",
-  "that's the end of the video",
-  "that is the end of the video",
-  "end of the video",
-  "like and subscribe",
-  "hello hello hello",
-  "we interrupt coursework",
-  "today's video",
-  "this is just a test",
-  "thank you and goodbye",
-  "subscribe to our channel",
-  "visit www.",
-  "for more information",
-  "check mark",
-  "what were you waiting",
-  "your daughter",
-  "no answer",
-  "please return to your seat",
-  "what's your name",
-  "what would you say",
-  "i'll be there for you",
-  "why come they need me",
-  "live stream",
-  "livestream",
-  "youtube",
-];
-
-// Show/announcement phrases that reject a dispatch UNCONDITIONALLY — a real
-// dispatch never follows "this is a production of...", so unlike the soft
-// TV_VIDEO_PHRASES these are not bypassed by signal+address heuristics.
-const HARD_PRODUCTION_PHRASES = [
-  "this is a production of",
-  "thank you for your attention",
-  "thanks for watching",
-  "thank you for watching",
-  // Not banned: the Whisper initial_prompt itself starts with "Dispatch radio
-  // terminology", and Whisper echoes that prompt into noisy audio — banning it
-  // here quarantines prompt-echo false positives (seen 2026-09-17).
-  "one, two, three",
-];
-
-// Radio checks / mic tests where someone runs through the signal numbers
-// ("signal 3, signal 5, signal 6, ... signal 38"). A real dispatch carries
-// one, maybe two signal types — 4+ distinct numbers is a counting run.
-function isSignalCountingRun(transcript: string): boolean {
-  const numbers = new Set<string>();
-  const re = /\bsignal\s+(\d+)/gi;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(transcript)) !== null) {
-    numbers.add(match[1]);
-    if (numbers.size >= 4) return true;
-  }
-  return false;
-}
-
-const STREET_SUFFIX_ONLY = new Set([
-  "street", "st", "avenue", "ave", "road", "rd", "boulevard", "blvd", "drive", "dr",
-  "lane", "ln", "court", "ct", "circle", "cir", "highway", "hwy", "parkway", "pkwy",
-  "place", "pl", "terrace", "ter", "trail", "trl", "way", "loop", "cove", "point",
-  "run", "ridge", "rdg", "spur", "plaza", "sq", "square", "alley", "bridge", "bypass",
-  "causeway", "center", "centre", "commons", "curve", "divide", "estate", "expressway", "expy",
-  "freeway", "garden", "gardens", "gate", "green", "grove", "heights", "hill", "hills",
-  "hollow", "island", "isle", "junction", "knoll", "lake", "landings", "mall", "manor",
-  "meadow", "meadows", "mill", "mills", "mission", "mont", "mount", "mountain", "neck",
-  "oval", "overlook", "park", "pass", "path", "pike", "pine", "pines", "prairie", "ranch",
-  "river", "route", "row", "shoal", "shore", "spring", "springs", "station", "stravenue",
-  "stream", "summit", "throughway", "trace", "track", "trafficway", "trailer", "tunnel",
-  "turnpike", "union", "valley", "vista", "village", "vllg", "ville", "walk", "wall",
-  "waters", "wells", "track", "court", "point", "drive", "way",
-]);
-
-function normalizeText(value: string): string {
-  return (value || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
-}
-
-function containsTvVideoPhrase(transcript: string): boolean {
-  const t = normalizeText(transcript);
-  return TV_VIDEO_PHRASES.some((p) => t.includes(p));
-}
-
-// Chatter fragments that leak into parsed addresses from non-dispatch audio.
-const ADDRESS_CHATTER = [
-  "sorry",
-  "thank you",
-  "excuse me",
-  "you're welcome",
-  "live stream",
-  "livestream",
-];
-
-function isInvalidAutoAddress(address: string | null | undefined): boolean {
-  const a = (address || "").trim().toLowerCase();
-  if (!a || a === "" || a.includes("unknown") || a === "n/a" || a === "null") return true;
-  // Reject addresses that are just a street suffix (e.g. "wall", "drive", "point").
-  if (STREET_SUFFIX_ONLY.has(a)) return true;
-  // Reject addresses that are actually conversation fragments.
-  if (ADDRESS_CHATTER.some((p) => a.includes(p))) return true;
-  return false;
-}
-
 // True when the address names at least one road from KNOWN_ROAD_CANONICAL.
 // Hardening for the auto-dispatch gate: an address that FAILED to geocode and
 // names no known road is usually Whisper fabricating a street on noise
@@ -711,18 +668,6 @@ function hasKeywordSpam(transcript: string): boolean {
   // Detect the same word repeated 4+ times in a row (e.g. "mva mva mva mva").
   return /\b(\w+)\s+\1\s+\1\s+\1\b/.test(t);
 }
-
-const DISPATCH_SIGNALS = [
-  "signal 4", "signal four",
-  "signal 3", "signal three",
-  "signal 16",
-  "mva",
-  "wreck",
-  "tow",
-  "airbags deployed",
-  "rollover",
-  "accident",
-];
 
 function isLikelyRealDispatch(transcript: string, address: string | null | undefined): boolean {
   const t = normalizeText(transcript);
@@ -791,29 +736,101 @@ function getStreetDictionary(): StreetDictionary | null {
 // Rejected auto-dispatches go to a quarantine collection instead of being
 // silently dropped, so a real call killed by a false-positive gate (spam
 // filter, address resolution) can be reviewed and recovered afterwards.
-async function quarantineRejection(parsed: InsertDispatchEvent, reason: string): Promise<void> {
+//
+// 2026-10-09: the insert used to be fire-and-forget with errors swallowed, so a
+// Mongo blip lost the record while the console still said "[quarantine]". It is
+// now awaited (capped), retried once, logged on failure, and on failure
+// appended to logs/quarantine-fallback.jsonl so the transcript is not lost.
+// DM_QUARANTINE_AWAIT=off restores the old non-blocking behavior (still logged).
+const QUARANTINE_INSERT_TIMEOUT_MS = 1_500;
+const QUARANTINE_FALLBACK_MAX_BYTES = 5 * 1024 * 1024;
+
+function writeQuarantineFallback(doc: Record<string, unknown>): void {
   try {
-    const db = await getDatabase();
-    await db.collection("quarantinedDispatches").insertOne({
-      reason,
-      transcript: parsed.transcript,
-      address: parsed.address ?? null,
-      keywords: parsed.keywords ?? null,
-      source: parsed.source ?? null,
-      signalType: parsed.signalType ?? null,
-      whisperModel: parsed.whisperModel ?? null,
-      createdAt: new Date(),
-    });
-  } catch {
-    // Quarantine is best-effort; never block the rejection response on it.
+    const dir = path.join(process.cwd(), "logs");
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "quarantine-fallback.jsonl");
+    try {
+      if (statSync(file).size > QUARANTINE_FALLBACK_MAX_BYTES) renameSync(file, `${file}.previous`);
+    } catch {
+      // no file yet
+    }
+    appendFileSync(file, JSON.stringify(doc) + "\n");
+    dispatchCounters.quarantineFallbackWrites++;
+  } catch (err) {
+    console.error("[quarantine] fallback file write failed:", err);
   }
 }
 
-function rejectAutoDispatch(res: Response, parsed: InsertDispatchEvent, reason: string) {
+async function insertQuarantineDoc(doc: Record<string, unknown>): Promise<void> {
+  const db = await getDatabase();
+  const col = db.collection("quarantinedDispatches");
+  // Non-blocking duplicate MARKER (not suppression): the same transmission is
+  // often heard by two desks a couple of seconds apart with complementary
+  // halves. Link to a quarantine doc from ANOTHER source created within the
+  // last 10 s so a reviewer / the later stitching phase can pair them. Any
+  // failure here is ignored; the record is always written.
+  try {
+    const peer = await col.findOne(
+      { createdAt: { $gte: new Date(Date.now() - 10_000) }, source: { $ne: doc.source ?? null } },
+      { projection: { _id: 1, source: 1 }, sort: { createdAt: -1 } },
+    );
+    if (peer) doc = { ...doc, possibleSameTransmissionAs: String(peer._id), possibleSameTransmissionSource: peer.source ?? null };
+  } catch {
+    // marker is best-effort
+  }
+  await col.insertOne({ ...doc });
+}
+
+async function quarantineRejection(parsed: InsertDispatchEvent, reason: string): Promise<void> {
+  dispatchCounters.rejected++;
+  const doc: Record<string, unknown> = {
+    reason,
+    transcript: parsed.transcript,
+    address: parsed.address ?? null,
+    crossStreet: parsed.crossStreet ?? null,
+    keywords: parsed.keywords ?? null,
+    source: parsed.source ?? null,
+    signalType: parsed.signalType ?? null,
+    whisperModel: parsed.whisperModel ?? null,
+    addressFromContext: parsed.addressFromContext === true,
+    // Neighbouring chunks the client sent (bounded), kept for audit / recovery tools.
+    contextTranscripts: (parsed.contextTranscripts ?? []).slice(0, 8),
+    audioStartedAt: typeof parsed.audioStartedAt === "number" ? new Date(parsed.audioStartedAt) : null,
+    audioEndedAt: typeof parsed.audioEndedAt === "number" ? new Date(parsed.audioEndedAt) : null,
+    createdAt: new Date(),
+  };
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await Promise.race([
+        insertQuarantineDoc(doc),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`insert timed out after ${QUARANTINE_INSERT_TIMEOUT_MS}ms`)), QUARANTINE_INSERT_TIMEOUT_MS).unref(),
+        ),
+      ]);
+      dispatchCounters.quarantined++;
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  dispatchCounters.quarantineFailed++;
+  console.error(
+    `[quarantine] INSERT FAILED (${reason}; source=${parsed.source || "?"}): ${(lastErr as Error)?.message ?? lastErr} — writing fallback file`,
+  );
+  writeQuarantineFallback({ ...doc, createdAt: (doc.createdAt as Date).toISOString(), insertError: String((lastErr as Error)?.message ?? lastErr) });
+}
+
+async function rejectAutoDispatch(res: Response, parsed: InsertDispatchEvent, reason: string) {
   console.log(
     `[quarantine] ${reason} :: transcript="${(parsed.transcript || "").slice(0, 140)}" :: address=${parsed.address || "(none)"} :: source=${parsed.source || "?"}`
   );
-  void quarantineRejection(parsed, reason);
+  if (process.env.DM_QUARANTINE_AWAIT?.trim().toLowerCase() === "off") {
+    void quarantineRejection(parsed, reason);
+  } else {
+    await quarantineRejection(parsed, reason);
+  }
   return res.status(400).json({ message: `Auto-dispatch rejected: ${reason}` });
 }
 
@@ -830,6 +847,8 @@ export async function registerRoutes(
       hasMongoUri: Boolean(process.env.MONGODB_URI),
       hasMongoDbName: Boolean(process.env.MONGODB_DB_NAME),
       nodeEnv: process.env.NODE_ENV || null,
+      // Intake counters since process start (see dispatchCounters).
+      dispatch: dispatchCounters,
     });
   });
 
@@ -855,6 +874,7 @@ export async function registerRoutes(
       lock: typeof b.lock === "string" ? b.lock.slice(0, 16) : null,
       lastChunkAgoMs: num(b.lastChunkAgoMs),
       lastSentAgoMs: num(b.lastSentAgoMs),
+      counters: sanitizeCounters(b.counters),
     };
     res.json({ ok: true });
   });
@@ -994,6 +1014,9 @@ export async function registerRoutes(
         lng,
         geocodedRoad,
         locationApprox: isBareRoadName(address),
+        addressFromContext: doc.addressFromContext === true,
+        audioStartedAt: doc.audioStartedAt instanceof Date ? doc.audioStartedAt.getTime() : null,
+        audioEndedAt: doc.audioEndedAt instanceof Date ? doc.audioEndedAt.getTime() : null,
       });
       await db.collection("quarantinedDispatches").deleteOne({ _id: doc._id });
       broadcastEvent(event);
@@ -1026,6 +1049,22 @@ export async function registerRoutes(
 
       const parsed = insertDispatchEventSchema.parse(req.body);
 
+      // Double-dispatch guard: the capture client tags each dispatch with a
+      // unique id; a repeated POST of the same id (retry, race) is ignored.
+      if (seenRecently(parsed.clientRequestId)) {
+        dispatchCounters.repeatRequestIdsIgnored++;
+        console.log(`[dispatch] ignoring repeated clientRequestId ${parsed.clientRequestId} source=${parsed.source || "?"}`);
+        return res.status(200).json({ duplicate: true, repeatedRequest: true });
+      }
+      // Server-set only: never trust a client value for this flag.
+      parsed.addressFromContext = false;
+      parsed.audioStartedAt = clampAudioMs(parsed.audioStartedAt);
+      parsed.audioEndedAt = clampAudioMs(parsed.audioEndedAt);
+      if (parsed.audioStartedAt != null && parsed.audioEndedAt != null && parsed.audioStartedAt > parsed.audioEndedAt) {
+        parsed.audioStartedAt = null;
+        parsed.audioEndedAt = null;
+      }
+
       // Stamp which Whisper model produced this event (fleet accuracy comparison).
       // Must run BEFORE the eventFields destructure below — the stored event
       // spreads eventFields, so a backfill afterwards never reaches it.
@@ -1047,12 +1086,38 @@ export async function registerRoutes(
             parsed.crossStreet = extracted.crossStreet;
           }
           console.log(`[address-backfill] source=${parsed.source || "?"} -> ${extracted.address}`);
+        } else if (
+          process.env.DM_ADDRESS_CONTEXT?.trim().toLowerCase() !== "off" &&
+          parsed.contextTranscripts &&
+          parsed.contextTranscripts.length > 0
+        ) {
+          // Multi-chunk call: the keyword chunk has no address, but the
+          // neighbouring chunks the client sent may. Fail-closed helper
+          // (shared/address-context.ts): TV/production/other-call chunks are
+          // ignored and two different addresses mean "none". Gates, geocode
+          // and dedup below still apply to whatever address results.
+          const ctx = backfillAddressFromContext(parsed.contextTranscripts);
+          if (ctx) {
+            parsed.address = ctx.address;
+            if (ctx.crossStreet && !parsed.crossStreet) parsed.crossStreet = ctx.crossStreet;
+            parsed.addressFromContext = true;
+            dispatchCounters.addressContextSaves++;
+            console.log(
+              `[address-backfill-context] source=${parsed.source || "?"} -> ${ctx.address}${ctx.crossStreet ? ` & ${ctx.crossStreet}` : ""} (${ctx.entriesUsed}/${parsed.contextTranscripts.length} context entries usable)`,
+            );
+          } else {
+            dispatchCounters.addressContextNone++;
+            console.log(
+              `[address-backfill-context] source=${parsed.source || "?"} none usable/ambiguous (${parsed.contextTranscripts.length} context entries)`,
+            );
+          }
         }
       }
 
       // skipDedup is an intake-only flag (see schema) — keep it out of the
       // stored event document.
-      const { skipDedup, ...eventFields } = parsed;
+      // contextTranscripts / clientRequestId are intake-only too.
+      const { skipDedup, contextTranscripts: _contextTranscripts, clientRequestId: _clientRequestId, ...eventFields } = parsed;
 
       // Auto-dispatches without a real address are usually TV/noise false positives.
       // Manual dispatches can still be created without an address.
@@ -1170,6 +1235,7 @@ export async function registerRoutes(
               return norm(e.address || "") === roadKey || norm(e.crossStreet || "") === roadKey;
             });
             if (recentSameRoad) {
+                dispatchCounters.dedupSuppressed++;
               return res.status(200).json({ duplicate: true, event: recentSameRoad });
             }
           }
@@ -1261,6 +1327,7 @@ export async function registerRoutes(
           return newAddr.length >= 5 && eAddr.length >= 5 && addressesSimilar(newAddr, eAddr);
         });
         if (existing) {
+          dispatchCounters.dedupSuppressed++;
           return res.status(200).json({ duplicate: true, event: existing });
         }
       }
@@ -1300,6 +1367,7 @@ export async function registerRoutes(
 
       res.status(201).json(event);
     } catch (err: any) {
+      if (err?.name === "ZodError") dispatchCounters.zod400++;
       res.status(400).json({ message: err.message });
     }
   });
@@ -1323,6 +1391,16 @@ export async function registerRoutes(
   // Housekeeping: Road Mention review prompts go stale fast — dispatchers
   // either listen back immediately or never. Auto-resolve them after 90 min
   // so the board doesn't accumulate dead prompts.
+  // Every 5 min: intake counters, so rejected-vs-quarantined mismatches show in the app log.
+  setInterval(() => {
+    const c = dispatchCounters;
+    if (c.rejected || c.zod400 || c.dedupSuppressed || c.addressContextSaves || c.addressContextNone) {
+      console.log(
+        `[dispatch-counters] rejected=${c.rejected} quarantined=${c.quarantined} quarantineFailed=${c.quarantineFailed} fallbackWrites=${c.quarantineFallbackWrites} zod400=${c.zod400} dedup=${c.dedupSuppressed} repeatIds=${c.repeatRequestIdsIgnored} contextSaves=${c.addressContextSaves} contextNone=${c.addressContextNone}`,
+      );
+    }
+  }, 5 * 60 * 1000).unref();
+
   const roadMentionSweeper = setInterval(async () => {
     try {
       const staleBefore = new Date(Date.now() - 90 * 60 * 1000);
@@ -1553,6 +1631,10 @@ function formatTelegramMessage(event: DispatchEvent, options: FormatOptions = {}
 
   let msg = `${header}\n\n`;
   msg += `<b>📍 Location:</b> ${escapeHtml(address)}\n`;
+
+  if (event.addressFromContext) {
+    msg += `<b>⚠️ Address inferred from surrounding audio</b> — verify before responding.\n`;
+  }
 
   if (event.locationApprox) {
     msg += `<b>⚠️ APPROXIMATE LOCATION:</b> single cross street named — may need to search exact location. READ DISPATCH FOR CONTEXT.\n`;

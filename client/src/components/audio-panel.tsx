@@ -15,6 +15,7 @@ import { getCaptureLockState, subscribeCaptureLock } from "@/lib/capture-lock";
 import { requestLease, hookLeaseRelease, releaseLeaseNow, type LeaseState } from "@/lib/capture-lease";
 import { LEASE_RENEW_MS } from "@shared/capture-lease";
 import { useDispatchBuffer } from "@/hooks/use-dispatch-buffer";
+import { isTrueRepeat } from "@/lib/dispatch-buffer-core";
 import { useKeywords } from "@/hooks/use-keywords";
 import RmsMeter from "./rms-meter";
 import TranscriptFeed from "./transcript-feed";
@@ -41,6 +42,13 @@ export interface DetectedEvent {
   crossStreet: string | null;
   district: string;
   source: string;
+  /** Neighbouring transcripts (oldest -> newest), only when `address` is missing. */
+  contextTranscripts?: string[];
+  /** Intake-only double-dispatch guard id. */
+  clientRequestId?: string;
+  /** Client epoch ms of the call's first/last audio chunk (hints). */
+  audioStartedAt?: number;
+  audioEndedAt?: number;
 }
 
 interface AudioPanelProps {
@@ -53,6 +61,15 @@ interface AudioPanelProps {
 }
 
 const DISPATCH_COOLDOWN_MS = 15000;
+
+// Address hold (see lib/dispatch-buffer-core.ts). Per-box kill switch in the
+// untracked .env.local: VITE_ADDRESS_HOLD=off (needs app restart + page reload).
+const ADDRESS_HOLD_ENABLED =
+  String(import.meta.env.VITE_ADDRESS_HOLD ?? "on").trim().toLowerCase() !== "off";
+const ADDRESS_HOLD_MS = (() => {
+  const v = Number(import.meta.env.VITE_ADDRESS_HOLD_MS);
+  return Number.isFinite(v) && v >= 5_000 && v <= 60_000 ? v : undefined;
+})();
 
 export default function AudioPanel({
   district,
@@ -70,7 +87,11 @@ export default function AudioPanel({
   const [transcriptEntries, setTranscriptEntries] = useState<TranscriptEntry[]>([]);
   const [lastDispatch, setLastDispatch] = useState<DetectedEvent | null>(null);
   const entryIdRef = useRef(0);
-  const lastDispatchTimeRef = useRef(0);
+  // Last dispatch, for the cooldown: only a TRUE repeat (same address + same
+  // incident class within DISPATCH_COOLDOWN_MS) is suppressed.
+  const lastDispatchRef = useRef<{ address: string | null; signalType: string | null; at: number } | null>(null);
+  // Counters sent with the capture heartbeat (visibility for missed calls).
+  const cooldownDropsRef = useRef(0);
   const { toast } = useToast();
   const { keywords: keywordList } = useKeywords();
 
@@ -79,12 +100,23 @@ export default function AudioPanel({
     keywords: { keyword: string; signalType: string }[];
     address: string | null;
     crossStreet: string | null;
+    contextTranscripts?: string[];
+    clientRequestId?: string;
+    audioStartedAt?: number;
+    audioEndedAt?: number;
   }) => {
     const now = Date.now();
-    if (now - lastDispatchTimeRef.current < DISPATCH_COOLDOWN_MS) {
+    const signalType = payload.keywords[0]?.signalType ?? null;
+    // The old blanket 15 s cooldown silently dropped a DIFFERENT call that
+    // followed within 15 s. Now only a repeat of the same address + incident
+    // class is suppressed (the server would dedup it anyway), and it is logged.
+    if (isTrueRepeat(lastDispatchRef.current, { address: payload.address, signalType }, now, DISPATCH_COOLDOWN_MS)) {
+      cooldownDropsRef.current += 1;
+      console.log(`[cooldown] suppressed repeat dispatch (${signalType} @ ${payload.address})`);
       return;
     }
-    lastDispatchTimeRef.current = now;
+    const previousDispatch = lastDispatchRef.current;
+    lastDispatchRef.current = { address: payload.address, signalType, at: now };
 
     const event: DetectedEvent = {
       transcript: payload.transcript,
@@ -93,6 +125,10 @@ export default function AudioPanel({
       crossStreet: payload.crossStreet,
       district,
       source: sourceName || district,
+      contextTranscripts: payload.contextTranscripts,
+      clientRequestId: payload.clientRequestId,
+      audioStartedAt: payload.audioStartedAt,
+      audioEndedAt: payload.audioEndedAt,
     };
 
     try {
@@ -105,18 +141,22 @@ export default function AudioPanel({
       });
     } catch (error) {
       console.error("Dispatch failed:", error);
-      lastDispatchTimeRef.current = 0; // allow retry
+      lastDispatchRef.current = previousDispatch; // allow retry
     }
   }, [district, sourceName, onDispatchDetected, toast]);
 
-  const { addFinalTranscript, flush, isPending } = useDispatchBuffer({
+  const { addFinalTranscript, flush, isPending, getStats } = useDispatchBuffer({
     keywordList,
     silenceMs: 5000,
     maxChunks: 6,
+    holdEnabled: ADDRESS_HOLD_ENABLED,
+    holdMs: ADDRESS_HOLD_MS,
     onDispatch: handleDispatch,
   });
+  const getStatsRef = useRef(getStats);
+  getStatsRef.current = getStats;
 
-  const handleTranscript = useCallback((text: string, isFinal: boolean) => {
+  const handleTranscript = useCallback((text: string, isFinal: boolean, meta?: { audioStartedAt?: number; audioEndedAt?: number }) => {
     const id = `entry-${entryIdRef.current++}`;
     setTranscriptEntries((prev) => {
       let next: TranscriptEntry[];
@@ -137,7 +177,7 @@ export default function AudioPanel({
     });
 
     if (isFinal) {
-      addFinalTranscript(text);
+      addFinalTranscript(text, meta);
     }
   }, [addFinalTranscript]);
 
@@ -376,6 +416,12 @@ export default function AudioPanel({
           lease: leaseRef.current,
           lastChunkAgoMs: health.lastChunkAt ? now - health.lastChunkAt : null,
           lastSentAgoMs: health.lastSentAt ? now - health.lastSentAt : null,
+          // Missed-call visibility (cumulative since page load).
+          counters: {
+            ...getStatsRef.current(),
+            cooldownDrops: cooldownDropsRef.current,
+            droppedChunks: health.droppedChunks,
+          },
         }),
       }).catch(() => undefined);
     };
