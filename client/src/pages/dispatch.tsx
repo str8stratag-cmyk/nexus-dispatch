@@ -127,6 +127,11 @@ export default function DispatchPage() {
       source: event.source,
       status: "active",
       isManual: false,
+      // Address hold / chunk-time plumbing (intake-only or hints; see shared/schema.ts).
+      contextTranscripts: event.contextTranscripts,
+      clientRequestId: event.clientRequestId,
+      audioStartedAt: event.audioStartedAt,
+      audioEndedAt: event.audioEndedAt,
     });
   }, [dispatchMutation]);
 

@@ -21,6 +21,11 @@ export interface DispatchEvent {
   locationApprox: boolean;
   /** Telegram (or board) acceptor identity when status became accepted. */
   acceptedBy: string | null;
+  /** True when the address was recovered from surrounding audio rather than the call's own transcript (verify it). */
+  addressFromContext: boolean;
+  /** ISO time the call's first/last audio chunk was captured (client hint; null on older clients). */
+  audioStartedAt: string | null;
+  audioEndedAt: string | null;
   createdAt: string;
 }
 
@@ -49,6 +54,18 @@ export const insertDispatchEventSchema = z.object({
   whisperModel: z.string().nullable().optional(),
   locationApprox: z.boolean().default(false),
   acceptedBy: z.string().nullable().optional(),
+  // Server-set only: server/routes.ts forces this false on intake and sets it
+  // when the address came from contextTranscripts. Persisted.
+  addressFromContext: z.boolean().default(false),
+  // Client capture-time hints (epoch ms of the call's first/last audio chunk).
+  // Clamped server-side; persisted as dates on events and quarantine docs.
+  audioStartedAt: z.number().nullable().optional(),
+  audioEndedAt: z.number().nullable().optional(),
+  // Intake-only (stripped before storage, like skipDedup): neighbouring
+  // transcripts the client sends when the call itself has no address, and a
+  // per-dispatch id the server uses to ignore a repeated POST.
+  contextTranscripts: z.array(z.string().max(500)).max(8).optional(),
+  clientRequestId: z.string().max(64).optional(),
   // Intake-only flag: when true, skip the near-duplicate suppression below.
   // Used by the manual entry form so dispatchers can always log a call.
   // Stripped before the event is stored.

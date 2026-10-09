@@ -1,19 +1,27 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { detectKeywords, type KeywordEntry } from "@/lib/constants";
-import { extractAddress, containsMajorRoad, type ExtractedAddress } from "@/lib/extract-address";
+import {
+  DispatchBufferCore,
+  type CorePayload,
+  type CoreStats,
+  type ChunkMeta,
+} from "@/lib/dispatch-buffer-core";
 
-export interface DispatchPayload {
-  transcript: string;
-  keywords: { keyword: string; signalType: string }[];
-  address: string | null;
-  crossStreet: string | null;
-}
+// The buffering rules (ring, address hold, context, barriers, double-dispatch
+// guard) live in the pure DispatchBufferCore so they can be unit tested; this
+// hook only owns the timer and calls onDispatch. See the core's header.
+
+export type DispatchPayload = CorePayload;
+export type { ChunkMeta };
 
 interface UseDispatchBufferOptions {
   keywordList: KeywordEntry[];
   onDispatch: (payload: DispatchPayload) => Promise<void>;
   silenceMs?: number;
   maxChunks?: number;
+  /** false = old behavior (no address hold). Per-box VITE_ADDRESS_HOLD=off. */
+  holdEnabled?: boolean;
+  holdMs?: number;
 }
 
 export function useDispatchBuffer({
@@ -21,9 +29,30 @@ export function useDispatchBuffer({
   onDispatch,
   silenceMs = 5000,
   maxChunks = 6,
+  holdEnabled = true,
+  holdMs,
 }: UseDispatchBufferOptions) {
   const [isPending, setIsPending] = useState(false);
-  const bufferRef = useRef<string[]>([]);
+  const keywordListRef = useRef(keywordList);
+  keywordListRef.current = keywordList;
+  const onDispatchRef = useRef(onDispatch);
+  onDispatchRef.current = onDispatch;
+
+  const coreRef = useRef<DispatchBufferCore | null>(null);
+  if (coreRef.current === null) {
+    coreRef.current = new DispatchBufferCore({
+      // Read through a ref so a keyword-list edit applies without rebuilding the buffer.
+      detectKeywords: (text) => detectKeywords(text, keywordListRef.current),
+      newId: () =>
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+      silenceMs,
+      maxChunks,
+      holdEnabled,
+      holdMs,
+    });
+  }
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearTimer = useCallback(() => {
@@ -33,92 +62,59 @@ export function useDispatchBuffer({
     }
   }, []);
 
-  const buildPayload = useCallback((chunks: string[]): DispatchPayload & ExtractedAddress => {
-    const transcript = chunks.join(" ");
-    let keywords = detectKeywords(transcript, keywordList);
-    const { address, crossStreet } = extractAddress(transcript);
-    // Major road named, no crash/signal keyword ("Road Mention"): the server
-    // already has dedicated gating for this (corroboration regex, per-road
-    // 15-min cooldown, stale sweeper — see server/routes.ts) but nothing
-    // client-side ever triggered it, so it was dead code (found 2026-10-05:
-    // "on Nebraska and Hillsborough, a green Honda Element Florida tag"
-    // never even reached the server, let alone quarantine, because
-    // detectKeywords alone gates every dispatch attempt below). Synthesize
-    // the keyword so the existing server-side path actually runs; the
-    // server still decides whether it has enough corroboration to keep.
-    if (keywords.length === 0 && containsMajorRoad(transcript)) {
-      keywords = [{ keyword: "Road Mention", signalType: "Road Mention" }];
-    }
-    return { transcript, keywords, address, crossStreet };
-  }, [keywordList]);
-
-  const addFinalTranscript = useCallback((text: string) => {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-
-    // 1. Add to rolling buffer (keep max `maxChunks`)
-    bufferRef.current.push(trimmed);
-    if (bufferRef.current.length > maxChunks) {
-      bufferRef.current.shift();
-    }
-
-    // 2. Evaluate the *combined buffer* for keywords. This is critical for
-    // clipped calls where a keyword is split across final transcript chunks.
-    const fullTranscript = bufferRef.current.join(" ");
-    const allKeywords = detectKeywords(fullTranscript, keywordList);
-
-    if (allKeywords.length > 0) {
-      setIsPending(true);
-
-      // 3. Reset the silence timer
-      clearTimer();
-      timerRef.current = setTimeout(async () => {
-        // Snapshot + clear BEFORE the await below, not after: a final
-        // transcript arriving while onDispatch is in flight used to push
-        // into this same still-shared array and could schedule a second
-        // overlapping cycle that later read content from both cycles,
-        // producing a duplicate/garbled dispatch (found 2026-09-22).
-        const finalChunks = bufferRef.current;
-        bufferRef.current = [];
-        const { transcript, keywords, address, crossStreet } = buildPayload(finalChunks);
-
-        if (keywords.length > 0) {
-          try {
-            await onDispatch({ transcript, keywords, address, crossStreet });
-          } catch (error) {
-            console.error("Dispatch failed:", error);
-          }
-        }
-
-        setIsPending(false);
-      }, silenceMs);
-    }
-  }, [keywordList, maxChunks, silenceMs, clearTimer, buildPayload, onDispatch]);
-
-  const flush = useCallback(async () => {
-    if (!isPending || !timerRef.current) return;
-
-    clearTimeout(timerRef.current);
-    timerRef.current = null;
-
-    const finalChunks = bufferRef.current;
-    bufferRef.current = [];
-    const { transcript, keywords, address, crossStreet } = buildPayload(finalChunks);
-
-    if (keywords.length > 0) {
+  // Send payloads one after another. The core already moved its state on
+  // (snapshot-before-await), so a transcript arriving while a dispatch is in
+  // flight cannot be folded into, or duplicate, the call being sent.
+  const send = useCallback(async (payloads: DispatchPayload[]) => {
+    for (const payload of payloads) {
       try {
-        await onDispatch({ transcript, keywords, address, crossStreet });
+        await onDispatchRef.current(payload);
       } catch (error) {
-        console.error("Dispatch flush failed:", error);
+        console.error("Dispatch failed:", error);
       }
     }
+  }, []);
 
+  const schedule = useCallback(() => {
+    clearTimer();
+    const core = coreRef.current!;
+    const due = core.nextDeadline();
+    setIsPending(core.isBusy());
+    if (due === null) return;
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      const payloads = coreRef.current!.tick(Date.now());
+      schedule();
+      void send(payloads);
+    }, Math.max(0, due - Date.now()));
+  }, [clearTimer, send]);
+
+  const addFinalTranscript = useCallback((text: string, meta?: ChunkMeta) => {
+    const payloads = coreRef.current!.push(text, Date.now(), meta);
+    schedule();
+    if (payloads.length > 0) void send(payloads);
+  }, [schedule, send]);
+
+  // Stop button / unmount: resolve an armed call or an active hold right away.
+  const flush = useCallback(async () => {
+    clearTimer();
+    const payloads = coreRef.current!.flush(Date.now());
     setIsPending(false);
-  }, [isPending, buildPayload, onDispatch, clearTimer]);
+    await send(payloads);
+  }, [clearTimer, send]);
+
+  const getStats = useCallback((): CoreStats => ({ ...coreRef.current!.stats }), []);
 
   useEffect(() => {
-    return () => clearTimer();
+    return () => {
+      clearTimer();
+      // Best effort: do not lose a call that was waiting for its address.
+      const payloads = coreRef.current?.flush(Date.now()) ?? [];
+      for (const payload of payloads) {
+        void Promise.resolve(onDispatchRef.current(payload)).catch(() => undefined);
+      }
+    };
   }, [clearTimer]);
 
-  return { addFinalTranscript, flush, isPending };
+  return { addFinalTranscript, flush, isPending, getStats };
 }
