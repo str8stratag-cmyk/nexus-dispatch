@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 interface UseAudioCaptureOptions {
   deviceId?: string;
   keywords?: string[];
-  onTranscript?: (text: string, isFinal: boolean) => void;
+  onTranscript?: (text: string, isFinal: boolean, meta?: { audioStartedAt?: number; audioEndedAt?: number }) => void;
 }
 
 export interface AudioCaptureHealth {
@@ -13,6 +13,8 @@ export interface AudioCaptureHealth {
   lastChunkAt: number;
   /** ms epoch of the last successful Whisper POST, 0 if none yet. */
   lastSentAt: number;
+  /** Chunks dropped because Whisper was two chunks behind (since page load). */
+  droppedChunks: number;
 }
 
 interface UseAudioCaptureReturn {
@@ -83,6 +85,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
   // queue without bound; addresses get re-transmitted on later chunks.
   const transcribeQueueRef = useRef<Promise<void>>(Promise.resolve());
   const transcribePendingRef = useRef(0);
+  const droppedChunksRef = useRef(0);
   // Consecutive /transcribe failures — 3+ in a row means the local Whisper
   // service is down/wedged, not a transient blip (2026-09-18: DISP-1's
   // Whisper hung for 16h before anyone noticed). Surface a persistent,
@@ -132,7 +135,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     refreshDevices();
   }, [refreshDevices]);
 
-  const transcribe = useCallback(async (audio: Blob, isSilent: boolean) => {
+  const transcribe = useCallback(async (audio: Blob, isSilent: boolean, times?: { audioStartedAt: number; audioEndedAt: number }) => {
     if (audio.size === 0) return;
     if (isSilent) return;
 
@@ -156,7 +159,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       }
       lastSentAtRef.current = Date.now();
       if (result.text?.trim()) {
-        onTranscriptRef.current?.(result.text.trim(), true);
+        onTranscriptRef.current?.(result.text.trim(), true, times);
       }
       // A successful POST means Whisper is back: clear the failure banner,
       // not just the counter (the "NOT RESPONDING" message used to stick).
@@ -196,6 +199,10 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     }
     const chunks: Blob[] = [];
     let peakRms = 0;
+    // Wall-clock span of this chunk's audio (same clock as the app server on
+    // this desk). Sent with the call so events/quarantine can record WHEN it
+    // was said, not when the server finished processing it.
+    let chunkStartedAt = Date.now();
     recorderRef.current = recorder;
 
     const sampleRms = () => {
@@ -230,7 +237,8 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
         recorderTimerRef.current = null;
       }
       clearInterval(rmsInterval);
-      lastChunkAtRef.current = Date.now();
+      const chunkEndedAt = Date.now();
+      lastChunkAtRef.current = chunkEndedAt;
       // Gate on the chunk's PEAK sample, not the average (2026-09-30 call
       // review: a real Signal 4 was almost missed because a short, loud
       // transmission inside an otherwise-quiet 4s chunk got diluted below
@@ -248,10 +256,15 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       if (transcribePendingRef.current < 2) {
         transcribePendingRef.current += 1;
         transcribeQueueRef.current = transcribeQueueRef.current
-          .then(() => transcribe(blob, isSilent))
+          .then(() => transcribe(blob, isSilent, { audioStartedAt: chunkStartedAt, audioEndedAt: chunkEndedAt }))
           .finally(() => {
             transcribePendingRef.current -= 1;
           });
+      } else {
+        // Whisper is two chunks behind: this chunk is dropped. It used to vanish
+        // silently; count it so a missing call can be traced (heartbeat counters).
+        droppedChunksRef.current += 1;
+        console.warn(`Chunk dropped: Whisper is behind (${droppedChunksRef.current} dropped since page load)`);
       }
       // Dropping a saturated chunk must NOT skip this — it schedules the
       // next recording chunk; returning early here silently kills capture.
@@ -259,6 +272,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     };
     try {
       recorder.start();
+      chunkStartedAt = Date.now();
     } catch (err) {
       console.error("MediaRecorder.start failed:", err);
       clearInterval(rmsInterval);
@@ -399,6 +413,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     startedAt: startedAtRef.current,
     lastChunkAt: lastChunkAtRef.current,
     lastSentAt: lastSentAtRef.current,
+    droppedChunks: droppedChunksRef.current,
   }), []);
 
   // Unmount (and React Fast Refresh, which re-runs effects) releases the mic.
