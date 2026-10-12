@@ -54,6 +54,13 @@ EXTRA_HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     # "Hillsborough County ... Wallace") is left alone.
     (re.compile(r"\b(hillsborough\s+(?:and|&)\s+)(?:wallace|wallis)\b", re.IGNORECASE), r"\1Lois"),
     (re.compile(r"\b(?:wallace|wallis)(\s+(?:and|&)\s+hillsborough)\b", re.IGNORECASE), r"Lois\1"),
+    # Lois Ave also heard as "Lewis" at Ohio Ave (2026-10-12, real call: "4-0
+    # injuries at Lewis and Ohio" / "Lewis, Ohio" for "Lois and Ohio" - an
+    # injuries call that never resolved an address and went un-flagged). Same
+    # pairing-only scope as Wallace/Wallis above, since "Lewis" alone is a
+    # common surname; also allows a comma in place of "and" ("Lewis, Ohio").
+    (re.compile(r"\b(ohio\s*[,]?\s*(?:and|&)?\s*)lewis\b", re.IGNORECASE), r"\1Lois"),
+    (re.compile(r"\blewis\b(\s*[,]?\s*(?:and|&)?\s*ohio)\b", re.IGNORECASE), r"Lois\1"),
     # --- 2026-10-02 quarantine review (187 items, 2026-09-30..10-02). Each
     # rule below was confirmed against a manual / other-desk push of the same
     # call within +-10 min. Already handled on main and NOT repeated here:

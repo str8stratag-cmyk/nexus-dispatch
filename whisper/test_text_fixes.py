@@ -54,6 +54,13 @@ CASES = [
     ("Signal 4, Wallace and Hillsborough.", "Signal 4, Lois and Hillsborough."),
     ("signal 4 at hillsborough and wallis", "signal 4 at hillsborough and Lois"),
     ("Wallis & Hillsborough", "Lois & Hillsborough"),
+    # Lois Ave also misheard as Lewis at Ohio Ave (2026-10-12, real call that
+    # went un-flagged: "4-0 injuries at Lewis and Ohio. Lewis, Ohio is on
+    # safe spring.")
+    ("4-0 injuries at Lewis and Ohio.", "4-0 injuries at Lois and Ohio."),
+    ("Lewis, Ohio is on safe spring.", "Lois, Ohio is on safe spring."),
+    ("crash at Ohio and Lewis, northbound", "crash at Ohio and Lois, northbound"),
+    ("Signal 4, Ohio & Lewis.", "Signal 4, Ohio & Lois."),
     # --- 2026-10-02 quarantine review: real quarantined transcripts (near-verbatim),
     # each confirmed by a manual / other-desk push of the same call ---
     ("Signal 4 on south deal bay", "Signal 4 on South Dale Mabry"),

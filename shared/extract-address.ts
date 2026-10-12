@@ -66,7 +66,12 @@ const STOP_WORDS = new Set([
 ]);
 
 // Candidate texts that are places, not street addresses.
-const CANDIDATE_BLOCKLIST = new Set(["busch gardens", "great way"]);
+// "safe spring" (2026-10-12 real call) isn't a place either - it's Whisper
+// garble with no real meaning, but "spring" is a real street suffix so it
+// parsed as a street candidate and hijacked extraction away from the real
+// "Lewis [Lois] and Ohio" cross street named earlier in the same transcript
+// (candidates.length > 0 skips the known-street fallback entirely).
+const CANDIDATE_BLOCKLIST = new Set(["busch gardens", "great way", "safe spring"]);
 
 // Conjunctions/prepositions that often precede a cross street.
 const CROSS_LINKERS = new Set(["and", "amd", "at", "in", "near", "by", "/", "between", "intersection", "corner"]);
@@ -162,6 +167,14 @@ const ADDRESS_HOMOPHONES: [RegExp, string][] = [
   // (owner decision 2026-10-01).
   [/\bloess\s+avenue\b/gi, "Lois Avenue"],
   [/\blowest\b/gi, "Lois"],
+  // Lois Ave also heard as "Lewis" when paired with Ohio Ave (2026-10-12,
+  // real call: "4-0 injuries at Lewis and Ohio" / "Lewis, Ohio" for "Lois
+  // and Ohio" - an injuries call that never resolved an address and went
+  // un-flagged). Scoped to the Ohio pairing, same precedent as the
+  // Wallace/Wallis->Lois fix near Hillsborough in whisper/text_fixes.py -
+  // "Lewis" alone is a common surname.
+  [/\bohio\b(\s*,?\s*(?:and|&)?\s*)lewis\b/gi, "Ohio$1Lois"],
+  [/\blewis\b(\s*,?\s*(?:and|&)?\s*ohio\b)/gi, "Lois$1"],
   [/\btimes\s+ave\b/gi, "Himes Ave"],
   [/\bhigh\s+ave\b/gi, "Himes Ave"],
   [/\bhimes\s+ave\b/gi, "Himes Ave"],
@@ -527,6 +540,9 @@ const KNOWN_STREET_FALLBACK: [RegExp, string][] = [
   [/\badamo\b/i, "Adamo Dr"],
   [/\bmemorial\b/i, "Memorial Hwy"],
   [/\blois\b/i, "Lois Ave"],
+  // "Ohio" alone is a US state name (plate/tag reads), guarded the same way
+  // "Florida" is above.
+  [/\bohio\b(?!\s+(?:state|tags?|plates?|temp(?:orary)?|dealer|registration|license|licence)\b)/i, "Ohio Ave"],
   [/\bhimes\b|\bhines\b/i, "Himes Ave"],
   // Henderson (2026-09-30 call review) - must stay after "Dale Mabry" above
   // so matchKnownStreets returns [Dale Mabry, Henderson] in that order for

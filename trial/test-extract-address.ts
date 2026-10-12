@@ -27,6 +27,19 @@ const cases: [string, string | null, string | null][] = [
   ["this is 22nd street and settlement expressway also known as the crosstown expressway", "22nd street", "Selmon Expy"],
   ["signal 4 on the crosstown expressway", "Selmon Expy", null],
   ["signal 4 on the crosstown", "Selmon Expy", null],
+  // Lois Ave & Ohio Ave, "Lois" misheard as "Lewis" (2026-10-12, real call
+  // that never resolved an address and went un-flagged: "4-0 injuries at
+  // Lewis and Ohio. Lewis, Ohio is on safe spring."). Backstop in the TS
+  // layer for raw "Lewis" even though whisper/text_fixes.py also fixes this
+  // before the transcript leaves the server.
+  ["4-0 injuries at Lewis and Ohio. Lewis, Ohio is on safe spring.", "Lois Ave", "Ohio Ave"],
+  // KNOWN_STREET_FALLBACK's array order (not word order) decides which
+  // known street is "address" vs "crossStreet" - same convention as the
+  // Henderson/Dale Mabry pairing above.
+  ["signal 4 at ohio and lewis", "Lois Ave", "Ohio Ave"],
+  // "Ohio" as a state (tag/plate reads) must not become Ohio Ave.
+  ["vehicle with ohio tag fled north", null, null],
+  ["ohio plates on a white sedan", null, null],
   // "Dale Labrie" -> Dale Mabry (2026-09-30, real DISP-2 quarantine miss).
   ["signal 4, Dale Labrie and Henderson", "Dale Mabry", "Henderson"],
   // Anderson and Henderson are both real Tampa roads: "Anderson" is never
