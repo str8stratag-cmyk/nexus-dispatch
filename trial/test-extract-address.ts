@@ -1,6 +1,17 @@
 import { extractAddress, containsMajorRoad } from "../client/src/lib/extract-address";
 
 const cases: [string, string | null, string | null][] = [
+  // 2026-10-14 ~13:00 board misfires: real location E Adamo Dr (SR 60) &
+  // Orient Rd, plus 2904 Melbourne Blvd. Never "drive" / "Mo Drive" / "Oria Road".
+  ["Signal 4, Adam O. Drive and drive. For the runway and 2904 Melbourne Boulevard...", "2904 Melbourne Boulevard", "Adamo Dr"],
+  ["Signal 4 at a Mo Drive in Orient Road", "Orient Road", "Adamo Dr"],
+  ["signal four at a Mo Drive in Oria Road", "Orient Rd", "Adamo Dr"],
+  ["signal for for Adamo and Orient.", "Adamo Dr", "Orient Rd"],
+  ["signal 4 at State Road 60 and Orient Road", "Orient Road", "Adamo Dr"],
+  ["signal 4 at Orient Road and SR 60", "Orient Road", "Adamo Dr"],
+  // Not aliased away from Orient (SR 60 is also Kennedy / Brandon Blvd).
+  ["signal 4 on st rd 60 eastbound", "State Road 60", null],
+  ["give me a mo, drive safe", null, null],
   // The reported call: Gandy Blvd & Dale Mabry
   ["signal four, gandhi boulevard in dale mason", "Gandy Blvd", "Dale Mabry"],
   ["signal four, gandhi boulevard in dale mason. No paper is being pulled into the parking lot.", "Gandy Blvd", "Dale Mabry"],

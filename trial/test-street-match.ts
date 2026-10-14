@@ -122,6 +122,13 @@ check("verbatim junk address gets no suggestion", suggestStreets("E Street", FIX
 check("unrelated transcript gets no suggestion", suggestStreets("ever OD 886, Mount Ferguson", FIXTURE), []);
 check("three-way intersection left alone", suggestStreets("fowler and hillsborough and main", FIXTURE), []);
 check("null dict", suggestStreets("habana", null), []);
+// 2026-10-14: short garbled stems fuzzed to the wrong real road ("Oria Road"
+// -> "Loria Loop"); they now need an exact dictionary hit.
+check(
+  "short stem never fuzzes to a different street",
+  suggestStreets("oria road", { ...FIXTURE, stems: { ...FIXTURE.stems, loria: "Loria Loop" } }),
+  [],
+);
 
 console.log(fail === 0 ? "ALL PASS" : `${fail} FAILURES`);
 process.exit(fail === 0 ? 0 : 1);

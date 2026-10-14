@@ -113,6 +113,13 @@ EXTRA_HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bhillsboro\b", re.IGNORECASE), "Hillsborough"),
     # "2908 S Ellis Dr" came out "LS drive" / "L.S. drive".
     (re.compile(r"\b(?:l\.?\s?s\.?|l-s)\s+(?:drive|dr)\b\.?", re.IGNORECASE), "Ellis Dr"),
+    # E Adamo Dr (SR 60) & Orient Rd (2026-10-14 ~13:00 board misfires):
+    # "Adam O. Drive", "a Mo Drive", "a-mo drive" -> Adamo Drive (suffix
+    # required so "give me a mo" is untouched); "Oria/Orion Road" -> Orient
+    # Road (suffix required: Orion Ln is a different real street).
+    (re.compile(r"\b(?:adam[\s-]+o|a[\s-]+mo)\.?\s+(drive|dr)\b", re.IGNORECASE), r"Adamo \1"),
+    (re.compile(r"\ba-mo\b", re.IGNORECASE), "Adamo"),
+    (re.compile(r"\b(?:oria|orion)\s+(road|rd)\b", re.IGNORECASE), r"Orient \1"),
 ]
 
 

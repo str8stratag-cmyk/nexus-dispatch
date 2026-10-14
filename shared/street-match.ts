@@ -63,6 +63,7 @@ const NUMBERED_STEM_RE = /^\d+(?:st|nd|rd|th)$/;
 const MIN_SCORE = 0.75;
 const MIN_MARGIN = 0.08;
 const INTERSECTION_MIN = 0.9;
+const MIN_FUZZY_STEM_LEN = 5;
 
 /** Shared normalization for dictionary names and query segments. */
 export function normalizeStreet(input: string): string {
@@ -130,6 +131,10 @@ export function suggestForStem(
   let best: { name: string; score: number; matchedStem: string } | null = null;
   let second = 0;
   for (const [dStem, name] of Object.entries(dict.stems)) {
+    // Short stems fuzz too easily into a different real street ("oria" ->
+    // "Loria Loop", 2026-10-14): below MIN_FUZZY_STEM_LEN chars a fuzzy
+    // candidate must at least start with the same letter ("marn" -> "main").
+    if (stem.length < MIN_FUZZY_STEM_LEN && dStem[0] !== stem[0]) continue;
     const fuzzy = 1 - levenshtein(stem, dStem) / Math.max(stem.length, dStem.length);
     // Containment only counts when the shorter side covers most of the
     // longer — otherwise a common substring ("back" inside "i m back alley")
