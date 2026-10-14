@@ -11,7 +11,7 @@ import { normalizeKeywordEntry } from "@shared/keywords";
 import { extractAddress } from "@shared/extract-address";
 import { backfillAddressFromContext } from "@shared/address-context";
 import { suggestStreets, levenshtein, type StreetDictionary } from "@shared/street-match";
-import { getDatabase, isMongoConfigured } from "./mongodb";
+import { getDatabase, getDatabaseName, isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
 import { getWhisperModel } from "./whisper";
 import {
@@ -28,7 +28,13 @@ import {
   formatTelegramAccepterName,
   isTelegramAcceptPollEnabled,
   retryUntilSuccess,
+  decideAcceptBranch,
+  formatAcceptTapLog,
+  messageMatchesEvent,
+  normalizeEventStatus,
+  type AcceptTapLog,
 } from "./telegram-accept-helpers";
+
 
 const sseClients = new Set<Response>();
 
@@ -1383,6 +1389,10 @@ export async function registerRoutes(
       }
       broadcastEvent(event);
       res.json(event);
+      // Sync the Telegram alert's Accept button with the new status (best effort).
+      updateTelegramAlertForStatus(event).catch((err) =>
+        console.error("[telegram] alert status sync failed:", err?.message ?? err),
+      );
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }
@@ -1414,7 +1424,12 @@ export async function registerRoutes(
         .toArray();
       for (const e of stale) {
         const updated = await storage.updateEventStatus((e as unknown as DispatchEvent).id, "resolved");
-        if (updated) broadcastEvent(updated);
+        if (updated) {
+          broadcastEvent(updated);
+          await updateTelegramAlertForStatus(updated).catch((err) =>
+            console.error("[telegram] alert status sync failed:", err?.message ?? err),
+          );
+        }
       }
     } catch (err) {
       console.error("road mention sweeper failed:", err);
@@ -1674,78 +1689,164 @@ export {
 } from "./telegram-accept-helpers";
 
 export async function handleTelegramUpdate(update: any): Promise<void> {
-  if (!update.callback_query) return;
+  if (!update?.callback_query) return;
 
   const callback = update.callback_query;
-  const data = callback.data as string;
+  const data = typeof callback.data === "string" ? callback.data : null;
   const chatId = callback.message?.chat?.id;
-  const messageId = callback.message?.message_id;
+  const messageId: number | null = callback.message?.message_id ?? null;
 
-  if (!data || !chatId || !messageId) return;
+  // Structured, grep-able record of every Accept tap ("[telegram-accept] {...}").
+  // Never includes the bot token.
+  const log: AcceptTapLog = {
+    updateId: update.update_id,
+    callbackData: data,
+    parsedId: parseAcceptCallbackData(data),
+    callbackChatId: chatId != null ? String(chatId) : null,
+    chatMatch: null,
+    callbackMessageId: messageId,
+    eventFound: null,
+    eventId: null,
+    eventStatus: null,
+    eventTelegramMessageId: null,
+    messageMatch: null,
+    dbName: getDatabaseName(),
+    branch: "error",
+  };
+  const emit = (branch: AcceptTapLog["branch"]) => {
+    log.branch = branch;
+    console.log(formatAcceptTapLog(log));
+  };
 
-  const eventId = parseAcceptCallbackData(data);
-  if (eventId == null) return;
+  try {
+    if (!data || !data.startsWith("accept_")) return emit("ignored_not_accept");
+    if (chatId == null || messageId == null || log.parsedId == null) return emit("ignored_missing_fields");
+    const eventId = log.parsedId;
 
-  const { botToken, chatId: configuredChatId } = await getTelegramCredentials();
-  if (!botToken || !configuredChatId || String(chatId) !== configuredChatId) {
-    return;
-  }
+    const { botToken, chatId: configuredChatId } = await getTelegramCredentials();
+    log.chatMatch = Boolean(botToken && configuredChatId && String(chatId) === String(configuredChatId));
+    if (!botToken || !log.chatMatch) return emit("ignored_chat_mismatch");
 
-  const existing = await storage.getEvent(eventId);
-  if (!existing) {
+    const existing = await storage.getEvent(eventId);
+    log.eventFound = Boolean(existing);
+    if (existing) {
+      log.eventId = existing.id;
+      log.eventStatus = existing.status ?? null;
+      log.eventTelegramMessageId = existing.telegramMessageId ?? null;
+      log.messageMatch = messageMatchesEvent(messageId, existing.telegramMessageId);
+    }
+
+    const decision = decideAcceptBranch(existing);
+    if (decision === "not_found") {
+      emit("not_found");
+      await telegramApiCall(botToken, "answerCallbackQuery", {
+        callback_query_id: callback.id,
+        text: "This dispatch no longer exists.",
+        show_alert: true,
+      });
+      return;
+    }
+
+    if (decision === "already_accepted") {
+      emit("already_accepted");
+      await telegramApiCall(botToken, "answerCallbackQuery", {
+        callback_query_id: callback.id,
+        text: "This call has already been accepted.",
+        show_alert: true,
+      });
+      return;
+    }
+
+    if (decision === "not_available") {
+      emit("not_available");
+      await telegramApiCall(botToken, "answerCallbackQuery", {
+        callback_query_id: callback.id,
+        text: `Dispatch #${eventId} is ${normalizeEventStatus(existing!.status) || "unavailable"} and can no longer be accepted.`,
+        show_alert: true,
+      });
+      // The alert still shows an Accept button for a closed event — strip it.
+      await updateTelegramAlertForStatus(existing!, String(chatId), messageId).catch(() => {});
+      return;
+    }
+
+    const accepter = formatTelegramAccepterName(callback.from);
+
+    // Atomic claim — if another tap (or desk) already accepted, treat as already taken.
+    const updated = await storage.claimEventAccepted(eventId, accepter);
+    if (!updated) {
+      emit("claim_lost");
+      await telegramApiCall(botToken, "answerCallbackQuery", {
+        callback_query_id: callback.id,
+        text: "This call has already been accepted.",
+        show_alert: true,
+      });
+      return;
+    }
+    log.eventStatus = updated.status;
+    emit("claimed");
+    broadcastEvent(updated);
+
+    // Edit the original dispatch message to show it's taken and remove the accept button.
+    await telegramApiCall(botToken, "editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text: formatTelegramMessage(updated, { status: "accepted", acceptedBy: accepter }),
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [] },
+      disable_web_page_preview: true,
+    });
+
     await telegramApiCall(botToken, "answerCallbackQuery", {
       callback_query_id: callback.id,
-      text: "This dispatch no longer exists.",
-      show_alert: true,
+      text: "Call accepted. Good luck out there.",
+    });
+  } catch (err: any) {
+    log.error = String(err?.message ?? err);
+    emit("error");
+    throw err;
+  }
+}
+
+/**
+ * Keep the Telegram alert in sync when an event leaves "active" outside of an
+ * Accept tap (board Resolve, Road Mention sweeper). Without this the alert
+ * keeps its Accept button and a later tap gets "no longer available".
+ */
+async function updateTelegramAlertForStatus(
+  event: DispatchEvent,
+  chatIdOverride?: string,
+  messageIdOverride?: number,
+): Promise<void> {
+  const messageId = messageIdOverride ?? (event.telegramMessageId ? Number(event.telegramMessageId) : NaN);
+  if (!Number.isFinite(messageId)) return;
+  const { botToken, chatId } = await getTelegramCredentials();
+  const targetChat = chatIdOverride ?? chatId;
+  if (!botToken || !targetChat) return;
+  const status = normalizeEventStatus(event.status);
+  if (status === "active") {
+    await telegramApiCall(botToken, "editMessageReplyMarkup", {
+      chat_id: targetChat,
+      message_id: messageId,
+      reply_markup: buildAcceptKeyboard(event.id),
     });
     return;
   }
-
-  if (existing.status === "accepted") {
-    await telegramApiCall(botToken, "answerCallbackQuery", {
-      callback_query_id: callback.id,
-      text: "This call has already been accepted.",
-      show_alert: true,
+  if (status === "accepted") {
+    await telegramApiCall(botToken, "editMessageText", {
+      chat_id: targetChat,
+      message_id: messageId,
+      text: formatTelegramMessage(event, { status: "accepted", acceptedBy: event.acceptedBy ?? undefined }),
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [] },
+      disable_web_page_preview: true,
     });
     return;
   }
-
-  if (existing.status !== "active") {
-    await telegramApiCall(botToken, "answerCallbackQuery", {
-      callback_query_id: callback.id,
-      text: "This dispatch is no longer available to accept.",
-      show_alert: true,
-    });
-    return;
-  }
-
-  const accepter = formatTelegramAccepterName(callback.from);
-
-  // Atomic claim — if another tap (or desk) already accepted, treat as already taken.
-  const updated = await storage.claimEventAccepted(eventId, accepter);
-  if (!updated) {
-    await telegramApiCall(botToken, "answerCallbackQuery", {
-      callback_query_id: callback.id,
-      text: "This call has already been accepted.",
-      show_alert: true,
-    });
-    return;
-  }
-  broadcastEvent(updated);
-
-  // Edit the original dispatch message to show it's taken and remove the accept button.
-  await telegramApiCall(botToken, "editMessageText", {
-    chat_id: chatId,
+  // resolved / cleared / anything else: keep the text, drop the button.
+  await telegramApiCall(botToken, "editMessageReplyMarkup", {
+    chat_id: targetChat,
     message_id: messageId,
-    text: formatTelegramMessage(updated, { status: "accepted", acceptedBy: accepter }),
-    parse_mode: "HTML",
     reply_markup: { inline_keyboard: [] },
-    disable_web_page_preview: true,
-  });
-
-  await telegramApiCall(botToken, "answerCallbackQuery", {
-    callback_query_id: callback.id,
-    text: "Call accepted. Good luck out there.",
   });
 }
 
