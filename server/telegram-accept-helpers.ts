@@ -94,3 +94,65 @@ export async function retryUntilSuccess(
     }
   }
 }
+
+/** Normalise a stored event status for comparisons ("Active " -> "active"). */
+export function normalizeEventStatus(status: string | null | undefined): string {
+  return String(status ?? "").trim().toLowerCase();
+}
+
+export type AcceptBranch =
+  | "ignored_not_accept"
+  | "ignored_missing_fields"
+  | "ignored_chat_mismatch"
+  | "not_found"
+  | "already_accepted"
+  | "not_available"
+  | "claim_lost"
+  | "claimed"
+  | "error";
+
+/**
+ * Pure decision for an Accept tap once the event has been looked up.
+ * Returns which reply branch should run before the atomic claim.
+ */
+export function decideAcceptBranch(
+  event: { status?: string | null } | null | undefined,
+): "not_found" | "already_accepted" | "not_available" | "claim" {
+  if (!event) return "not_found";
+  const s = normalizeEventStatus(event.status);
+  if (s === "accepted") return "already_accepted";
+  if (s !== "active") return "not_available";
+  return "claim";
+}
+
+export interface AcceptTapLog {
+  updateId?: number;
+  callbackData: string | null;
+  parsedId: number | null;
+  callbackChatId: string | null;
+  chatMatch: boolean | null;
+  callbackMessageId: number | null;
+  eventFound: boolean | null;
+  eventId: number | null;
+  eventStatus: string | null;
+  eventTelegramMessageId: string | null;
+  /** True when the tapped message is the one recorded on the event (null if unknown). */
+  messageMatch: boolean | null;
+  dbName: string;
+  branch: AcceptBranch;
+  error?: string;
+}
+
+/** Single-line, grep-able JSON log for an Accept tap. Never includes tokens. */
+export function formatAcceptTapLog(entry: AcceptTapLog): string {
+  return `[telegram-accept] ${JSON.stringify(entry)}`;
+}
+
+/** Whether the tapped Telegram message is the alert recorded on the event. */
+export function messageMatchesEvent(
+  callbackMessageId: number | null | undefined,
+  eventTelegramMessageId: string | null | undefined,
+): boolean | null {
+  if (callbackMessageId == null || !eventTelegramMessageId) return null;
+  return String(callbackMessageId) === String(eventTelegramMessageId).trim();
+}

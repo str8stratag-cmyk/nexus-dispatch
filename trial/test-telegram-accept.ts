@@ -8,6 +8,10 @@ import {
   isTelegramAcceptPollEnabled,
   acceptInitBackoffMs,
   retryUntilSuccess,
+  decideAcceptBranch,
+  normalizeEventStatus,
+  formatAcceptTapLog,
+  messageMatchesEvent,
 } from "../server/telegram-accept-helpers";
 
 let fail = 0;
@@ -20,6 +24,29 @@ function check(label: string, got: unknown, want: unknown) {
   } else {
     console.log("ok  :", label);
   }
+}
+
+// Accept branch decision (2026-10-14 "no longer available" investigation).
+check("branch missing", decideAcceptBranch(undefined), "not_found");
+check("branch active", decideAcceptBranch({ status: "active" }), "claim");
+check("branch Active (case)", decideAcceptBranch({ status: "Active " }), "claim");
+check("branch accepted", decideAcceptBranch({ status: "accepted" }), "already_accepted");
+check("branch ACCEPTED", decideAcceptBranch({ status: "ACCEPTED" }), "already_accepted");
+check("branch resolved", decideAcceptBranch({ status: "resolved" }), "not_available");
+check("branch null status", decideAcceptBranch({ status: null }), "not_available");
+check("normalize", normalizeEventStatus("  Resolved "), "resolved");
+check("msg match", messageMatchesEvent(4879, "4879"), true);
+check("msg mismatch", messageMatchesEvent(4870, "4879"), false);
+check("msg unknown", messageMatchesEvent(4870, null), null);
+{
+  const line = formatAcceptTapLog({
+    updateId: 1, callbackData: "accept_1818", parsedId: 1818, callbackChatId: "-100", chatMatch: true,
+    callbackMessageId: 4879, eventFound: true, eventId: 1818, eventStatus: "active",
+    eventTelegramMessageId: "4879", messageMatch: true, dbName: "db", branch: "claimed",
+  });
+  check("log prefix", line.startsWith("[telegram-accept] {"), true);
+  check("log json", JSON.parse(line.slice("[telegram-accept] ".length)).branch, "claimed");
+  check("log has no token field", /token/i.test(line), false);
 }
 
 check("accept_42", parseAcceptCallbackData("accept_42"), 42);
