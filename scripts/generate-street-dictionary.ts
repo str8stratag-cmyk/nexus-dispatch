@@ -35,7 +35,8 @@ const CURATED = [
   "Broadway Ave", "Bayshore Blvd", "West Shore Blvd", "Gandy Blvd",
   "Bay to Bay Blvd", "Grady Ave", "Manhattan Ave", "Alva St",
   "15th St", "22nd St", "30th St", "40th St", "50th St", "56th St",
-  "Azeele St", "Tampania Ave", "Amberly Dr", "Elmer St",
+  "Azeele St", "Tampania Ave", "Amberly Dr", "Elmer St", "Orient Rd",
+  "Melbourne Blvd",
 ];
 
 function preferredName(a: string, b: string): string {

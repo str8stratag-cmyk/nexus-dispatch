@@ -17,6 +17,13 @@ def fix(text: str) -> str:
 
 
 CASES = [
+    # 2026-10-14 Adamo Dr & Orient Rd misfires.
+    ("Signal 4, Adam O. Drive and drive.", "Signal 4, Adamo Drive and drive."),
+    ("Signal 4 at a Mo Drive in Orient Road", "Signal 4 at Adamo Drive in Orient Road"),
+    ("signal four at a Mo Drive in Oria Road", "signal four at Adamo Drive in Orient Road"),
+    ("a-mo and orion rd", "Adamo and Orient rd"),
+    ("give me a mo, I'll drive over", None),
+    ("Orion Lane", None),
     # --- real excerpts (2026-09-25 call review / stored calls) ---
     ("You're holding a single floor with an injury, crispy downs, and sour, and fine.",
      "You're holding a Signal 4 with an injury, Bruce B Downs, and sour, and fine."),

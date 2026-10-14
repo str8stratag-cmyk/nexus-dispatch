@@ -228,6 +228,20 @@ const ADDRESS_HOMOPHONES: [RegExp, string][] = [
   [/\bwest\s+shore(?:\s+blvd|\s+boulevard)?\b/gi, "West Shore Blvd"],
   [/\bgandy(?:\s+blvd|\s+boulevard)?\b/gi, "Gandy Blvd"],
   [/\bmemorial\b(?!\s+parkway)/gi, "Memorial Highway"],
+  // E Adamo Dr / SR 60 at Orient Rd (2026-10-14 ~13:00 board misfires).
+  // Whisper splits "Adamo" into "Adam O." / "a Mo" / "a-mo"; the fused-suffix
+  // forms need "Drive"/"Dr" so a bare "a mo(ment)" is never rewritten.
+  [/\b(?:adam[\s-]+o|a[\s-]+mo)\.?\s+(?:drive|dr)\b\.?/gi, "Adamo Dr"],
+  [/\ba-mo\b/gi, "Adamo"],
+  // "Oria Road" / "Orion Road" for Orient Rd. Suffix required: Orion Ln is a
+  // real (different) street and "Orion" alone is a word.
+  [/\b(?:oria|orion)\s+(?:road|rd)\b/gi, "Orient Rd"],
+  // State Road 60 IS E Adamo Dr east of downtown. Only aliased when paired
+  // with Orient Rd - SR 60 elsewhere is Kennedy Blvd / Brandon Blvd /
+  // Courtney Campbell, so a global rewrite would mislocate those calls.
+  [/\b(?:state\s+road|st\.?\s+rd\.?|s\.?r\.?)[\s-]*60\b(?=\s+(?:and|&|at|in)\s+orient\b)/gi, "Adamo Dr"],
+  [/(?<=\borient(?:\s+(?:road|rd))?\s+(?:and|&|at|in)\s+)(?:state\s+road|st\.?\s+rd\.?|s\.?r\.?)[\s-]*60\b/gi, "Adamo Dr"],
+  [/\b(?:st\.?\s+rd\.?|s\.?r\.?)[\s-]*60\b/gi, "State Road 60"],
 ];
 
 interface Token {
@@ -413,6 +427,8 @@ function findStreetCandidates(text: string): StreetCandidate[] {
   for (let i = 0; i < tokens.length; i++) {
     if (tokens[i].isSuffix) {
       const candidate = buildStreetCandidate(tokens, i);
+      // A lone street-type word ("...Adamo Dr and drive.") is not a street.
+      if (candidate && candidate.text.split(/\s+/).length === 1 && STOP_WORDS.has(cleanWord(candidate.text))) continue;
       if (candidate && !CANDIDATE_BLOCKLIST.has(candidate.text.toLowerCase())) {
         candidates.push(candidate);
       }
@@ -525,6 +541,10 @@ const KNOWN_STREET_FALLBACK: [RegExp, string][] = [
   [/\bbusch\b/i, "Busch Blvd"],
   [/\bgandy\b/i, "Gandy Blvd"],
   [/\badamo\b/i, "Adamo Dr"],
+  // Orient Rd (2026-10-14: "Adamo and Orient" gave only Adamo Dr). Not
+  // "Orient Way" (a different street) - and kept after Adamo so the pair
+  // comes out "Adamo Dr & Orient Rd".
+  [/\borient\b(?!\s+way)/i, "Orient Rd"],
   [/\bmemorial\b/i, "Memorial Hwy"],
   [/\blois\b/i, "Lois Ave"],
   [/\bhimes\b|\bhines\b/i, "Himes Ave"],
