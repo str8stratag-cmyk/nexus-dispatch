@@ -5,6 +5,11 @@ const databaseName = process.env.MONGODB_DB_NAME || "dispatch_monitor";
 
 export const isMongoConfigured = Boolean(uri);
 
+/** Database name this process reads/writes (for diagnostics; not secret). */
+export function getDatabaseName(): string {
+  return databaseName;
+}
+
 let databasePromise: Promise<Db> | undefined;
 
 export function getDatabase(): Promise<Db> {
