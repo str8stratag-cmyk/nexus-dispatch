@@ -1,6 +1,12 @@
 import { extractAddress, containsMajorRoad } from "../client/src/lib/extract-address";
 
 const cases: [string, string | null, string | null][] = [
+  // 2026-10-15: "in" heard for "and" between two known streets.
+  ["Signal 4 at Gandy Boulevard in Manhattan.", "Gandy Blvd", "S Manhattan Ave"],
+  ["signal 4 on Kennedy Blvd in Himes", "Kennedy Blvd", "Himes Ave"],
+  ["signal 4 on Gandy Blvd in the left lane", "Gandy Blvd", null],
+  ["crash on Brandon Blvd in Brandon", "Brandon Blvd", null],
+  ["signal 4 on Gandy Blvd in Ybor", "Gandy Blvd", null],
   // 2026-10-15: S MacDill Ave & W Bay Villa Ave; E Kay St & N Tampa St.
   // "left turn lane" is never an address.
   ["The signal for South McDowell and West Bay Valley.", "W Bay Villa Ave", "S MacDill Ave"],
@@ -185,3 +191,14 @@ for (const [t, want] of roadCases) {
 }
 
 console.log(fail === 0 ? "ALL PASS" : `${fail} FAILURES`);
+
+// Every IN_JOINER_STREETS target must be a real dictionary name.
+{
+  const { IN_JOINER_STREETS } = await import("../shared/extract-address");
+  const fs = await import("node:fs");
+  const dict = JSON.parse(fs.readFileSync(new URL("../shared/tampa-street-dictionary.json", import.meta.url), "utf8"));
+  const names = new Set<string>(dict.names);
+  for (const n of Object.values(IN_JOINER_STREETS)) {
+    if (!names.has(n)) { console.log("FAIL: IN_JOINER_STREETS not in dictionary: " + n); process.exitCode = 1; }
+  }
+}
