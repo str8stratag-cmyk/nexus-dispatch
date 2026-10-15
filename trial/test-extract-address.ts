@@ -1,6 +1,20 @@
-import { extractAddress, containsMajorRoad } from "../client/src/lib/extract-address";
+import { extractAddress, containsMajorRoad, setStreetDictionaryNames } from "../client/src/lib/extract-address";
+import { readFileSync } from "node:fs";
+setStreetDictionaryNames(JSON.parse(readFileSync(new URL("../shared/tampa-street-dictionary.json", import.meta.url), "utf8")).names);
 
 const cases: [string, string | null, string | null][] = [
+  // 2026-10-15 ~3:45 PM quarantined call: house number + suffix-less name
+  // resolved via the dictionary (West Santiago Street is the only West one).
+  ["If you want to share this on... signal 4 at... 3218 West Santiago signal for 32 18 Santiago. Jelly, 21.", "3218 W Santiago St", null],
+  ["No, I can't. No problem. Signal 4 at 3218 West Santiago signal for 32 18 West Santiago Charlie Prayland", "3218 W Santiago St", null],
+  ["West Santiago signal 4 at 3-2-1 West Santiago Is that one coming through clean on the desks", "321 W Santiago St", null],
+  ["signal 4 at 3-2-1-8 West Santiago", "3218 W Santiago St", null],
+  // Ambiguous (Santiago Ct/Dr/Way) without a direction: skipped.
+  ["signal 4 at 3218 Santiago", null, null],
+  // Unit / signal numbers are never house numbers.
+  ["signal 4 32 18", null, null],
+  ["unit 204 responding", null, null],
+  ["unit 204 West Santiago", null, null],
   // 2026-10-15: "in" heard for "and" between two known streets.
   ["Signal 4 at Gandy Boulevard in Manhattan.", "Gandy Blvd", "S Manhattan Ave"],
   ["signal 4 on Kennedy Blvd in Himes", "Kennedy Blvd", "Himes Ave"],
