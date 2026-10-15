@@ -1,6 +1,13 @@
 import { extractAddress, containsMajorRoad } from "../client/src/lib/extract-address";
 
 const cases: [string, string | null, string | null][] = [
+  // 2026-10-15: S MacDill Ave & W Bay Villa Ave; E Bay St & N Tampa St.
+  // "left turn lane" is never an address.
+  ["The signal for South McDowell and West Bay Valley.", "W Bay Villa Ave", "S MacDill Ave"],
+  ["add a Signal 4, South McDowell and West Bay, Villevio.", "W Bay Villa Ave", "S MacDill Ave"],
+  ["Signal 4, East Bay and North Tampa, good 144, in the left turn lane", "N Tampa St", "E Bay St"],
+  ["East Bay and North Tampa, good 144", "N Tampa St", "E Bay St"],
+  ["crash at Mac Dill Avenue and Gandy", "MacDill Ave", "Gandy Blvd"],
   // 2026-10-14 ~13:00 board misfires: real location E Adamo Dr (SR 60) &
   // Orient Rd, plus 2904 Melbourne Blvd. Never "drive" / "Mo Drive" / "Oria Road".
   ["Signal 4, Adam O. Drive and drive. For the runway and 2904 Melbourne Boulevard...", "2904 Melbourne Boulevard", "Adamo Dr"],

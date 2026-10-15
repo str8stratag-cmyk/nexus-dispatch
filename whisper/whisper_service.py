@@ -72,7 +72,12 @@ BEST_OF = _env_int("WHISPER_BEST_OF", 5, 1, 10)
 # Default OFF: prompt text has echoed verbatim into transcripts before
 # (2026-09-08, 2026-09-21). Enable per box only with debug-audio sidecars on
 # so echo can be audited.
-HOTWORDS = os.getenv("WHISPER_HOTWORDS", "").strip() or None
+# WHISPER_HOTWORDS=recommended uses RECOMMENDED_HOTWORDS (street names Whisper
+# keeps mangling); any other non-empty value is used verbatim.
+RECOMMENDED_HOTWORDS = "Signal 4, MacDill, McDill, Adamo, Orient, Dale Mabry, Bruce B Downs"
+_HOTWORDS_RAW = os.getenv("WHISPER_HOTWORDS", "").strip()
+HOTWORDS = (RECOMMENDED_HOTWORDS if _HOTWORDS_RAW.lower() in ("recommended", "default")
+            else _HOTWORDS_RAW) or None
 # Opt-in text post-processing added 2026-09-25 (both default OFF).
 EXTRA_FIXES_ENABLED = _env_flag("WHISPER_EXTRA_FIXES")
 BLOCKLIST_ENABLED = _env_flag("WHISPER_BLOCKLIST")
