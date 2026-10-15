@@ -8,7 +8,7 @@ import { ObjectId } from "mongodb";
 import { storage } from "./storage";
 import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent, type InsertDispatchEvent } from "@shared/schema";
 import { normalizeKeywordEntry } from "@shared/keywords";
-import { extractAddress } from "@shared/extract-address";
+import { extractAddress, setStreetDictionaryNames } from "@shared/extract-address";
 import { backfillAddressFromContext } from "@shared/address-context";
 import { suggestStreets, levenshtein, type StreetDictionary } from "@shared/street-match";
 import { getDatabase, getDatabaseName, isMongoConfigured } from "./mongodb";
@@ -1085,6 +1085,7 @@ export async function registerRoutes(
       // extractor here. Must run BEFORE the eventFields destructure below.
       // Manual dispatches keep exactly what the operator entered.
       if (!parsed.isManual && isInvalidAutoAddress(parsed.address) && parsed.transcript) {
+        setStreetDictionaryNames(getStreetDictionary()?.names);
         const extracted = extractAddress(parsed.transcript);
         if (extracted.address && !isInvalidAutoAddress(extracted.address)) {
           parsed.address = extracted.address;

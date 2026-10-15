@@ -703,6 +703,69 @@ function inJoinerCross(text: string, primary: string): { text: string } | null {
   return { text: dir ? `${dir} ${name}` : name };
 }
 
+// House number + suffix-less street name (2026-10-15 3:45 PM missed call:
+// "Signal 4 at 3218 West Santiago" was quarantined, "requires a resolved
+// address"). With no Street/Ave the candidate finder sees no street, so the
+// name is looked up in the Tampa street dictionary instead. The server
+// injects the names (setStreetDictionaryNames) because the client bundle
+// must not carry the 1.5 MB dictionary. Without names this is a no-op.
+const DIR_FULL: Record<string, string> = { n: "N", north: "N", s: "S", south: "S", e: "E", east: "E", w: "W", west: "W" };
+const SUFFIX_ABBR: Record<string, string> = {
+  street: "St", avenue: "Ave", road: "Rd", boulevard: "Blvd", drive: "Dr", court: "Ct",
+  lane: "Ln", place: "Pl", way: "Way", circle: "Cir", terrace: "Ter", parkway: "Pkwy", highway: "Hwy",
+};
+interface DictEntry { dir: string | null; base: string; suffix: string }
+let dictIndex: Map<string, DictEntry[]> | null = null;
+let dictIndexSource: readonly string[] | null = null;
+
+export function setStreetDictionaryNames(names: readonly string[] | null | undefined): void {
+  if (!names) { dictIndex = null; dictIndexSource = null; return; }
+  if (names === dictIndexSource) return;
+  dictIndexSource = names;
+  const idx = new Map<string, DictEntry[]>();
+  for (const name of names) {
+    const toks = name.trim().split(/\s+/);
+    if (toks.length < 2 || toks.length > 4) continue;
+    const suffix = SUFFIX_ABBR[toks[toks.length - 1].toLowerCase()];
+    if (!suffix) continue;
+    let dir: string | null = null;
+    let body = toks.slice(0, -1);
+    if (body.length > 1 && DIR_FULL[body[0].toLowerCase()] && body[0].length > 1) {
+      dir = DIR_FULL[body[0].toLowerCase()];
+      body = body.slice(1);
+    }
+    if (!body.every((t) => /^[A-Za-z]+$/.test(t))) continue;
+    const key = body.join(" ").toLowerCase();
+    const list = idx.get(key) ?? [];
+    if (!list.some((e) => e.dir === dir && e.suffix === suffix)) list.push({ dir, base: body.join(" "), suffix });
+    idx.set(key, list);
+  }
+  dictIndex = idx;
+}
+
+const HOUSE_NUMBER_STREET_RE =
+  /(?<!\b(?:unit|units|signal|code|car|badge|channel|squad|engine|rescue|medic|truck|district|zone|sector|beat|10|ten)[\s-]+)\b(\d{2,5}|\d(?:-\d){1,4}|\d{2}\s\d{2})\s+(?:(north|south|east|west|n|s|e|w)\.?\s+)?([a-z]+)(?:\s+([a-z]+))?/gi;
+
+function matchHouseNumberDictionary(text: string): string | null {
+  if (!dictIndex) return null;
+  for (const m of text.matchAll(HOUSE_NUMBER_STREET_RE)) {
+    const num = m[1].replace(/[-\s]/g, "");
+    const spokenDir = m[2] ? DIR_FULL[m[2].toLowerCase()] : null;
+    const tries = m[4] ? [`${m[3]} ${m[4]}`, m[3]] : [m[3]];
+    for (const t of tries) {
+      const key = t.toLowerCase();
+      if (key.length < 4 || STOP_WORDS.has(key)) continue;
+      const entries = dictIndex.get(key);
+      if (!entries) continue;
+      const pick = spokenDir ? entries.filter((e) => e.dir === spokenDir) : entries;
+      if (pick.length !== 1) break;
+      const e = pick[0];
+      return [num, e.dir, e.base, e.suffix].filter(Boolean).join(" ");
+    }
+  }
+  return null;
+}
+
 export function extractAddress(transcript: string): ExtractedAddress {
   if (!transcript) return { address: null, crossStreet: null };
 
@@ -718,6 +781,8 @@ export function extractAddress(transcript: string): ExtractedAddress {
       if (numbered) return numbered;
       return { address: known[0], crossStreet: known[1] ?? null };
     }
+    const housed = matchHouseNumberDictionary(text);
+    if (housed) return { address: housed, crossStreet: null };
     const relative = matchRelativeBlock(text);
     if (relative) return { address: relative, crossStreet: null };
     return { address: null, crossStreet: null };
