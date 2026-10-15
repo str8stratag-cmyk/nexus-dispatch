@@ -445,7 +445,7 @@ function findStreetCandidates(text: string): StreetCandidate[] {
       const candidate = buildStreetCandidate(tokens, i);
       // A lone street-type word ("...Adamo Dr and drive.") is not a street.
       if (candidate && candidate.text.split(/\s+/).length === 1 && STOP_WORDS.has(cleanWord(candidate.text))) continue;
-      if (candidate && !CANDIDATE_BLOCKLIST.has(candidate.text.toLowerCase()) && !/\bturn\s+lanes?\b/i.test(candidate.text)) {
+      if (candidate && !CANDIDATE_BLOCKLIST.has(candidate.text.toLowerCase()) && !/\b(?:turn|left|right|center|middle|inside|outside|fast|slow)\s+lanes?\b/i.test(candidate.text)) {
         candidates.push(candidate);
       }
     }
@@ -678,6 +678,31 @@ export function containsMajorRoad(transcript: string): boolean {
   return MAJOR_ROAD_RE.test(applyAddressHomophones(transcript));
 }
 
+// Whisper often hears "and" as "in" ("Gandy Boulevard in Manhattan",
+// 2026-10-15). A suffix-less word after "<street> in" is only taken as the
+// cross street when it is a curated, dictionary-verified Tampa street name
+// (trial/test-extract-address.ts checks each against
+// shared/tampa-street-dictionary.json). Cities/areas (Brandon, Ybor, Carrollwood)
+// and lane talk ("in the left lane") are never in this map, so they never fire.
+export const IN_JOINER_STREETS: Record<string, string> = {
+  manhattan: "Manhattan Ave",
+  macdill: "MacDill Ave",
+  himes: "Himes Ave",
+  armenia: "Armenia Ave",
+};
+// Corridors that lie entirely south of Kennedy/Florida: crossings take "S".
+const SOUTH_ONLY_PRIMARY = /^gandy\b/i;
+
+function inJoinerCross(text: string, primary: string): { text: string } | null {
+  const esc = primary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = text.match(new RegExp(`\\b${esc}\\s+in\\s+(?:(north|south|n|s)\\.?\\s+)?([a-z]+)\\b`, "i"));
+  if (!m) return null;
+  const name = IN_JOINER_STREETS[m[2].toLowerCase()];
+  if (!name) return null;
+  const dir = m[1] ? (m[1][0].toLowerCase() === "s" ? "S" : "N") : SOUTH_ONLY_PRIMARY.test(primary) ? "S" : null;
+  return { text: dir ? `${dir} ${name}` : name };
+}
+
 export function extractAddress(transcript: string): ExtractedAddress {
   if (!transcript) return { address: null, crossStreet: null };
 
@@ -706,7 +731,8 @@ export function extractAddress(transcript: string): ExtractedAddress {
     // No numbers: take the most specific (longest) name — "West Shore Blvd"
     // over the bare "West Shore" that the same tokens also produce.
     : candidates.reduce((a, b) => (b.text.length > a.text.length ? b : a));
-  const cross = findCrossStreet(text, primary, candidates);
+  const cross = findCrossStreet(text, primary, candidates)
+    ?? inJoinerCross(text, primary.text);
 
   return {
     address: primary.text,
