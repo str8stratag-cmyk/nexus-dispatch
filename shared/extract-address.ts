@@ -251,10 +251,13 @@ const ADDRESS_HOMOPHONES: [RegExp, string | ((substring: string, ...args: string
   [/\b(?:mc\s*dowell|mc\s*dill|mac\s+dill)\s+ave(?:nue)?\b\.?/gi, "MacDill Ave"],
   // W Bay Villa Ave heard as "West Bay Valley" / "West Bay, Villevio".
   [/\bwest\s+bay,?\s+(?:valley|villevio|villa(?:\s+ave(?:nue)?)?)\b\.?/gi, "W Bay Villa Ave"],
-  // "East Bay and North Tampa" (downtown E Bay St & N Tampa St). Only when
-  // paired, so other "east bay" mentions are untouched.
-  [/\beast\s+bay(?:\s+st(?:reet)?)?\b(?=\s+(?:and|&|at)\s+north\s+tampa\b)/gi, "E Bay St"],
-  [/(?<=\bE Bay St\s+(?:and|&|at)\s+)north\s+tampa(?:\s+st(?:reet)?)?\b/gi, "N Tampa St"],
+  // "East Bay and North Tampa" is downtown E Kay St & N Tampa St (confirmed
+  // 2026-10-15; Whisper hears "Kay" as "Bay"). Only when paired with North
+  // Tampa / Tampa St, in either order, so other "east bay" mentions are untouched.
+  [/\beast\s+(?:bay|kay)(?:\s+st(?:reet)?)?\b(?=\s+(?:and|&|at)\s+(?:north\s+tampa|(?:n\.?\s+)?tampa\s+st(?:reet)?)\b)/gi, "E Kay St"],
+  [/(?<=\bE Kay St\s+(?:and|&|at)\s+)(?:north\s+tampa|(?:n\.?\s+)?tampa\s+st(?:reet)?)(?:\s+st(?:reet)?)?\b/gi, "N Tampa St"],
+  [/\b(?:north\s+tampa|(?:n\.?\s+)?tampa\s+st(?:reet)?)(?:\s+st(?:reet)?)?\b(?=\s+(?:and|&|at)\s+east\s+(?:bay|kay)\b)/gi, "N Tampa St"],
+  [/(?<=\bN Tampa St\s+(?:and|&|at)\s+)east\s+(?:bay|kay)(?:\s+st(?:reet)?)?\b/gi, "E Kay St"],
 ];
 
 interface Token {
@@ -442,7 +445,7 @@ function findStreetCandidates(text: string): StreetCandidate[] {
       const candidate = buildStreetCandidate(tokens, i);
       // A lone street-type word ("...Adamo Dr and drive.") is not a street.
       if (candidate && candidate.text.split(/\s+/).length === 1 && STOP_WORDS.has(cleanWord(candidate.text))) continue;
-      if (candidate && !CANDIDATE_BLOCKLIST.has(candidate.text.toLowerCase())) {
+      if (candidate && !CANDIDATE_BLOCKLIST.has(candidate.text.toLowerCase()) && !/\bturn\s+lanes?\b/i.test(candidate.text)) {
         candidates.push(candidate);
       }
     }
@@ -563,7 +566,7 @@ const KNOWN_STREET_FALLBACK: [RegExp, string][] = [
   [/\bS MacDill Ave\b/, "S MacDill Ave"],
   [/\bN MacDill Ave\b/, "N MacDill Ave"],
   [/\bW Bay Villa Ave\b/, "W Bay Villa Ave"],
-  [/\bE Bay St\b/, "E Bay St"],
+  [/\bE Kay St\b/, "E Kay St"],
   [/\bN Tampa St\b/, "N Tampa St"],
   [/\bmemorial\b/i, "Memorial Hwy"],
   [/\blois\b/i, "Lois Ave"],
