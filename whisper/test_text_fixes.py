@@ -22,6 +22,11 @@ CASES = [
     ("Signal 4 at a Mo Drive in Orient Road", "Signal 4 at Adamo Drive in Orient Road"),
     ("signal four at a Mo Drive in Oria Road", "signal four at Adamo Drive in Orient Road"),
     ("a-mo and orion rd", "Adamo and Orient rd"),
+    # 2026-10-15 S MacDill Ave.
+    ("The signal for South McDowell and West Bay Valley.", "The signal for South MacDill and West Bay Valley."),
+    ("crash at Mc Dill Avenue and Gandy", "crash at MacDill Avenue and Gandy"),
+    ("north mac dill ave", "north MacDill ave"),
+    ("officer McDowell is en route", "officer McDowell is en route"),
     ("give me a mo, I'll drive over", None),
     ("Orion Lane", None),
     # --- real excerpts (2026-09-25 call review / stored calls) ---

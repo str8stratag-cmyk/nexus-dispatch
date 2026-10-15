@@ -156,6 +156,30 @@ export function suggestForStem(
   return best;
 }
 
+const SUFFIX_FULL: Record<string, string> = {
+  st: "street", street: "street", ave: "avenue", av: "avenue", avenue: "avenue",
+  rd: "road", road: "road", blvd: "boulevard", boulevard: "boulevard",
+  dr: "drive", drive: "drive", ln: "lane", lane: "lane", hwy: "highway", highway: "highway",
+};
+let suffixIndex: { dict: StreetDictionary; set: Set<string> } | null = null;
+function hasExactSuffixMatch(part: string, dict: StreetDictionary): boolean {
+  const toks = part.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+  const suf = SUFFIX_FULL[toks[toks.length - 1] ?? ""];
+  if (!suf) return false;
+  const stem = normalizeStreet(part);
+  if (!stem) return false;
+  if (!suffixIndex || suffixIndex.dict !== dict) {
+    const set = new Set<string>();
+    for (const n of dict.names ?? []) {
+      const t = n.toLowerCase().split(/\s+/);
+      const s2 = SUFFIX_FULL[t[t.length - 1]];
+      if (s2) set.add(`${normalizeStreet(n)}|${s2}`);
+    }
+    suffixIndex = { dict, set };
+  }
+  return suffixIndex.set.has(`${stem}|${suf}`);
+}
+
 function rebuildSegment(seg: AddressSegment, canonicalName: string): string {
   return [seg.block, seg.dir, canonicalName].filter(Boolean).join(" ");
 }
@@ -172,6 +196,12 @@ export function suggestStreets(
   if (!address || !dict) return [];
   const segs = extractAddressSegments(address);
   if (segs.length === 0 || segs.length > 2) return [];
+  // 2026-10-15: a segment that already names a real street with its spoken
+  // suffix ("N Tampa St", "S MacDill Ave") is valid as-is. Stems collide
+  // across suffixes ("tampa" -> Tampa Road, "bay" -> Bay Lane), so without
+  // this a correct canonical address was "corrected" to a different road.
+  const parts = address.split(INTERSECTION_SPLIT_RE);
+  if (parts.length === segs.length && parts.every((p) => hasExactSuffixMatch(p, dict))) return [];
   const perSeg = segs.map((seg) => ({ seg, hit: suggestForStem(seg.stem, dict) }));
   if (perSeg.some((p) => !p.hit)) return [];
   if (segs.length === 2 && perSeg.some((p) => (p.hit?.score ?? 0) < INTERSECTION_MIN)) {
