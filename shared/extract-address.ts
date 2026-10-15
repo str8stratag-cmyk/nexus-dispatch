@@ -66,7 +66,7 @@ const STOP_WORDS = new Set([
 ]);
 
 // Candidate texts that are places, not street addresses.
-const CANDIDATE_BLOCKLIST = new Set(["busch gardens", "great way"]);
+const CANDIDATE_BLOCKLIST = new Set(["busch gardens", "great way", "left turn lane", "right turn lane", "turn lane", "the left turn lane", "the right turn lane"]);
 
 // Conjunctions/prepositions that often precede a cross street.
 const CROSS_LINKERS = new Set(["and", "amd", "at", "in", "near", "by", "/", "between", "intersection", "corner"]);
@@ -74,7 +74,7 @@ const CROSS_LINKERS = new Set(["and", "amd", "at", "in", "near", "by", "/", "bet
 // Common Whisper mishearings for Hillsborough County street/neighborhood names.
 // These are corrected BEFORE street extraction so "mcdull and mlk" becomes
 // "mcdill and mlk" and the address parser can find the real street names.
-const ADDRESS_HOMOPHONES: [RegExp, string][] = [
+const ADDRESS_HOMOPHONES: [RegExp, string | ((substring: string, ...args: string[]) => string)][] = [
   // "8401 North Carolina Street" (2026-10-01, real quarantine misses on
   // FOUR independent boxes, consistently - the real address is "3401 S
   // Carolina St", user-confirmed 2026-10-02. Extraction/geocoding both
@@ -242,6 +242,19 @@ const ADDRESS_HOMOPHONES: [RegExp, string][] = [
   [/\b(?:state\s+road|st\.?\s+rd\.?|s\.?r\.?)[\s-]*60\b(?=\s+(?:and|&|at|in)\s+orient\b)/gi, "Adamo Dr"],
   [/(?<=\borient(?:\s+(?:road|rd))?\s+(?:and|&|at|in)\s+)(?:state\s+road|st\.?\s+rd\.?|s\.?r\.?)[\s-]*60\b/gi, "Adamo Dr"],
   [/\b(?:st\.?\s+rd\.?|s\.?r\.?)[\s-]*60\b/gi, "State Road 60"],
+  // S/N MacDill Ave (2026-10-15): Whisper hears "MacDill" as "McDowell" /
+  // "Mc Dill" / "Mac Dill" / "McDill". No McDowell street exists in the Tampa
+  // dictionary, so it is rewritten when it follows South/North or precedes
+  // Ave/Avenue.
+  [/\b(s(?:outh)?|n(?:orth)?)\.?\s+(?:mc\s*dowell|mc\s*dill|mac\s*dill)(?:\s+ave(?:nue)?\b\.?)?/gi,
+    (_m: string, d: string) => (d[0].toLowerCase() === "s" ? "S" : "N") + " MacDill Ave"],
+  [/\b(?:mc\s*dowell|mc\s*dill|mac\s+dill)\s+ave(?:nue)?\b\.?/gi, "MacDill Ave"],
+  // W Bay Villa Ave heard as "West Bay Valley" / "West Bay, Villevio".
+  [/\bwest\s+bay,?\s+(?:valley|villevio|villa(?:\s+ave(?:nue)?)?)\b\.?/gi, "W Bay Villa Ave"],
+  // "East Bay and North Tampa" (downtown E Bay St & N Tampa St). Only when
+  // paired, so other "east bay" mentions are untouched.
+  [/\beast\s+bay(?:\s+st(?:reet)?)?\b(?=\s+(?:and|&|at)\s+north\s+tampa\b)/gi, "E Bay St"],
+  [/(?<=\bE Bay St\s+(?:and|&|at)\s+)north\s+tampa(?:\s+st(?:reet)?)?\b/gi, "N Tampa St"],
 ];
 
 interface Token {
@@ -545,6 +558,13 @@ const KNOWN_STREET_FALLBACK: [RegExp, string][] = [
   // "Orient Way" (a different street) - and kept after Adamo so the pair
   // comes out "Adamo Dr & Orient Rd".
   [/\borient\b(?!\s+way)/i, "Orient Rd"],
+  // 2026-10-15: MacDill / Bay Villa / N Tampa St (only canonical forms
+  // produced by ADDRESS_HOMOPHONES, so plain words are never matched).
+  [/\bS MacDill Ave\b/, "S MacDill Ave"],
+  [/\bN MacDill Ave\b/, "N MacDill Ave"],
+  [/\bW Bay Villa Ave\b/, "W Bay Villa Ave"],
+  [/\bE Bay St\b/, "E Bay St"],
+  [/\bN Tampa St\b/, "N Tampa St"],
   [/\bmemorial\b/i, "Memorial Hwy"],
   [/\blois\b/i, "Lois Ave"],
   [/\bhimes\b|\bhines\b/i, "Himes Ave"],

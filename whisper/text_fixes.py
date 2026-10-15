@@ -120,6 +120,11 @@ EXTRA_HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(?:adam[\s-]+o|a[\s-]+mo)\.?\s+(drive|dr)\b", re.IGNORECASE), r"Adamo \1"),
     (re.compile(r"\ba-mo\b", re.IGNORECASE), "Adamo"),
     (re.compile(r"\b(?:oria|orion)\s+(road|rd)\b", re.IGNORECASE), r"Orient \1"),
+    # S/N MacDill Ave (2026-10-15): "South McDowell", "Mc Dill Avenue",
+    # "Mac Dill Ave". No McDowell street exists in the Tampa dictionary;
+    # only rewritten after South/North or before Ave/Avenue.
+    (re.compile(r"\b(south|north)\s+(?:mc\s*dowell|mc\s*dill|mac\s*dill)\b", re.IGNORECASE), r"\1 MacDill"),
+    (re.compile(r"\b(?:mc\s*dowell|mc\s*dill|mac\s+dill)(\s+(?:avenue|ave)\b)", re.IGNORECASE), r"MacDill\1"),
 ]
 
 
