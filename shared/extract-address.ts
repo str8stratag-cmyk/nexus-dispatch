@@ -2,6 +2,8 @@
 // Returns the primary numbered address (or the first named street for pure intersections)
 // plus an optional cross-street when one is mentioned.
 
+import { convertSpokenDigitRuns, compareHouseNumbers } from "./house-number";
+
 const STREET_SUFFIXES = new Set([
   "street", "st", "avenue", "ave", "road", "rd", "boulevard", "blvd", "drive", "dr",
   "lane", "ln", "court", "ct", "circle", "cir", "highway", "hwy", "parkway", "pkwy",
@@ -767,6 +769,24 @@ function matchHouseNumberDictionary(text: string): string | null {
 }
 
 export function extractAddress(transcript: string): ExtractedAddress {
+  const base = extractAddressRaw(transcript);
+  if (!transcript || !SPOKEN_DIGIT_HINT_RE.test(transcript)) return base;
+  // Spoken house numbers ("three seven one seven Hillsborough Avenue") are
+  // retried as numerals. Only accepted when it ADDS or lengthens a house
+  // number on the same street, so plain chatter is unaffected.
+  const converted = convertSpokenDigitRuns(transcript);
+  if (converted === transcript) return base;
+  const alt = extractAddressRaw(converted);
+  if (!alt.address) return base;
+  if (!base.address) return /^\d/.test(alt.address) ? alt : base;
+  return compareHouseNumbers(base.address, alt.address) === "upgrade"
+    ? { address: alt.address, crossStreet: base.crossStreet ?? alt.crossStreet }
+    : base;
+}
+
+const SPOKEN_DIGIT_HINT_RE = /\b(zero|oh|one|two|three|four|five|six|seven|eight|nine)\b/i;
+
+function extractAddressRaw(transcript: string): ExtractedAddress {
   if (!transcript) return { address: null, crossStreet: null };
 
   const text = normalizeWhitespace(applyAddressHomophones(transcript));
