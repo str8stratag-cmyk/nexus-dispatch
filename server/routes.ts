@@ -10,6 +10,7 @@ import { insertDispatchEventSchema, insertSettingsSchema, type DispatchEvent, ty
 import { normalizeKeywordEntry } from "@shared/keywords";
 import { extractAddress, setStreetDictionaryNames } from "@shared/extract-address";
 import { backfillAddressFromContext } from "@shared/address-context";
+import { compareHouseNumbers, hasFragmentedHouseNumber } from "@shared/house-number";
 import { suggestStreets, levenshtein, type StreetDictionary } from "@shared/street-match";
 import { getDatabase, getDatabaseName, isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
@@ -1121,6 +1122,29 @@ export async function registerRoutes(
         }
       }
 
+      // Chopped house number ("Signal 4, 37, 7... 17 Hillsborough Avenue." ->
+      // "17 Hillsborough Ave", 2026-10-16): if the neighbouring chunks name the
+      // same street with a longer number ending in it (3717), use that. Never
+      // replaces the address with a different street or a shorter number.
+      if (
+        !parsed.isManual &&
+        parsed.address &&
+        process.env.DM_ADDRESS_CONTEXT?.trim().toLowerCase() !== "off" &&
+        parsed.contextTranscripts &&
+        parsed.contextTranscripts.length > 0 &&
+        hasFragmentedHouseNumber(parsed.transcript, parsed.address)
+      ) {
+        const ctx = backfillAddressFromContext(parsed.contextTranscripts);
+        if (ctx && compareHouseNumbers(parsed.address, ctx.address) === "upgrade") {
+          console.log(
+            `[address-upgrade-context] source=${parsed.source || "?"} ${parsed.address} -> ${ctx.address}`,
+          );
+          parsed.address = ctx.address;
+          parsed.addressFromContext = true;
+          dispatchCounters.addressContextSaves++;
+        }
+      }
+
       // skipDedup is an intake-only flag (see schema) — keep it out of the
       // stored event document.
       // contextTranscripts / clientRequestId are intake-only too.
@@ -1269,6 +1293,13 @@ export async function registerRoutes(
         // match exactly — "50th st" vs "56th st" is a different incident.
         // levenshtein imported from @shared/street-match.
         const addressesSimilar = (a: string, b: string): boolean => {
+          // Same street, different full house numbers = different incidents
+          // ("3700 hillsborough ave" vs "3717 hillsborough ave"). A suffix
+          // fragment (17 vs 3717) or a missing number is the same call heard
+          // incompletely: similar, and the duplicate branch upgrades it.
+          const rel = compareHouseNumbers(a, b);
+          if (rel === "different") return false;
+          if (rel !== "other-street") return true;
           if (a.includes(b) || b.includes(a)) return true;
           const numsA = a.split(" ").filter((t) => /^\d/.test(t));
           const numsB = b.split(" ").filter((t) => /^\d/.test(t));
@@ -1335,6 +1366,37 @@ export async function registerRoutes(
         });
         if (existing) {
           dispatchCounters.dedupSuppressed++;
+          // Dedupe upgrade: the incoming copy of the call has a more complete
+          // address than the event already posted (existing "17 Hillsborough
+          // Ave", incoming "3717 Hillsborough Ave"). Fix the existing event in
+          // place instead of discarding the better address. Never downgrades:
+          // compareHouseNumbers only says "upgrade" for same street with a
+          // missing number or a suffix-fragment number. Requires coordinates.
+          if (
+            parsed.address &&
+            lat != null &&
+            lng != null &&
+            compareHouseNumbers(existing.address, parsed.address) === "upgrade"
+          ) {
+            try {
+              const upgraded = await storage.updateEventLocation(existing.id, {
+                address: parsed.address,
+                lat,
+                lng,
+                geocodedRoad: geocodedRoad ?? null,
+                locationApprox: isBareRoadName(parsed.address),
+              });
+              if (upgraded) {
+                console.log(
+                  `[dedup-upgrade] event=${existing.id} ${existing.address ?? "(none)"} -> ${parsed.address} (from ${parsed.source || "?"}, event source ${existing.source})`,
+                );
+                broadcastEvent(upgraded);
+                return res.status(200).json({ duplicate: true, upgraded: true, event: upgraded });
+              }
+            } catch (err) {
+              console.error("[dedup-upgrade] update failed:", err);
+            }
+          }
           return res.status(200).json({ duplicate: true, event: existing });
         }
       }

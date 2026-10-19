@@ -68,6 +68,14 @@ function mapSetting(row: SettingDocument): Setting {
   return { id: row.id, key: row.key, value: row.value };
 }
 
+export interface EventLocationUpdate {
+  address: string;
+  lat: number;
+  lng: number;
+  geocodedRoad: string | null;
+  locationApprox: boolean;
+}
+
 export interface IStorage {
   getEvents(limit?: number): Promise<DispatchEvent[]>;
   getEvent(id: number): Promise<DispatchEvent | undefined>;
@@ -76,6 +84,8 @@ export interface IStorage {
   /** Atomically claim an active event as accepted. Returns undefined if missing or already accepted. */
   claimEventAccepted(id: number, acceptedBy: string | null): Promise<DispatchEvent | undefined>;
   updateEventTelegramMessageId(id: number, telegramMessageId: string): Promise<DispatchEvent | undefined>;
+  /** Dedupe upgrade: replace an event's address/coordinates with a more complete one. */
+  updateEventLocation(id: number, loc: EventLocationUpdate): Promise<DispatchEvent | undefined>;
   getSetting(key: string): Promise<Setting | undefined>;
   upsertSetting(setting: InsertSettings): Promise<Setting>;
   getAllSettings(): Promise<Setting[]>;
@@ -170,6 +180,16 @@ export class DatabaseStorage implements IStorage {
     const event = await database.collection<DispatchEventDocument>("dispatchEvents").findOneAndUpdate(
       { id },
       { $set: { telegramMessageId } },
+      { returnDocument: "after" },
+    );
+    return event ? mapEvent(event) : undefined;
+  }
+
+  async updateEventLocation(id: number, loc: EventLocationUpdate): Promise<DispatchEvent | undefined> {
+    const database = await getDatabase();
+    const event = await database.collection<DispatchEventDocument>("dispatchEvents").findOneAndUpdate(
+      { id, status: { $in: ["active", "accepted"] } },
+      { $set: { address: loc.address, lat: loc.lat, lng: loc.lng, geocodedRoad: loc.geocodedRoad, locationApprox: loc.locationApprox } },
       { returnDocument: "after" },
     );
     return event ? mapEvent(event) : undefined;

@@ -25,6 +25,46 @@ import {
   isInvalidAutoAddress,
 } from "@shared/audio-gates";
 import { hasDispatchSignalWord, isBarrierText } from "@shared/address-context";
+import { compareHouseNumbers, hasFragmentedHouseNumber } from "@shared/house-number";
+
+/**
+ * Join chunk texts and extract the address. When a chunk ends in digits and
+ * the next starts with digits ("signal 4 at 37" | "17 Hillsborough Avenue"),
+ * the house number was cut at the chunk boundary: also try the numerals glued
+ * together and keep that only if it lengthens the house number on the same
+ * street (17 -> 3717). Spoken digits ("three seven" | "one seven ...") are
+ * handled inside extractAddress itself.
+ */
+export function extractJoinedAddress(texts: readonly string[]): ReturnType<typeof extractAddress> {
+  const transcript = texts.join(" ");
+  const ex = extractAddress(transcript);
+  if (texts.length < 2) return ex;
+  let stitched = texts[0];
+  let changed = false;
+  for (let i = 1; i < texts.length; i++) {
+    const prev = stitched.replace(/[\s,.;:\-]+$/, "");
+    const next = texts[i].replace(/^[\s,.;:\-]+/, "");
+    const tail = prev.match(/(?:^|\s)(\d{1,3})$/);
+    const head = next.match(/^(\d{1,3})(?=\s)/);
+    if (tail && head && tail[1].length + head[1].length <= 5) {
+      stitched = prev + next;
+      changed = true;
+    } else {
+      stitched = `${stitched} ${texts[i]}`;
+    }
+  }
+  if (!changed) return ex;
+  const alt = extractAddress(stitched);
+  if (!alt.address) return ex;
+  if (!ex.address) return /^\d/.test(alt.address) ? alt : ex;
+  // The plain join can keep both groups as "37 17 Hillsborough Ave"; compare
+  // with the leading digit groups collapsed so that counts as a fragment.
+  const collapsed = ex.address.replace(/^(\d+(?:\s+\d+)+)(?=\s)/, (m) => m.replace(/\s+/g, ""));
+  const rel = compareHouseNumbers(ex.address, alt.address);
+  return rel === "upgrade" || (collapsed !== ex.address && compareHouseNumbers(collapsed, alt.address) === "same")
+    ? { address: alt.address, crossStreet: ex.crossStreet ?? alt.crossStreet }
+    : ex;
+}
 
 export interface CoreKeyword {
   keyword: string;
@@ -77,7 +117,7 @@ export interface CorePayload {
   keywords: CoreKeyword[];
   address: string | null;
   crossStreet: string | null;
-  /** Neighbouring transcripts (oldest -> newest); only present when `address` is missing. */
+  /** Neighbouring transcripts (oldest -> newest); present when `address` is missing or its house number looks fragmentary. */
   contextTranscripts?: string[];
   /** True when this call went through the address hold. */
   addressHeld: boolean;
@@ -320,7 +360,7 @@ export class DispatchBufferCore {
   private build(chunks: RingEntry[]): Omit<CorePayload, "contextTranscripts" | "addressHeld" | "clientRequestId"> {
     const transcript = chunks.map((c) => c.text).join(" ");
     let keywords = this.cfg.detectKeywords(transcript);
-    const ex = extractAddress(transcript);
+    const ex = extractJoinedAddress(chunks.map((c) => c.text));
     const usable = ex.address && !isInvalidAutoAddress(ex.address);
     // Major road named, no crash keyword -> Road Mention (server decides if it keeps it).
     if (keywords.length === 0 && containsMajorRoad(transcript)) {
@@ -370,7 +410,9 @@ export class DispatchBufferCore {
       return [];
     }
     const payload: CorePayload = { ...base, addressHeld, clientRequestId: this.newRequestId() };
-    if (!payload.address) {
+    // Also attach context when the house number looks chopped ("37, 7... 17
+    // Hillsborough"): the server may find the full number nearby.
+    if (!payload.address || hasFragmentedHouseNumber(payload.transcript, payload.address)) {
       const ctx = this.selectContext(chunks, now);
       if (ctx.length > 0) {
         payload.contextTranscripts = ctx;
