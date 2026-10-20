@@ -15,7 +15,20 @@ import {
 } from "../client/src/lib/capture-supervisor";
 import { crashReloadDelayMs } from "../client/src/components/error-boundary";
 import { isHmrEnabled } from "../server/vite";
-import { decideLease, releaseLease, LEASE_TTL_MS } from "../shared/capture-lease";
+import {
+  decideLease,
+  releaseLease,
+  LEASE_TTL_MS,
+  LEASE_IDLE_GRACE_MS,
+  HOLDER_IDLE_GRACE_MS,
+  decideTabAction,
+  mayRunCapture,
+  summarizeDesk,
+  pruneTabs,
+  TAB_FORGET_MS,
+  type TabSnapshot,
+  type TabHeartbeat,
+} from "../shared/capture-lease";
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -137,6 +150,60 @@ check("HMR DM_HMR=0", isHmrEnabled({ DM_HMR: "0" } as NodeJS.ProcessEnv), false)
   check("lease: empty tab id refused", d.granted, false);
   check("lease: release by holder", releaseLease(leaseA, "A"), null);
   check("lease: release by other tab ignored", releaseLease(leaseA, "B")?.tabId, "A");
+}
+
+// DISP-1 2026-10-20: tab A holds lock+lease but is idle, tab B captures in standby.
+{
+  const t0 = 5_000_000;
+  let d = decideLease(null, { tabId: "A", capturing: false }, t0);
+  const idleA = d.lease;
+  check("idle lease: holder records idleSince", idleA?.idleSince, t0);
+  d = decideLease(idleA, { tabId: "A", capturing: false }, t0 + 15_000);
+  check("idle lease: renewal keeps original idleSince", d.lease?.idleSince, t0);
+  d = decideLease(d.lease, { tabId: "B", capturing: true }, t0 + LEASE_IDLE_GRACE_MS - 1);
+  check("idle lease: capturing tab waits out the grace", d.granted, false);
+  d = decideLease(d.lease, { tabId: "B", capturing: true }, t0 + LEASE_IDLE_GRACE_MS);
+  check("idle lease: capturing tab takes over an idle holder", d.granted && d.lease?.tabId === "B", true);
+  check("idle lease: new holder marked capturing", d.lease?.capturing === true && d.lease?.idleSince === null, true);
+  const capB = d.lease;
+  d = decideLease(capB, { tabId: "A", capturing: false }, t0 + LEASE_IDLE_GRACE_MS + 100_000);
+  check("idle lease: idle tab can't take a capturing holder's lease", d.granted, false);
+  d = decideLease(capB, { tabId: "A", capturing: true }, t0 + LEASE_IDLE_GRACE_MS + 100_000);
+  check("idle lease: capturing holder is never displaced by another capturer", d.granted, false);
+  d = decideLease({ tabId: "A", expiresAt: t0 + LEASE_TTL_MS }, { tabId: "B", capturing: true }, t0 + 60_000);
+  check("idle lease: old-format lease (no capturing field) not displaced", d.granted, false);
+
+  const base: TabSnapshot = { lock: "held", lease: "granted", capturing: false, autoCapture: true, micPermission: "granted", idleHolderSince: t0, now: t0 };
+  check("tab: capturing holder does nothing", decideTabAction({ ...base, capturing: true }), "none");
+  check("tab: idle holder within grace waits (auto-start)", decideTabAction({ ...base, now: t0 + HOLDER_IDLE_GRACE_MS - 1 }), "none");
+  check("tab: idle holder, lease denied -> yield", decideTabAction({ ...base, lease: "denied", now: t0 + HOLDER_IDLE_GRACE_MS }), "yield");
+  check("tab: idle holder, mic prompt -> yield", decideTabAction({ ...base, micPermission: "prompt", now: t0 + HOLDER_IDLE_GRACE_MS }), "yield");
+  check("tab: idle holder, mic denied -> yield", decideTabAction({ ...base, micPermission: "denied", now: t0 + HOLDER_IDLE_GRACE_MS }), "yield");
+  check("tab: idle holder w/ permission keeps trying briefly", decideTabAction({ ...base, now: t0 + 2 * HOLDER_IDLE_GRACE_MS }), "none");
+  check("tab: idle holder w/ permission yields eventually", decideTabAction({ ...base, now: t0 + 3 * HOLDER_IDLE_GRACE_MS }), "yield");
+  check("tab: Stop pressed holder yields", decideTabAction({ ...base, autoCapture: false }), "yield");
+  check("tab: capturing tab with lease elsewhere stops", decideTabAction({ ...base, lock: "standby", lease: "denied", capturing: true }), "stop");
+  check("tab: capturing standby tab keeps going", decideTabAction({ ...base, lock: "standby", capturing: true }), "none");
+  check("run: standby + capturing + lease granted may heal capture", mayRunCapture("standby", "granted", true), true);
+  check("run: standby not capturing may not start", mayRunCapture("standby", "granted", false), false);
+  check("run: standby capturing, lease unknown -> no", mayRunCapture("standby", "unknown", true), false);
+  check("run: holder may run", mayRunCapture("held", "unknown", false), true);
+  check("run: lease denied never runs", mayRunCapture("held", "denied", false), false);
+
+  const now = t0 + 1_000_000;
+  const tab = (id: string, agoMs: number, capturing: boolean, chunkAgo: number | null): TabHeartbeat => ({
+    tabId: id, at: now - agoMs, origin: null, capturing, lock: null, lease: null,
+    lastChunkAt: chunkAgo == null ? null : now - chunkAgo, lastSentAt: null,
+  });
+  let sum = summarizeDesk([tab("A", 10_000, false, null), tab("B", 30_000, true, 34_000)], now, 150_000);
+  check("desk: capturing if any live tab captures (not last beat wins)", [sum.effectiveCapturing, sum.liveTabs, sum.capturingTabs, sum.lastChunkAgoMs], [true, 2, 1, 34_000]);
+  sum = summarizeDesk([tab("A", 10_000, false, null), tab("B", 30_000, true, 400_000)], now, 150_000);
+  check("desk: capturing tab with stale chunks is not effectively capturing", sum.effectiveCapturing, false);
+  sum = summarizeDesk([tab("B", 200_000, true, 1_000)], now, 150_000);
+  check("desk: stale tab not counted live", [sum.liveTabs, sum.effectiveCapturing], [0, false]);
+  const m = new Map([["A", tab("A", TAB_FORGET_MS + 1, false, null)], ["B", tab("B", 1, true, 1)]]);
+  pruneTabs(m, now);
+  check("desk: long-silent tabs pruned", Array.from(m.keys()), ["B"]);
 }
 
 console.log(failures ? `${failures} FAILURES` : "all capture-supervisor tests passed");
