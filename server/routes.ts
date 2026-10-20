@@ -23,7 +23,15 @@ import {
   containsTvVideoPhrase,
   isInvalidAutoAddress,
 } from "@shared/audio-gates";
-import { decideLease, releaseLease, type CaptureLease } from "@shared/capture-lease";
+import {
+  decideLease,
+  releaseLease,
+  pruneTabs,
+  summarizeDesk,
+  TAB_FRESH_MS,
+  type CaptureLease,
+  type TabHeartbeat,
+} from "@shared/capture-lease";
 import {
   parseAcceptCallbackData,
   formatTelegramAccepterName,
@@ -41,8 +49,22 @@ const sseClients = new Set<Response>();
 
 const serverStartedAt = Date.now();
 let captureLease: CaptureLease | null = null;
+// Per-tab heartbeats (2026-10-20). One "last heartbeat per desk" slot used to
+// be overwritten by every tab, so with two tabs /api/capture/status flipped
+// between an idle lock holder and the real capturer.
+const captureTabs = new Map<string, TabHeartbeat & { detail: NonNullable<typeof lastCaptureHeartbeat> }>();
+/** A capturing desk produces a recorder chunk every few seconds; older than this = not effectively capturing. */
+const CAPTURE_CHUNK_STALE_MS = TAB_FRESH_MS;
+// Watchdog-requested recovery (POST /api/capture/recover): each tab is told
+// once, on its next heartbeat, to reload (or move to the canonical origin).
+const CAPTURE_CANONICAL_ORIGIN = "http://localhost:5000";
+const CAPTURE_RECOVER_TTL_MS = 5 * 60_000;
+let captureRecoverRequestedAt = 0;
+const captureRecoverTold = new Map<string, number>();
 let lastCaptureHeartbeat: {
   at: number;
+  tabId?: string | null;
+  lease?: string | null;
   source: string | null;
   capturing: boolean;
   autoCapture: boolean;
@@ -873,8 +895,12 @@ export async function registerRoutes(
   app.post("/api/capture/heartbeat", (req, res) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.round(v) : null);
-    lastCaptureHeartbeat = {
-      at: Date.now(),
+    const now = Date.now();
+    const tabId = typeof b.tabId === "string" && b.tabId ? b.tabId.slice(0, 64) : "legacy";
+    const beat: NonNullable<typeof lastCaptureHeartbeat> = {
+      at: now,
+      tabId,
+      lease: typeof b.lease === "string" ? b.lease.slice(0, 16) : null,
       source: typeof b.source === "string" ? b.source.slice(0, 64) : null,
       capturing: b.capturing === true,
       autoCapture: b.autoCapture !== false,
@@ -883,17 +909,86 @@ export async function registerRoutes(
       lastSentAgoMs: num(b.lastSentAgoMs),
       counters: sanitizeCounters(b.counters),
     };
+    lastCaptureHeartbeat = beat;
+    const ago = (v: number | null) => (v == null || v < 0 ? null : now - v);
+    captureTabs.set(tabId, {
+      tabId,
+      at: now,
+      origin: typeof b.origin === "string" ? b.origin.slice(0, 64) : null,
+      capturing: beat.capturing,
+      lock: beat.lock,
+      lease: beat.lease ?? null,
+      lastChunkAt: ago(beat.lastChunkAgoMs),
+      lastSentAt: ago(beat.lastSentAgoMs),
+      detail: beat,
+    });
+    pruneTabs(captureTabs, now);
+    // Per-minute capture summary (tabs beat every 60s) -> dispatch-monitor.log.
+    const m = (b.minute ?? null) as Record<string, unknown> | null;
+    if (m && typeof m === "object") {
+      const n = (v: unknown) => num(v) ?? 0;
+      console.log(
+        `[capture] minute tab=${tabId} origin=${typeof b.origin === "string" ? b.origin.slice(0, 64) : "?"}` +
+          ` capturing=${beat.capturing} lock=${beat.lock ?? "?"} lease=${beat.lease ?? "?"}` +
+          ` chunks=${n(m.chunksRecorded)} sent=${n(m.chunksSent)} errors=${n(m.sendErrors)} dropped=${n(m.droppedChunks)}` +
+          ` lastChunkAgoMs=${beat.lastChunkAgoMs ?? "null"} tabs=${captureTabs.size}`,
+      );
+    }
+    if (captureRecoverRequestedAt && now - captureRecoverRequestedAt < CAPTURE_RECOVER_TTL_MS && (captureRecoverTold.get(tabId) ?? 0) < captureRecoverRequestedAt) {
+      captureRecoverTold.set(tabId, now);
+      const origin = typeof b.origin === "string" ? b.origin : "";
+      const action = origin && origin !== CAPTURE_CANONICAL_ORIGIN ? "navigate" : "reload";
+      console.log(`[capture] recover -> tab=${tabId} origin=${origin || "?"} action=${action}`);
+      res.json({ ok: true, recover: action, url: `${CAPTURE_CANONICAL_ORIGIN}/` });
+      return;
+    }
     res.json({ ok: true });
   });
 
   app.get("/api/capture/status", (_req, res) => {
     const now = Date.now();
+    pruneTabs(captureTabs, now);
+    const leaseHolder = captureLease && captureLease.expiresAt > now ? captureLease.tabId : null;
+    const desk = summarizeDesk(captureTabs.values(), now, CAPTURE_CHUNK_STALE_MS);
+    const tabs = Array.from(captureTabs.values())
+      .sort((a, b) => b.at - a.at)
+      .map((t) => ({ ...t.detail, origin: t.origin, agoMs: now - t.at, lastChunkAt: t.lastChunkAt, lastSentAt: t.lastSentAt, leaseHolder: t.tabId === leaseHolder }));
+    // `last` stays for older watchdogs: prefer the capturing tab / lease holder
+    // over whichever tab happened to beat last.
+    const preferred =
+      Array.from(captureTabs.values())
+        .filter((t) => now - t.at <= TAB_FRESH_MS)
+        .sort((a, b) => Number(b.capturing) - Number(a.capturing) || Number(b.tabId === leaseHolder) - Number(a.tabId === leaseHolder) || b.at - a.at)[0]
+        ?.detail ?? lastCaptureHeartbeat;
     res.json({
       uptimeMs: now - serverStartedAt,
       lastHeartbeatAgoMs: lastCaptureHeartbeat ? now - lastCaptureHeartbeat.at : null,
-      last: lastCaptureHeartbeat,
-      leaseHolder: captureLease && captureLease.expiresAt > now ? captureLease.tabId : null,
+      last: preferred,
+      leaseHolder,
+      // Per-desk effective state across all tabs (2026-10-20).
+      capturing: desk.effectiveCapturing,
+      effectiveCapturing: desk.effectiveCapturing,
+      liveTabs: desk.liveTabs,
+      capturingTabs: desk.capturingTabs,
+      lastChunkAt: desk.lastChunkAt,
+      lastChunkAgoMs: desk.lastChunkAgoMs,
+      lastSentAt: desk.lastSentAt,
+      lastSentAgoMs: desk.lastSentAgoMs,
+      tabs,
     });
+  });
+
+  // Desk watchdog: tabs heartbeat but no audio chunks for N minutes. Loopback only.
+  app.post("/api/capture/recover", (req, res) => {
+    const ip = req.socket.remoteAddress ?? "";
+    if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(ip)) {
+      res.status(403).json({ ok: false });
+      return;
+    }
+    captureRecoverRequestedAt = Date.now();
+    captureRecoverTold.clear();
+    console.log(`[capture] recover requested by watchdog (live tabs: ${captureTabs.size})`);
+    res.json({ ok: true, tabs: captureTabs.size });
   });
 
   // One capturing tab per box, across origins (shared/capture-lease.ts).
@@ -906,7 +1001,8 @@ export async function registerRoutes(
       Date.now(),
     );
     if (decision.lease?.tabId !== captureLease?.tabId && decision.granted) {
-      console.log(`[capture] lease -> ${tabId}${b.force === true ? " (Start pressed)" : ""}`);
+      const why = b.force === true ? " (Start pressed)" : captureLease && captureLease.expiresAt > Date.now() ? ` (took over from idle ${captureLease.tabId})` : "";
+      console.log(`[capture] lease -> ${tabId}${why}`);
     }
     captureLease = decision.lease;
     res.json({ granted: decision.granted, ttlMs: decision.lease ? decision.lease.expiresAt - Date.now() : 0 });

@@ -15,6 +15,12 @@ export interface AudioCaptureHealth {
   lastSentAt: number;
   /** Chunks dropped because Whisper was two chunks behind (since page load). */
   droppedChunks: number;
+  /** Recorder chunks completed (silent ones included), since page load. */
+  chunksRecorded: number;
+  /** Chunks successfully POSTed to Whisper, since page load. */
+  chunksSent: number;
+  /** Failed Whisper POSTs, since page load. */
+  sendErrors: number;
 }
 
 interface UseAudioCaptureReturn {
@@ -103,6 +109,10 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
   const startedAtRef = useRef(0);
   const lastChunkAtRef = useRef(0);
   const lastSentAtRef = useRef(0);
+  // Cumulative per-page counters for the per-minute capture summary log.
+  const chunksRecordedRef = useRef(0);
+  const chunksSentRef = useRef(0);
+  const sendErrorsRef = useRef(0);
   // Keywords and device are read through refs so transcribe/start keep a
   // stable identity. Before 2026-10-03 `keywords` was a fresh array on every
   // render, so start() changed identity every render and the auto-start
@@ -158,6 +168,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
         throw new Error(result.message || "Local Whisper transcription failed.");
       }
       lastSentAtRef.current = Date.now();
+      chunksSentRef.current += 1;
       if (result.text?.trim()) {
         onTranscriptRef.current?.(result.text.trim(), true, times);
       }
@@ -168,6 +179,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     } catch (err) {
       const message = err instanceof Error ? err.message : "Local Whisper transcription failed.";
       console.error(message);
+      sendErrorsRef.current += 1;
       transcribeFailStreakRef.current += 1;
       if (transcribeFailStreakRef.current >= 3) {
         setError(
@@ -239,6 +251,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       clearInterval(rmsInterval);
       const chunkEndedAt = Date.now();
       lastChunkAtRef.current = chunkEndedAt;
+      chunksRecordedRef.current += 1;
       // Gate on the chunk's PEAK sample, not the average (2026-09-30 call
       // review: a real Signal 4 was almost missed because a short, loud
       // transmission inside an otherwise-quiet 4s chunk got diluted below
@@ -414,6 +427,9 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     lastChunkAt: lastChunkAtRef.current,
     lastSentAt: lastSentAtRef.current,
     droppedChunks: droppedChunksRef.current,
+    chunksRecorded: chunksRecordedRef.current,
+    chunksSent: chunksSentRef.current,
+    sendErrors: sendErrorsRef.current,
   }), []);
 
   // Unmount (and React Fast Refresh, which re-runs effects) releases the mic.
