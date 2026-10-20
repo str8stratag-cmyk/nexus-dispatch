@@ -12,6 +12,7 @@ param([switch]$NoInitialStart)
 #   NEXUS_DISPATCH=C:\path\to\nexus-dispatch              (default: sibling dir)
 #   DEPLOY_BRANCH=release                                  (default: release)
 #   APP_BOOT_WAIT_SEC=300                                  (default: 300; see boot grace below)
+#   CAPTURE_NO_CHUNK_MIN=5                                 (default: 5; see capture outage below)
 $dispatchMonitor = Split-Path -Parent $PSScriptRoot
 $whisperRoot = $dispatchMonitor
 $nexusDispatch = Join-Path (Split-Path -Parent $dispatchMonitor) "nexus-dispatch"
@@ -20,10 +21,11 @@ $nexusDispatch = Join-Path (Split-Path -Parent $dispatchMonitor) "nexus-dispatch
 # owner promotes them: scripts\promote-release.ps1 (or git push origin main:release).
 $deployBranch = "release"
 $appBootWaitSec = 300
+$captureNoChunkMin = 5
 $watchdogLocal = Join-Path $dispatchMonitor "watchdog.local"
 if (Test-Path $watchdogLocal) {
     foreach ($line in Get-Content $watchdogLocal) {
-        if ($line -match '^\s*(WHISPER_ROOT|NEXUS_DISPATCH|DEPLOY_BRANCH|APP_BOOT_WAIT_SEC)\s*=\s*(.+?)\s*$') {
+        if ($line -match '^\s*(WHISPER_ROOT|NEXUS_DISPATCH|DEPLOY_BRANCH|APP_BOOT_WAIT_SEC|CAPTURE_NO_CHUNK_MIN)\s*=\s*(.+?)\s*$') {
             switch ($Matches[1]) {
                 "WHISPER_ROOT" { $whisperRoot = $Matches[2] }
                 "NEXUS_DISPATCH" { $nexusDispatch = $Matches[2] }
@@ -32,6 +34,10 @@ if (Test-Path $watchdogLocal) {
                     # Ignore junk / tiny values rather than break the boot wait.
                     $parsedWait = 0
                     if ([int]::TryParse($Matches[2], [ref]$parsedWait) -and $parsedWait -ge 30) { $appBootWaitSec = $parsedWait }
+                }
+                "CAPTURE_NO_CHUNK_MIN" {
+                    $parsedMin = 0
+                    if ([int]::TryParse($Matches[2], [ref]$parsedMin) -and $parsedMin -ge 2) { $captureNoChunkMin = $parsedMin }
                 }
             }
         }
@@ -303,6 +309,9 @@ function Start-Browser($url) {
 $captureSilentLimit = [TimeSpan]::FromMinutes(15)
 $captureReopenGap = [TimeSpan]::FromHours(2)
 $lastCaptureReopen = [DateTime]::MinValue
+# Single origin (2026-10-20): every watchdog open uses localhost. DISP-1 ended
+# up with a localhost AND a 127.0.0.1 tab; they are different origins (own
+# mic permission, own Web Lock, own localStorage).
 $captureUrl = "http://localhost:5000"
 
 function Test-CapturePageSilent($port) {
@@ -315,6 +324,51 @@ function Test-CapturePageSilent($port) {
     if ($null -eq $status.uptimeMs -or [double]$status.uptimeMs -lt $limitMs) { return $false }
     if ($null -eq $status.lastHeartbeatAgoMs) { return $true }
     return ([double]$status.lastHeartbeatAgoMs -gt $limitMs)
+}
+
+# Capture outage (2026-10-20). DISP-1: a tab kept heartbeating while nothing
+# was recorded, so the no-heartbeat check never fired. Now "no recorder chunk
+# on this desk for CAPTURE_NO_CHUNK_MIN minutes" (status.lastChunkAgoMs, across
+# all tabs) while a tab wants to capture is an outage too. Recovery:
+#   - live tab(s) present: ask them to recover (POST /api/capture/recover; on
+#     their next heartbeat localhost tabs reload, other-origin tabs navigate to
+#     $captureUrl) -- never open a duplicate tab next to a live one;
+#   - no live tab: open $captureUrl (same as the no-heartbeat path).
+# Old servers without lastChunkAgoMs/liveTabs: no-op (leave it).
+$captureNoChunkLimit = [TimeSpan]::FromMinutes($captureNoChunkMin)
+$captureRecoverGap = [TimeSpan]::FromMinutes([Math]::Max(10, 2 * $captureNoChunkMin))
+$lastCaptureRecover = [DateTime]::MinValue
+
+# Returns $null (healthy / unknown) or @{ Reason; LiveTabs }.
+function Get-CaptureOutage($port) {
+    try {
+        $status = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/capture/status" -Method GET -TimeoutSec 15 -UseBasicParsing
+    } catch {
+        return $null
+    }
+    if ($null -eq $status -or $null -eq $status.uptimeMs) { return $null }
+    if ($null -eq $status.PSObject.Properties['liveTabs']) { return $null }
+    $limitMs = $captureNoChunkLimit.TotalMilliseconds
+    if ([double]$status.uptimeMs -lt $limitMs) { return $null }
+    $live = [int]$status.liveTabs
+    if ($live -eq 0) { return $null }  # no heartbeat at all: Test-CapturePageSilent's job
+    # Operator pressed Stop in every live tab: not an outage.
+    $wanting = @($status.tabs | Where-Object { $_.agoMs -lt 150000 -and $_.autoCapture -ne $false })
+    if ($wanting.Count -eq 0) { return $null }
+    $ago = $status.lastChunkAgoMs
+    if ($null -ne $ago -and [double]$ago -le $limitMs) { return $null }
+    $agoText = if ($null -eq $ago) { "never" } else { "$([int]([double]$ago / 60000)) min ago" }
+    return @{ Reason = "no capture chunk for $($captureNoChunkLimit.TotalMinutes)+ min (last: $agoText, live tabs: $live, capturing: $($status.capturingTabs))"; LiveTabs = $live }
+}
+
+function Request-CaptureRecover($port) {
+    try {
+        Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/capture/recover" -Method POST -TimeoutSec 15 -UseBasicParsing | Out-Null
+        return $true
+    } catch {
+        Write-Warning "$(Get-Date) Capture recover request failed: $_"
+        return $false
+    }
 }
 
 # Boot grace (2026-10-06). After a reboot the whole box takes minutes to come
@@ -331,9 +385,8 @@ function Test-CapturePageSilent($port) {
 #     giving up for good;
 #   - the 4h Whisper schedule starts from this start, not from MinValue.
 $appBootWait = [TimeSpan]::FromSeconds($appBootWaitSec)
-# Boot-time open of the capture page (kept on 127.0.0.1 like the original
-# boot open; the 15-min no-heartbeat reopen above still uses $captureUrl).
-$bootCaptureUrl = "http://127.0.0.1:5000"
+# Boot-time open of the capture page: same single origin as every other open.
+$bootCaptureUrl = $captureUrl
 # How long to give an existing/restored tab to check in before opening one.
 $captureConfirmWait = [TimeSpan]::FromSeconds(90)
 # A heartbeat this recent means a live capture page (tabs beat every 60s).
@@ -541,6 +594,15 @@ while ($true) {
             Write-Host "$(Get-Date) No capture-page heartbeat for $($captureSilentLimit.TotalMinutes) min; reopening $captureUrl" -ForegroundColor Yellow
             Start-Browser $captureUrl
             $lastCaptureReopen = Get-Date
+        }
+    }
+
+    # Heartbeating tab(s) but no audio chunks: idle capture page (2026-10-20).
+    if (-not $capturePending.Active) {
+        $outage = Get-CaptureOutage 5000
+        if ($null -ne $outage -and (([DateTime]::Now) - $lastCaptureRecover) -gt $captureRecoverGap) {
+            Write-Host "$(Get-Date) Capture outage: $($outage.Reason); asking the capture tab(s) to recover (reload on $captureUrl)." -ForegroundColor Yellow
+            if (Request-CaptureRecover 5000) { $lastCaptureRecover = Get-Date }
         }
     }
 

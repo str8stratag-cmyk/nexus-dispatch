@@ -11,9 +11,9 @@ import {
   writeLastForcedReload,
   isPermissionError,
 } from "@/lib/capture-supervisor";
-import { getCaptureLockState, subscribeCaptureLock } from "@/lib/capture-lock";
-import { requestLease, hookLeaseRelease, releaseLeaseNow, type LeaseState } from "@/lib/capture-lease";
-import { LEASE_RENEW_MS } from "@shared/capture-lease";
+import { getCaptureLockState, subscribeCaptureLock, releaseCaptureLock } from "@/lib/capture-lock";
+import { requestLease, hookLeaseRelease, releaseLeaseNow, TAB_ID, type LeaseState } from "@/lib/capture-lease";
+import { LEASE_RENEW_MS, decideTabAction, mayRunCapture, type TabSnapshot } from "@shared/capture-lease";
 import { useDispatchBuffer } from "@/hooks/use-dispatch-buffer";
 import { isTrueRepeat } from "@/lib/dispatch-buffer-core";
 import { useKeywords } from "@/hooks/use-keywords";
@@ -251,6 +251,9 @@ export default function AudioPanel({
   const getHealthRef = useRef(getHealth);
   getHealthRef.current = getHealth;
   const supRef = useRef({ failures: 0, nextAttemptAt: 0, attempting: false, recoveries: 0, unhealthySince: 0 });
+  // When this tab started holding the lock without capturing (0 = not idle).
+  const idleHolderSinceRef = useRef(0);
+  const micPermRef = useRef<TabSnapshot["micPermission"]>("unknown");
 
   const setAutoCapture = useCallback((on: boolean) => {
     writeAutoCapture(window.localStorage, on);
@@ -275,10 +278,41 @@ export default function AudioPanel({
       const tickGap = now - lastTickAt;
       lastTickAt = now;
       const health = getHealthRef.current();
-      // Another tab on this box (other origin) holds the capture lease: never
-      // run a second capture loop on the same audio.
+      const capturingNow = health.startedAt > 0;
+      if (lockStateRef.current === "held" && !capturingNow) {
+        if (!idleHolderSinceRef.current) idleHolderSinceRef.current = now;
+      } else {
+        idleHolderSinceRef.current = 0;
+      }
+      if (idleHolderSinceRef.current && navigator.permissions?.query) {
+        navigator.permissions
+          .query({ name: "microphone" as PermissionName })
+          .then((p) => { micPermRef.current = p.state; })
+          .catch(() => undefined);
+      }
+      // 2026-10-20 (DISP-1): an idle lock holder yields so the capturing tab
+      // can take over; a tab whose lease is held elsewhere stops capturing.
+      const action = decideTabAction({
+        lock: lockStateRef.current,
+        lease: leaseRef.current,
+        capturing: capturingNow,
+        autoCapture: autoCaptureRef.current,
+        micPermission: micPermRef.current,
+        idleHolderSince: idleHolderSinceRef.current,
+        now,
+      });
+      if (action === "yield") {
+        console.warn(`[capture-supervisor] tab ${TAB_ID} holds the capture lock but is not capturing; yielding lock + lease`);
+        idleHolderSinceRef.current = 0;
+        releaseLeaseNow();
+        setLeaseState("unknown");
+        releaseCaptureLock();
+        return;
+      }
+      // Another tab on this box holds the capture lease: never run a second
+      // capture loop on the same audio.
       if (leaseRef.current === "denied") {
-        if (health.startedAt > 0) {
+        if (action === "stop") {
           console.warn("[capture-supervisor] another tab holds the capture lease; stopping this tab's capture");
           stopRef.current();
         }
@@ -287,7 +321,7 @@ export default function AudioPanel({
         sup.unhealthySince = 0;
         return;
       }
-      if (!autoCaptureRef.current || lockStateRef.current !== "held" || !leaseCheckedRef.current) {
+      if (!autoCaptureRef.current || !mayRunCapture(lockStateRef.current, leaseRef.current, capturingNow) || !leaseCheckedRef.current) {
         sup.failures = 0;
         sup.recoveries = 0;
         sup.unhealthySince = 0;
@@ -333,6 +367,7 @@ export default function AudioPanel({
         let permState: PermissionState | "unknown" = "unknown";
         try {
           permState = (await navigator.permissions.query({ name: "microphone" as PermissionName })).state;
+          micPermRef.current = permState;
         } catch {
           // Permissions API unavailable: attempt the start anyway.
         }
@@ -369,7 +404,7 @@ export default function AudioPanel({
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [isInIframe, supported]);
+  }, [isInIframe, supported, setLeaseState]);
 
   // Lease renewal. Only a tab that wants to capture asks for the lease.
   useEffect(() => {
@@ -380,6 +415,13 @@ export default function AudioPanel({
       const capturingNow = getHealthRef.current().startedAt > 0;
       if (!autoCaptureRef.current && !capturingNow) {
         leaseCheckedRef.current = true;
+        return;
+      }
+      // A standby tab that is not capturing must not grab the lease: it can't
+      // start anyway (lock elsewhere) and would block the real capturer.
+      if (lockStateRef.current === "standby" && !capturingNow) {
+        leaseCheckedRef.current = true;
+        if (leaseRef.current !== "unknown") setLeaseState("unknown");
         return;
       }
       const next = await requestLease(capturingNow);
@@ -402,14 +444,26 @@ export default function AudioPanel({
   heartbeatSourceRef.current = sourceName || district;
   useEffect(() => {
     if (isInIframe) return;
+    let prev = { chunksRecorded: 0, chunksSent: 0, sendErrors: 0, droppedChunks: 0 };
     const beat = () => {
       const health = getHealthRef.current();
       const now = Date.now();
+      // Deltas since the previous beat: the server logs one summary line per tab per minute.
+      const minute = {
+        chunksRecorded: health.chunksRecorded - prev.chunksRecorded,
+        chunksSent: health.chunksSent - prev.chunksSent,
+        sendErrors: health.sendErrors - prev.sendErrors,
+        droppedChunks: health.droppedChunks - prev.droppedChunks,
+      };
+      prev = { chunksRecorded: health.chunksRecorded, chunksSent: health.chunksSent, sendErrors: health.sendErrors, droppedChunks: health.droppedChunks };
       void fetch("/api/capture/heartbeat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          tabId: TAB_ID,
+          origin: window.location.origin,
           source: heartbeatSourceRef.current,
+          minute,
           capturing: health.startedAt > 0,
           autoCapture: autoCaptureRef.current,
           lock: lockStateRef.current,
@@ -423,7 +477,18 @@ export default function AudioPanel({
             droppedChunks: health.droppedChunks,
           },
         }),
-      }).catch(() => undefined);
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((body: { recover?: string; url?: string } | null) => {
+          // Desk watchdog saw no audio chunks for minutes (2026-10-20): reload,
+          // or move to the canonical origin (http://localhost:5000).
+          if (!body?.recover) return;
+          console.warn(`[capture] watchdog requested recovery (${body.recover})`);
+          releaseLeaseNow();
+          if (body.recover === "navigate" && body.url) window.location.replace(body.url);
+          else window.location.reload();
+        })
+        .catch(() => undefined);
     };
     beat();
     const timer = window.setInterval(beat, 60_000);
