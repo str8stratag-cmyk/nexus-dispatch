@@ -34,6 +34,7 @@ import {
   type CaptureLease,
   type TabHeartbeat,
 } from "@shared/capture-lease";
+import { CAPTURE_RECOVER_TTL_MS, acceptRecoverRequest, shouldDeliverRecover } from "@shared/capture-recover";
 import {
   NEEDS_REVIEW_STATUS,
   REVIEW_DEDUP_WINDOW_MS,
@@ -71,9 +72,13 @@ const CAPTURE_CHUNK_STALE_MS = TAB_FRESH_MS;
 // Watchdog-requested recovery (POST /api/capture/recover): each tab is told
 // once, on its next heartbeat, to reload (or move to the canonical origin).
 const CAPTURE_CANONICAL_ORIGIN = "http://localhost:5000";
-const CAPTURE_RECOVER_TTL_MS = 5 * 60_000;
 let captureRecoverRequestedAt = 0;
 const captureRecoverTold = new Map<string, number>();
+/** First heartbeat per tab id: recover only reaches tabs that predate the request (shared/capture-recover.ts). */
+const captureTabFirstSeen = new Map<string, number>();
+// Last minute (any tab) that reported a level at all / a nonzero level.
+let captureLevelReportedAt: number | null = null;
+let captureNonzeroLevelAt: number | null = null;
 let lastCaptureHeartbeat: {
   at: number;
   tabId?: string | null;
@@ -984,7 +989,11 @@ export async function registerRoutes(
       lastSentAt: ago(beat.lastSentAgoMs),
       detail: beat,
     });
+    if (!captureTabFirstSeen.has(tabId)) captureTabFirstSeen.set(tabId, now);
     pruneTabs(captureTabs, now);
+    captureTabFirstSeen.forEach((_at, id) => {
+      if (!captureTabs.has(id)) captureTabFirstSeen.delete(id);
+    });
     // Per-minute capture summary (tabs beat every 60s) -> dispatch-monitor.log.
     const m = (b.minute ?? null) as Record<string, unknown> | null;
     if (m && typeof m === "object") {
@@ -994,6 +1003,10 @@ export async function registerRoutes(
       const levelAvg = lvl(m.levelAvg);
       const showsAudio = minuteShowsAudio({ chunksSent: n(m.chunksSent), chunksRecorded: n(m.chunksRecorded), levelPeak });
       if (showsAudio) captureLastActiveAt = now;
+      if (n(m.chunksRecorded) > 0 && levelPeak != null) {
+        captureLevelReportedAt = now;
+        if (levelPeak > 0) captureNonzeroLevelAt = now;
+      }
       captureLease = confirmLease(captureLease, tabId, showsAudio);
       console.log(
         `[capture] minute tab=${tabId} origin=${typeof b.origin === "string" ? b.origin.slice(0, 64) : "?"}` +
@@ -1004,7 +1017,15 @@ export async function registerRoutes(
           ` lastChunkAgoMs=${beat.lastChunkAgoMs ?? "null"} tabs=${captureTabs.size}`,
       );
     }
-    if (captureRecoverRequestedAt && now - captureRecoverRequestedAt < CAPTURE_RECOVER_TTL_MS && (captureRecoverTold.get(tabId) ?? 0) < captureRecoverRequestedAt) {
+    if (
+      shouldDeliverRecover({
+        requestedAt: captureRecoverRequestedAt,
+        ttlMs: CAPTURE_RECOVER_TTL_MS,
+        now,
+        tabFirstSeenAt: captureTabFirstSeen.get(tabId) ?? now,
+        toldAt: captureRecoverTold.get(tabId) ?? 0,
+      })
+    ) {
       captureRecoverTold.set(tabId, now);
       const origin = typeof b.origin === "string" ? b.origin : "";
       const action = origin && origin !== CAPTURE_CANONICAL_ORIGIN ? "navigate" : "reload";
@@ -1039,6 +1060,11 @@ export async function registerRoutes(
       leaseConfirmed: leaseHolder ? captureLease?.confirmed !== false : null,
       lastActiveAt: captureLastActiveAt,
       lastActiveAgoMs: captureLastActiveAt == null ? null : now - captureLastActiveAt,
+      // Level reporting (null = no tab has reported a level: pre-#55 bundle -> unknown, not silent).
+      levelReportedAgoMs: captureLevelReportedAt == null ? null : now - captureLevelReportedAt,
+      nonzeroLevelAgoMs: captureNonzeroLevelAt == null ? null : now - captureNonzeroLevelAt,
+      wantingTabs: Array.from(captureTabs.values()).filter((t) => now - t.at <= TAB_FRESH_MS && t.detail.autoCapture !== false).length,
+      recoverPending: captureRecoverRequestedAt > 0 && now - captureRecoverRequestedAt < CAPTURE_RECOVER_TTL_MS,
       // Per-desk effective state across all tabs (2026-10-20).
       capturing: desk.effectiveCapturing,
       effectiveCapturing: desk.effectiveCapturing,
@@ -1057,6 +1083,12 @@ export async function registerRoutes(
     const ip = req.socket.remoteAddress ?? "";
     if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(ip)) {
       res.status(403).json({ ok: false });
+      return;
+    }
+    const decision = acceptRecoverRequest({ lastAcceptedAt: captureRecoverRequestedAt, now: Date.now() });
+    if (!decision.accepted) {
+      console.log(`[capture] recover request ignored (${decision.reason}; last accepted ${Math.round((Date.now() - captureRecoverRequestedAt) / 1000)}s ago, live tabs: ${captureTabs.size})`);
+      res.status(429).json({ ok: false, reason: decision.reason, tabs: captureTabs.size });
       return;
     }
     captureRecoverRequestedAt = Date.now();

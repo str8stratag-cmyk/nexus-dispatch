@@ -468,6 +468,40 @@ $captureInactiveLimit = [TimeSpan]::FromMinutes($captureInactiveMin)
 # After a recover request, how long to wait for real audio before relaunching Chrome.
 $captureRecoverVerifyWait = [TimeSpan]::FromSeconds(120)
 $captureRecoverPendingSince = $null
+# Storm guards (2026-10-21, DISP-5): no recover/relaunch within 10 min of an app
+# restart or code pull, none while live tabs > 1 and growing, max 3 per hour.
+$recoverCooldown = [TimeSpan]::FromMinutes(10)
+$maxRecoversPerHour = 3
+$recentRecovers = New-Object System.Collections.ArrayList
+$lastCodeUpdate = [DateTime]::MinValue
+$prevLiveTabs = $null
+
+# Pure outage rule; mirror of classifyCaptureOutage() in shared/capture-recover.ts
+# (tested by trial/test-watchdog-outage.ps1). Outage only when chunks stopped,
+# or chunks flow with a REPORTED level of 0 (suspended audio). Level never
+# reported (pre-update bundle) = unknown -> not an outage while chunks flow.
+function Get-CaptureOutageDecision($status, [int]$wantingCount, [double]$limitMs) {
+    if ([double]$status.uptimeMs -lt $limitMs) { return @{ Outage = $false; Why = "app just started" } }
+    if ([int]$status.liveTabs -eq 0) { return @{ Outage = $false; Why = "no live tab" } }
+    if ($wantingCount -eq 0) { return @{ Outage = $false; Why = "operator stopped capture" } }
+    $ago = $status.lastChunkAgoMs
+    if ($null -eq $ago -or [double]$ago -gt $limitMs) { return @{ Outage = $true; Why = "chunks stopped" } }
+    $lvl = $status.levelReportedAgoMs
+    if ($null -eq $lvl -or [double]$lvl -gt $limitMs) { return @{ Outage = $false; Why = "chunks flowing, level unknown" } }
+    $nz = $status.nonzeroLevelAgoMs
+    if ($null -eq $nz -or [double]$nz -gt $limitMs) { return @{ Outage = $true; Why = "chunks flowing but level 0 (suspended audio)" } }
+    return @{ Outage = $false; Why = "chunks flowing with level" }
+}
+
+# Pure recover gate; mirror of mayRequestRecover() in shared/capture-recover.ts.
+function Test-RecoverAllowed([DateTime]$now, [DateTime]$lastAppRestart, [DateTime]$lastCodeUpdate, [int]$liveTabs, $prevLiveTabs, $recentRecovers, [TimeSpan]$cooldown, [int]$maxPerHour) {
+    if (($now - $lastAppRestart) -lt $cooldown) { return @{ Allow = $false; Why = "cooldown after app restart" } }
+    if (($now - $lastCodeUpdate) -lt $cooldown) { return @{ Allow = $false; Why = "cooldown after code pull" } }
+    if ($liveTabs -gt 1 -and $null -ne $prevLiveTabs -and $liveTabs -gt [int]$prevLiveTabs) { return @{ Allow = $false; Why = "live tabs growing" } }
+    $hour = @($recentRecovers | Where-Object { ($now - $_) -lt [TimeSpan]::FromHours(1) })
+    if ($hour.Count -ge $maxPerHour) { return @{ Allow = $false; Why = "hourly recover cap reached" } }
+    return @{ Allow = $true; Why = "" }
+}
 
 # Returns $null (healthy / unknown) or @{ Reason; LiveTabs }.
 function Get-CaptureOutage($port) {
@@ -485,17 +519,13 @@ function Get-CaptureOutage($port) {
     # Operator pressed Stop in every live tab: not an outage.
     $wanting = @($status.tabs | Where-Object { $_.agoMs -lt 150000 -and $_.autoCapture -ne $false })
     if ($wanting.Count -eq 0) { return $null }
-    # 2026-10-21: judge REAL activity (a minute with chunks sent to Whisper or
-    # a nonzero level) when the server reports it. Chunk counts alone include
-    # silent chunks, and a gesture-less tab with a suspended AudioContext
-    # records chunks while hearing nothing.
-    if ($null -ne $status.PSObject.Properties['lastActiveAgoMs']) {
-        $inactiveMs = $captureInactiveLimit.TotalMilliseconds
-        if ([double]$status.uptimeMs -lt $inactiveMs) { return $null }
-        $act = $status.lastActiveAgoMs
-        if ($null -ne $act -and [double]$act -le $inactiveMs) { return $null }
-        $actText = if ($null -eq $act) { "never since boot" } else { "$([int]([double]$act / 60000)) min ago" }
-        return @{ Reason = "no real audio (sent>0 or level>0) for $($captureInactiveLimit.TotalMinutes)+ min (last: $actText, live tabs: $live, capturing: $($status.capturingTabs), lease: $($status.leaseHolder) confirmed=$($status.leaseConfirmed))"; LiveTabs = $live }
+    # 2026-10-21 (DISP-5 storm): servers that report level fields use
+    # Get-CaptureOutageDecision -- missing level = unknown (chunk age decides),
+    # quiet radio (chunks flowing, sent=0) is NOT an outage.
+    if ($null -ne $status.PSObject.Properties['levelReportedAgoMs']) {
+        $d = Get-CaptureOutageDecision $status $wanting.Count $captureInactiveLimit.TotalMilliseconds
+        if (-not $d.Outage) { return $null }
+        return @{ Reason = "$($d.Why) (live tabs: $live, capturing: $($status.capturingTabs), last chunk: $($status.lastChunkAgoMs) ms ago)"; LiveTabs = $live }
     }
     $ago = $status.lastChunkAgoMs
     if ($null -ne $ago -and [double]$ago -le $limitMs) { return $null }
@@ -569,6 +599,13 @@ function Test-CaptureConfirmed($status) {
     if ($null -ne $status.PSObject.Properties['lastActiveAgoMs']) {
         if ($null -ne $status.lastActiveAgoMs -and [double]$status.lastActiveAgoMs -lt $captureFreshHeartbeat.TotalMilliseconds) { return $true }
         if ($status.leaseHolder -and $status.leaseConfirmed -eq $true) { return $true }
+        # Chunks flowing is capture too (quiet radio sends nothing; an old
+        # bundle reports no level) unless the level is reported and stuck at 0.
+        if ($status.leaseHolder -and $null -ne $status.lastChunkAgoMs -and [double]$status.lastChunkAgoMs -lt $captureFreshHeartbeat.TotalMilliseconds) {
+            $lvlKnown = $null -ne $status.levelReportedAgoMs -and [double]$status.levelReportedAgoMs -lt $captureFreshHeartbeat.TotalMilliseconds
+            $nzRecent = $null -ne $status.nonzeroLevelAgoMs -and [double]$status.nonzeroLevelAgoMs -lt $captureFreshHeartbeat.TotalMilliseconds
+            if (-not $lvlKnown -or $nzRecent) { return $true }
+        }
         return $false
     }
     if ($status.leaseHolder) { return $true }
@@ -703,6 +740,8 @@ if (-not $NoInitialStart) {
     # Services are already running (self-update path) -- stamp the timers so
     # the loop does not immediately restart Whisper for looking "overdue".
     $lastWhisperRestart = Get-Date
+    # Self-update follows a code pull: open pages may still run the old bundle.
+    $lastCodeUpdate = Get-Date
 }
 $dmLog = Join-Path $dispatchMonitor "logs\dispatch-monitor.log"
 
@@ -751,7 +790,17 @@ while ($true) {
     # Heartbeating tab(s) but no audio chunks: idle capture page (2026-10-20).
     if (-not $capturePending.Active) {
         $outage = Get-CaptureOutage 5000
-        if ($null -eq $outage) {
+        $gate = $null
+        if ($null -ne $outage) {
+            $gate = Test-RecoverAllowed ([DateTime]::Now) $lastAppRestart["Dispatch Monitor"] $lastCodeUpdate ([int]$outage.LiveTabs) $prevLiveTabs $recentRecovers $recoverCooldown $maxRecoversPerHour
+            $prevLiveTabs = [int]$outage.LiveTabs
+        } else {
+            $prevLiveTabs = $null
+        }
+        if ($null -ne $outage -and -not $gate.Allow) {
+            Write-Host "$(Get-Date) Capture outage ($($outage.Reason)) but not recovering: $($gate.Why)." -ForegroundColor DarkYellow
+            $captureRecoverPendingSince = $null
+        } elseif ($null -eq $outage) {
             $captureRecoverPendingSince = $null
         } elseif ($null -ne $captureRecoverPendingSince) {
             # Recover was requested and audio still isn't back: relaunch Chrome
@@ -767,7 +816,7 @@ while ($true) {
             }
         } elseif ((([DateTime]::Now) - $lastCaptureRecover) -gt $captureRecoverGap) {
             Write-Host "$(Get-Date) Capture outage: $($outage.Reason); asking the capture tab(s) to recover (reload on $captureUrl)." -ForegroundColor Yellow
-            if (Request-CaptureRecover 5000) { $lastCaptureRecover = Get-Date; $captureRecoverPendingSince = Get-Date }
+            if (Request-CaptureRecover 5000) { $lastCaptureRecover = Get-Date; $captureRecoverPendingSince = Get-Date; [void]$recentRecovers.Add((Get-Date)) }
         }
     }
 
@@ -789,6 +838,8 @@ while ($true) {
             Write-Host "$(Get-Date) npm install (dispatch-monitor)..." -ForegroundColor Cyan
             cmd /c "cd /d `"$dispatchMonitor`" && npm install" | Out-Null
             Restart-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
+            $lastCodeUpdate = Get-Date
+            $lastAppRestart["Dispatch Monitor"] = Get-Date
         }
 
         # Self-update: pulling a new watchdog.ps1 does NOT fix the running
