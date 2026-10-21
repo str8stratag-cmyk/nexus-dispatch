@@ -12,8 +12,8 @@
 //  1. Recover is delivered only to tabs first seen BEFORE the request, once each.
 //  2. The server accepts a recover request at most once per CAPTURE_RECOVER_MIN_GAP_MS,
 //     and never while one is still pending.
-//  3. Outage = chunks stopped, or chunks flowing with a REPORTED level of 0.
-//     A missing level is unknown (fall back to chunk age). Quiet radio
+//  3. Outage = chunks stopped. A missing or quiet (0) level is unknown, not an
+//     outage (superseded 2026-10-21: level 0 used to count). Quiet radio
 //     (chunks flowing, sent=0, level>0 or unknown) is NOT an outage.
 //  4. No recover within RECOVER_COOLDOWN_MS of an app restart / code pull, and
 //     never while live tabs > 1 and growing (that is a storm in progress).
@@ -71,9 +71,11 @@ export function classifyCaptureOutage(s: CaptureStatusLike, limitMs: number): Ou
   if (s.liveTabs === 0) return { outage: false, why: "no live tab (no-heartbeat check handles it)" };
   if (s.wantingTabs === 0) return { outage: false, why: "operator stopped capture" };
   if (s.lastChunkAgoMs == null || s.lastChunkAgoMs > limitMs) return { outage: true, why: "chunks stopped" };
+  // 2026-10-21 (fix 4): a missing OR quiet (0) level is unknown, never an
+  // outage by itself -- quiet radio legitimately reads 0. Chunks decide.
   const levelKnown = s.levelReportedAgoMs != null && s.levelReportedAgoMs <= limitMs;
   if (!levelKnown) return { outage: false, why: "chunks flowing, level unknown" };
-  if (s.nonzeroLevelAgoMs == null || s.nonzeroLevelAgoMs > limitMs) return { outage: true, why: "chunks flowing but level 0 (suspended audio)" };
+  if (s.nonzeroLevelAgoMs == null || s.nonzeroLevelAgoMs > limitMs) return { outage: false, why: "chunks flowing, level quiet (unknown)" };
   return { outage: false, why: "chunks flowing with level (quiet radio is fine)" };
 }
 

@@ -55,6 +55,9 @@ export function confirmLease(current: CaptureLease | null, tabId: string, showsA
   return { ...current, confirmed: true };
 }
 
+/** Holder with no heartbeat and no chunk for this long is dead (mirrors DEAD_HOLDER_MS in capture-recover-coordinator.ts). */
+export const DEAD_HOLDER_LEASE_MS = 5 * 60_000;
+
 export interface LeaseRequest {
   tabId: string;
   /** The tab is capturing right now (informational; logged by the server). */
@@ -77,6 +80,12 @@ export function decideLease(
   current: CaptureLease | null,
   req: LeaseRequest,
   now: number,
+  /**
+   * 2026-10-21 (DISP-5): last heartbeat-or-chunk time of the current holder
+   * (server clock). A holder silent for DEAD_HOLDER_LEASE_MS is dead even if
+   * something still renews its lease, so another tab may take it.
+   */
+  holderLastSignalAt?: number | null,
 ): LeaseDecision {
   const live = current && current.expiresAt > now ? current : null;
   const grant = (): LeaseDecision => {
@@ -101,6 +110,9 @@ export function decideLease(
   // 2026-10-20 (DISP-1): the holder stopped capturing while another tab is
   // capturing -- hand the lease to the tab that is actually recording.
   if (req.capturing && live.capturing === false && live.idleSince != null && now - live.idleSince >= LEASE_IDLE_GRACE_MS) {
+    return grant();
+  }
+  if (holderLastSignalAt != null && now - holderLastSignalAt >= DEAD_HOLDER_LEASE_MS && now - (live.grantedAt ?? 0) >= DEAD_HOLDER_LEASE_MS) {
     return grant();
   }
   if (live.confirmed === false && live.grantedAt != null) {

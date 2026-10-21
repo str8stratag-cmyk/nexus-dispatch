@@ -11,7 +11,7 @@ import {
   writeLastForcedReload,
   isPermissionError,
 } from "@/lib/capture-supervisor";
-import { getCaptureLockState, subscribeCaptureLock, releaseCaptureLock } from "@/lib/capture-lock";
+import { getCaptureLockState, subscribeCaptureLock, releaseCaptureLock, stealCaptureLock } from "@/lib/capture-lock";
 import { requestLease, hookLeaseRelease, releaseLeaseNow, TAB_ID, type LeaseState } from "@/lib/capture-lease";
 import { LEASE_RENEW_MS, decideTabAction, mayRunCapture, minuteLevel, type TabSnapshot } from "@shared/capture-lease";
 import { useDispatchBuffer } from "@/hooks/use-dispatch-buffer";
@@ -443,6 +443,7 @@ export default function AudioPanel({
   // NO heartbeat arrives at all (tab closed, crashed, or stuck blank). A page
   // that is alive but not capturing is the supervisor's job, not the watchdog's.
   const heartbeatSourceRef = useRef(sourceName || district);
+  const heartbeatNowRef = useRef<(() => void) | null>(null);
   heartbeatSourceRef.current = sourceName || district;
   useEffect(() => {
     if (isInIframe) return;
@@ -483,9 +484,12 @@ export default function AudioPanel({
         }),
       })
         .then((res) => (res.ok ? res.json() : null))
-        .then((body: { recover?: string; url?: string } | null) => {
+        .then((body: { recover?: string; url?: string; takeLock?: boolean } | null) => {
+          // 2026-10-21: server saw the lock holder dead (no beat/chunk 5+ min).
+          if (body?.takeLock) stealCaptureLock();
           // Desk watchdog saw no audio chunks for minutes (2026-10-20): reload,
-          // or move to the canonical origin (http://localhost:5000).
+          // or move to the canonical origin (http://localhost:5000). The server
+          // sends this to ONE tab, never while any tab is lock=pending.
           if (!body?.recover) return;
           console.warn(`[capture] watchdog requested recovery (${body.recover})`);
           releaseLeaseNow();
@@ -495,9 +499,19 @@ export default function AudioPanel({
         .catch(() => undefined);
     };
     beat();
+    heartbeatNowRef.current = beat;
     const timer = window.setInterval(beat, 60_000);
-    return () => window.clearInterval(timer);
+    return () => {
+      heartbeatNowRef.current = null;
+      window.clearInterval(timer);
+    };
   }, [isInIframe]);
+  // 2026-10-21: report lock changes at once (not up to 60 s later) so the
+  // watchdog's 90 s post-recover check sees a tab that took the lock.
+  useEffect(() => {
+    const t = window.setTimeout(() => heartbeatNowRef.current?.(), 1_000);
+    return () => window.clearTimeout(t);
+  }, [lockState]);
 
   const handleStart = async () => {
     setAutoCapture(true);

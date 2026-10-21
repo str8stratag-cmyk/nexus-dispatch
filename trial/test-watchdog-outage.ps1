@@ -24,7 +24,7 @@ Check "DISP-5 repro: quiet radio + old bundle not an outage" (Get-CaptureOutageD
 $b = $base.Clone(); $b.levelReportedAgoMs = 30000; $b.nonzeroLevelAgoMs = 30000
 Check "quiet radio with level not an outage" (Get-CaptureOutageDecision (S $b) 1 $lim).Outage $false
 $b = $base.Clone(); $b.levelReportedAgoMs = 30000
-Check "level reported but 0 = outage" (Get-CaptureOutageDecision (S $b) 1 $lim).Why "chunks flowing but level 0 (suspended audio)"
+Check "level reported but 0 = unknown, not outage" (Get-CaptureOutageDecision (S $b) 1 $lim).Outage $false
 $b = $base.Clone(); $b.lastChunkAgoMs = 400000
 Check "chunks stopped = outage" (Get-CaptureOutageDecision (S $b) 1 $lim).Why "chunks stopped"
 $b = $base.Clone(); $b.lastChunkAgoMs = $null
