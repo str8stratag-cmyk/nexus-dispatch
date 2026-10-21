@@ -11,7 +11,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { CheckCircle2, Radio, MapPin, Clock, Download, ShieldAlert } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { NEEDS_REVIEW_STATUS } from "@shared/review-event";
 import { useEventsStream } from "@/hooks/use-events-stream";
 
 interface DispatchEventRow {
@@ -154,18 +153,6 @@ export default function EventLog() {
     },
   });
 
-  const promoteMutation = useMutation({
-    mutationFn: async (id: number) => {
-      return apiRequest("PATCH", `/api/events/${id}/status`, { status: "active" });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/events"] });
-    },
-  });
-
-  // Keyword calls the address gate rejected (shared/review-event.ts): shown so
-  // a dispatcher can listen back, never auto-dispatched or sent to Telegram.
-  const reviewEvents = events.filter((e) => e.status === NEEDS_REVIEW_STATUS);
   const activeEvents = events.filter((e) => e.status === "active");
   const acceptedEvents = events.filter((e) => e.status === "accepted");
   const resolvedEvents = events.filter((e) => e.status === "resolved");
@@ -205,11 +192,6 @@ export default function EventLog() {
               <Badge variant="outline" className="text-xs text-emerald-600 border-emerald-600/30 bg-emerald-600/10">
                 {activeEvents.length} active
               </Badge>
-              {reviewEvents.length > 0 && (
-                <Badge variant="outline" className="text-xs text-amber-500 border-amber-500/30 bg-amber-500/10" data-testid="review-count">
-                  {reviewEvents.length} review
-                </Badge>
-              )}
               {acceptedEvents.length > 0 && (
                 <Badge variant="outline" className="text-xs text-red-600 border-red-600/30 bg-red-600/10">
                   {acceptedEvents.length} accepted
@@ -250,56 +232,6 @@ export default function EventLog() {
             No dispatch events yet
           </div>
         )}
-        {reviewEvents.map((event) => (
-          <div
-            key={event.id}
-            className="rounded-r-lg border border-l-[3px] border-amber-900/30 border-l-amber-500 bg-amber-950/10 p-3 space-y-2"
-            data-testid={`review-event-${event.id}`}
-          >
-            <div className="flex items-center justify-between">
-              <Badge variant="outline" className="text-[10px] text-amber-400 border-amber-500/50">
-                {event.signalType || "Unknown"} · needs review
-              </Badge>
-              <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
-                <Clock className="h-2.5 w-2.5" />
-                {new Date(event.createdAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}
-              </div>
-            </div>
-            <div className="text-[11px] font-semibold text-amber-400">
-              ⚠️ Unresolved address — not auto-dispatched. {event.description}
-            </div>
-            {event.transcript && (
-              <div className="line-clamp-3 border-l border-border/70 pl-2 text-[11px] leading-relaxed text-muted-foreground">
-                {event.transcript}
-              </div>
-            )}
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-mono text-muted-foreground">
-                {event.district} • {event.source}
-              </span>
-              <div className="flex items-center gap-1">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 px-2 text-[10px] text-amber-500"
-                  onClick={() => promoteMutation.mutate(event.id)}
-                  data-testid={`promote-event-${event.id}`}
-                >
-                  <ShieldAlert className="h-3 w-3 mr-1" /> Make active
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 px-2 text-[10px]"
-                  onClick={() => resolveMutation.mutate(event.id)}
-                  data-testid={`dismiss-event-${event.id}`}
-                >
-                  <CheckCircle2 className="h-3 w-3 mr-1" /> Dismiss
-                </Button>
-              </div>
-            </div>
-          </div>
-        ))}
         {activeEvents.map((event) => (
           <div
             key={event.id}
