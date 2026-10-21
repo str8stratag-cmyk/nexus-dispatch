@@ -21,12 +21,6 @@ export interface AudioCaptureHealth {
   chunksSent: number;
   /** Failed Whisper POSTs, since page load. */
   sendErrors: number;
-  /** Sum of per-chunk peak RMS (0..1) since page load; delta / chunk delta = average level. */
-  levelPeakSum: number;
-  /** Highest per-chunk peak RMS since the last takeLevelPeakMax() call. */
-  levelPeakMax: number;
-  /** AudioContext state ("running" | "suspended" | "closed" | "none"). A suspended context reads flat zero. */
-  audioContextState: string;
 }
 
 interface UseAudioCaptureReturn {
@@ -39,7 +33,6 @@ interface UseAudioCaptureReturn {
   refreshDevices: () => Promise<void>;
   /** Snapshot of pipeline progress for the capture supervisor (audio-panel). */
   getHealth: () => AudioCaptureHealth;
-  takeLevelPeakMax: () => number;
   supported: boolean;
 }
 
@@ -119,8 +112,6 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
   // Cumulative per-page counters for the per-minute capture summary log.
   const chunksRecordedRef = useRef(0);
   const chunksSentRef = useRef(0);
-  const levelPeakSumRef = useRef(0);
-  const levelPeakMaxRef = useRef(0);
   const sendErrorsRef = useRef(0);
   // Keywords and device are read through refs so transcribe/start keep a
   // stable identity. Before 2026-10-03 `keywords` was a fresh array on every
@@ -261,8 +252,6 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       const chunkEndedAt = Date.now();
       lastChunkAtRef.current = chunkEndedAt;
       chunksRecordedRef.current += 1;
-      levelPeakSumRef.current += peakRms;
-      if (peakRms > levelPeakMaxRef.current) levelPeakMaxRef.current = peakRms;
       // Gate on the chunk's PEAK sample, not the average (2026-09-30 call
       // review: a real Signal 4 was almost missed because a short, loud
       // transmission inside an otherwise-quiet 4s chunk got diluted below
@@ -433,13 +422,6 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
 
   const stop = useCallback(() => teardown(null), [teardown]);
 
-  /** Per-minute heartbeat: read and reset the running max chunk peak. */
-  const takeLevelPeakMax = useCallback((): number => {
-    const v = levelPeakMaxRef.current;
-    levelPeakMaxRef.current = 0;
-    return v;
-  }, []);
-
   const getHealth = useCallback((): AudioCaptureHealth => ({
     startedAt: startedAtRef.current,
     lastChunkAt: lastChunkAtRef.current,
@@ -448,14 +430,11 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
     chunksRecorded: chunksRecordedRef.current,
     chunksSent: chunksSentRef.current,
     sendErrors: sendErrorsRef.current,
-    levelPeakSum: levelPeakSumRef.current,
-    levelPeakMax: levelPeakMaxRef.current,
-    audioContextState: audioContextRef.current?.state ?? "none",
   }), []);
 
   // Unmount (and React Fast Refresh, which re-runs effects) releases the mic.
   // Capture coming back afterwards is the audio-panel supervisor's job.
   useEffect(() => stop, [stop]);
 
-  return { isCapturing, rms, error, devices, start, stop, refreshDevices, getHealth, takeLevelPeakMax, supported };
+  return { isCapturing, rms, error, devices, start, stop, refreshDevices, getHealth, supported };
 }
