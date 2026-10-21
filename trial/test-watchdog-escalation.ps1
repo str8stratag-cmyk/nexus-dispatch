@@ -68,6 +68,8 @@ function Reset-Sim() {
     $recentRecovers.Clear()
 }
 
+$script:notified = 0
+function Send-BrowserRestarted($port) { $script:notified++ }
 # Process mocks for the real Restart-CaptureBrowser.
 $script:procCalls = New-Object System.Collections.ArrayList
 $script:chromeRunning = $true
@@ -78,9 +80,9 @@ function Start-Browser($url) { [void]$script:procCalls.Add("Start-Browser $url")
 
 # Real Restart-CaptureBrowser against mocks: kill all chrome, relaunch ONE tab.
 Restart-CaptureBrowser "http://localhost:5000" *> $null
+Check "restart tells the server (browser-restarted) between kill and relaunch" $script:notified 1
 Check "restart kills every chrome process (force)" ($script:procCalls -join "|") "Stop-Process 1 force=True|Stop-Process 2 force=True|Start-Browser http://localhost:5000"
 
-function Send-BrowserRestarted($port) { }
 # Count restarts via a wrapper mock from here on.
 function Restart-CaptureBrowser($url) { $sim.Restarts++; $sim.Pending = 0; $sim.LockHeld = $script:restartHeals }
 

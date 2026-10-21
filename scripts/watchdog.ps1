@@ -453,26 +453,31 @@ function Get-RegistryKeyChain([string]$key) {
     for ($i = 1; $i -lt $parts.Count; $i++) { $acc = "$acc\$($parts[$i])"; $out += $acc }
     return $out
 }
+# Best effort only (2026-10-21 retest): HKCU\Software\Policies\Google needs
+# admin on the desks ("Access ... denied"), so this usually fails. Nothing
+# depends on it -- Chrome is launched with --autoplay-policy and the desks
+# granted mic on http://localhost:5000. One quiet line, once per run.
+$chromePolicyNoted = $false
 function Set-ChromeCapturePolicy() {
     if (-not $chromeCapturePolicy) { return }
     try {
         $base = "HKCU:\Software\Policies\Google\Chrome"
         foreach ($name in @("AudioCaptureAllowedUrls", "AutoplayAllowlist")) {
             $key = Join-Path $base $name
-            # 2026-10-21 (Disp-4): the registry provider does not create
-            # missing parents (PathNotFound on ...\Policies\Google\Chrome\
-            # AutoplayAllowlist): create each level first.
             foreach ($k in (Get-RegistryKeyChain $key)) {
                 if (-not (Test-Path $k)) { New-Item -Path $k -Force -ErrorAction Stop | Out-Null }
             }
             $i = 1
             foreach ($o in $captureOrigins) {
-                New-ItemProperty -Path $key -Name "$i" -Value $o -PropertyType String -Force | Out-Null
+                New-ItemProperty -Path $key -Name "$i" -Value $o -PropertyType String -Force -ErrorAction Stop | Out-Null
                 $i++
             }
         }
     } catch {
-        Write-Warning "$(Get-Date) Could not write Chrome capture policy: $_"
+        if (-not $script:chromePolicyNoted) {
+            $script:chromePolicyNoted = $true
+            Write-Host "$(Get-Date) Chrome capture policy not written (needs admin; optional, skipped)." -ForegroundColor DarkGray
+        }
     }
 }
 
@@ -509,6 +514,8 @@ function Restart-CaptureBrowser($url) {
     $left = @(Get-Process chrome -ErrorAction SilentlyContinue).Count
     if ($left) { Write-Warning "$(Get-Date) [capture-escalate] $left Chrome process(es) still running after 15s." }
     Start-Sleep -Seconds 2
+    # Clear the server's lease/tabs/recover BEFORE the new tab registers.
+    Send-BrowserRestarted 5000
     Write-Host "$(Get-Date) [capture-escalate] Relaunching Chrome with a single tab: $url" -ForegroundColor Yellow
     Start-Browser $url
 }
@@ -572,7 +579,7 @@ $recoverMinGap = [TimeSpan]::FromMinutes(30)
 $relaunchMinGap = [TimeSpan]::FromMinutes(30)
 $recoverVerifyWindow = [TimeSpan]::FromSeconds(90)
 $pendingEscalateAfter = [TimeSpan]::FromMinutes(5)
-$captureStep = @{ RecoverSentAt = $null; PendingSince = $null; ZeroTabsSince = $null }
+$captureStep = @{ RecoverSentAt = $null; PendingSince = $null; ZeroTabsSince = $null; NoChromeSince = $null }
 # 2026-10-21 (Disp-4 live test): with Chrome fully closed (0 live tabs) the
 # outage check returned "no live tab" and nothing happened for minutes. Now
 # 0 live tabs + no chunk for 90 s = launch Chrome directly (never a recover:
@@ -580,22 +587,47 @@ $captureStep = @{ RecoverSentAt = $null; PendingSince = $null; ZeroTabsSince = $
 # allowed, min $noChromeLaunchGap apart so a Chrome that will not start is not
 # spawned every loop); Chrome running with 0 live tabs -> clean restart, max
 # once per $relaunchMinGap.
-$zeroTabsEscalateAfter = [TimeSpan]::FromSeconds(90)
+# 2026-10-21 retest (Disp-4, Chrome closed 6:25:14, launch only 6:29:57, then
+# a needless reload 6:30:57): detection waited for tab staleness (150 s) on a
+# 60 s loop, then counted 90 s from first sight. Now (target: capture back
+# within 2 min of Chrome closing):
+#   - capture checks run every $captureCheckInterval (15 s), not once a minute;
+#   - Chrome not running (seen on 2 checks >= $noChromeConfirm apart) and no
+#     chunk for $noChromeChunkQuiet = launch at once;
+#   - Chrome running but 0 live tabs (tabs now report pagehide) and no chunk
+#     for $zeroTabsEscalateAfter (by chunk age, not time since first seen) =
+#     clean restart (max once per $relaunchMinGap);
+#   - our own launch/restart counts as the recover attempt: no reload for
+#     $launchGrace after it; then the normal 90 s verify / escalate applies.
+$captureCheckInterval = [TimeSpan]::FromSeconds(15)
+$zeroTabsEscalateAfter = [TimeSpan]::FromSeconds(45)
+$noChromeConfirm = [TimeSpan]::FromSeconds(10)
+$noChromeChunkQuiet = [TimeSpan]::FromSeconds(15)
 $noChromeLaunchGap = [TimeSpan]::FromMinutes(2)
+$launchGrace = [TimeSpan]::FromSeconds(90)
 $lastNoChromeLaunch = [DateTime]::MinValue
+$lastOwnLaunch = [DateTime]::MinValue
 function Test-ChromeRunning() { return [bool](Get-Process chrome -ErrorAction SilentlyContinue) }
 
-# Pure 0-live-tab decision. Returns @{ Action = none|wait|launch|restart|cooldown; Why }.
+# Pure 0-tab / no-Chrome decision. $s: Now, LiveTabs, ChromeRunning,
+# LastChunkAgoMs, NoChromeSince, LastOwnLaunch, LaunchGrace, NoChromeConfirm,
+# NoChromeChunkQuiet, ZeroTabsAfter, LastNoChromeLaunch, NoChromeGap,
+# LastRelaunch, RelaunchGap. Returns @{ Action = none|grace|wait|launch|restart|cooldown; Why }.
 function Get-ZeroTabStep($s) {
-    if ($null -eq $s.ZeroTabsSince) { return @{ Action = "none"; Why = "" } }
-    $for = $s.Now - $s.ZeroTabsSince
-    if ($for -lt $s.After) { return @{ Action = "wait"; Why = "0 live tabs for $([int]$for.TotalSeconds)s (escalating at $([int]$s.After.TotalSeconds)s)" } }
-    if (-not $s.ChromeRunning) {
-        if (($s.Now - $s.LastNoChromeLaunch) -lt $s.NoChromeGap) { return @{ Action = "wait"; Why = "Chrome launched $([int]($s.Now - $s.LastNoChromeLaunch).TotalSeconds)s ago, waiting for its tab" } }
-        return @{ Action = "launch"; Why = "0 live tabs and no chunk for $([int]$for.TotalSeconds)s, Chrome not running" }
+    $chunkAgo = if ($null -eq $s.LastChunkAgoMs) { [double]::PositiveInfinity } else { [double]$s.LastChunkAgoMs }
+    $chunkTxt = if ($null -eq $s.LastChunkAgoMs) { "never" } else { "$([int]($chunkAgo / 1000))s ago" }
+    $noChrome = (-not $s.ChromeRunning) -and $chunkAgo -ge $s.NoChromeChunkQuiet.TotalMilliseconds
+    $zeroTabs = $s.ChromeRunning -and [int]$s.LiveTabs -eq 0
+    if (-not $noChrome -and -not $zeroTabs) { return @{ Action = "none"; Why = "" } }
+    if (($s.Now - $s.LastOwnLaunch) -lt $s.LaunchGrace) { return @{ Action = "grace"; Why = "Chrome launched by the watchdog $([int]($s.Now - $s.LastOwnLaunch).TotalSeconds)s ago; waiting for its tab" } }
+    if ($noChrome) {
+        if ($null -eq $s.NoChromeSince -or ($s.Now - $s.NoChromeSince) -lt $s.NoChromeConfirm) { return @{ Action = "wait"; Why = "Chrome not running (last chunk: $chunkTxt); confirming on the next check" } }
+        if (($s.Now - $s.LastNoChromeLaunch) -lt $s.NoChromeGap) { return @{ Action = "wait"; Why = "Chrome launched $([int]($s.Now - $s.LastNoChromeLaunch).TotalSeconds)s ago and is not running" } }
+        return @{ Action = "launch"; Why = "Chrome not running, last chunk: $chunkTxt" }
     }
-    if (($s.Now - $s.LastRelaunch) -lt $s.RelaunchGap) { return @{ Action = "cooldown"; Why = "0 live tabs for $([int]$for.TotalSeconds)s, Chrome running, but restarted $([int]($s.Now - $s.LastRelaunch).TotalMinutes) min ago (max once per $([int]$s.RelaunchGap.TotalMinutes) min)" } }
-    return @{ Action = "restart"; Why = "0 live tabs and no chunk for $([int]$for.TotalSeconds)s while Chrome is running" }
+    if ($chunkAgo -lt $s.ZeroTabsAfter.TotalMilliseconds) { return @{ Action = "wait"; Why = "0 live tabs, last chunk $chunkTxt (escalating at $([int]$s.ZeroTabsAfter.TotalSeconds)s)" } }
+    if (($s.Now - $s.LastRelaunch) -lt $s.RelaunchGap) { return @{ Action = "cooldown"; Why = "0 live tabs (last chunk: $chunkTxt), Chrome running, but restarted $([int]($s.Now - $s.LastRelaunch).TotalMinutes) min ago (max once per $([int]$s.RelaunchGap.TotalMinutes) min)" } }
+    return @{ Action = "restart"; Why = "0 live tabs while Chrome is running, last chunk: $chunkTxt" }
 }
 
 # Pure decision (tested by trial/test-watchdog-outage.ps1). $s: Now, Outage
@@ -613,6 +645,8 @@ function Get-CaptureRecoveryStep($s) {
         return @{ Action = "escalate"; Why = "no tab capturing with the lock held $([int]$waited.TotalSeconds)s after recover" }
     }
     if (-not $s.Outage) { return @{ Action = "none"; Why = "" } }
+    # Never reload a tab the watchdog itself just launched.
+    if ($null -ne $s.LastOwnLaunch -and $null -ne $s.LaunchGrace -and ($s.Now - $s.LastOwnLaunch) -lt $s.LaunchGrace) { return @{ Action = "launch-grace"; Why = "Chrome launched by the watchdog $([int]($s.Now - $s.LastOwnLaunch).TotalSeconds)s ago; not reloading it" } }
     if ($s.PendingTabs -gt 0) {
         if ($null -ne $s.PendingSince -and ($s.Now - $s.PendingSince) -ge $s.PendingEscalateAfter) {
             if (($s.Now - $s.LastRelaunch) -lt $s.RelaunchGap) { return @{ Action = "escalate-cooldown"; Why = "$($s.PendingTabs) tab(s) lock=pending for $([int]($s.Now - $s.PendingSince).TotalMinutes)+ min, but Chrome was restarted $([int]($s.Now - $s.LastRelaunch).TotalMinutes) min ago" } }
@@ -648,46 +682,51 @@ function Save-CaptureState($file, [DateTime]$lastRecover, [DateTime]$lastRelaunc
 # Restart-CaptureBrowser so the test can mock them.
 function Invoke-CaptureRecoveryStep([DateTime]$now) {
     $status = Get-CaptureStatusRaw 5000
-    # ---- 0 live tabs: launch Chrome directly (no recover) ----
-    $zero = $false
-    if ($null -ne $status -and $null -ne $status.PSObject.Properties['liveTabs'] -and [int]$status.liveTabs -eq 0) {
-        $chunkAgo = $status.lastChunkAgoMs
-        $zero = ($null -eq $chunkAgo -or [double]$chunkAgo -gt $zeroTabsEscalateAfter.TotalMilliseconds)
-    }
-    if ($zero) {
-        if ($null -eq $captureStep.ZeroTabsSince) {
-            $captureStep.ZeroTabsSince = $now
-            Write-Host "$(Get-Date) [capture-escalate] 0 live capture tabs (last chunk: $(if ($null -eq $status.lastChunkAgoMs) { 'never' } else { "$([int]([double]$status.lastChunkAgoMs / 1000))s ago" })); launching Chrome if still none in $([int]$zeroTabsEscalateAfter.TotalSeconds)s." -ForegroundColor Yellow
-        }
-        $captureStep.RecoverSentAt = $null
-        $captureStep.PendingSince = $null
-        $z = Get-ZeroTabStep @{ Now = $now; ZeroTabsSince = $captureStep.ZeroTabsSince; After = $zeroTabsEscalateAfter; ChromeRunning = (Test-ChromeRunning)
-            LastNoChromeLaunch = $script:lastNoChromeLaunch; NoChromeGap = $noChromeLaunchGap; LastRelaunch = $script:lastCaptureRelaunch; RelaunchGap = $relaunchMinGap }
-        switch ($z.Action) {
-            "launch" {
-                Write-Host "$(Get-Date) [capture-escalate] $($z.Why); launching a single tab $captureUrl." -ForegroundColor Yellow
-                Start-Browser $captureUrl
-                $script:lastNoChromeLaunch = $now
-                $script:lastCaptureReopen = $now
+    # ---- Chrome gone / 0 live tabs: launch or restart Chrome directly (no recover) ----
+    if ($null -ne $status -and $null -ne $status.PSObject.Properties['liveTabs']) {
+        $chrome = Test-ChromeRunning
+        if ($chrome) { $captureStep.NoChromeSince = $null } elseif ($null -eq $captureStep.NoChromeSince) { $captureStep.NoChromeSince = $now }
+        $z = Get-ZeroTabStep @{ Now = $now; LiveTabs = [int]$status.liveTabs; ChromeRunning = $chrome; LastChunkAgoMs = $status.lastChunkAgoMs
+            NoChromeSince = $captureStep.NoChromeSince; LastOwnLaunch = $script:lastOwnLaunch; LaunchGrace = $launchGrace; NoChromeConfirm = $noChromeConfirm
+            NoChromeChunkQuiet = $noChromeChunkQuiet; ZeroTabsAfter = $zeroTabsEscalateAfter; LastNoChromeLaunch = $script:lastNoChromeLaunch; NoChromeGap = $noChromeLaunchGap
+            LastRelaunch = $script:lastCaptureRelaunch; RelaunchGap = $relaunchMinGap }
+        if ($z.Action -ne "none") {
+            if ($null -eq $captureStep.ZeroTabsSince) {
+                $captureStep.ZeroTabsSince = $now
+                Write-Host "$(Get-Date) [capture-escalate] No capture tab: $($z.Why) (live tabs: $($status.liveTabs), Chrome running: $chrome)." -ForegroundColor Yellow
             }
-            "restart" {
-                Write-Host "$(Get-Date) [capture-escalate] $($z.Why); clean Chrome restart." -ForegroundColor Yellow
-                if ($captureRelaunchChrome) {
-                    Restart-CaptureBrowser $captureUrl
+            $captureStep.PendingSince = $null
+            switch ($z.Action) {
+                "launch" {
+                    Write-Host "$(Get-Date) [capture-escalate] $($z.Why); launching a single tab $captureUrl." -ForegroundColor Yellow
                     Send-BrowserRestarted 5000
-                    $script:lastCaptureRelaunch = $now
+                    Start-Browser $captureUrl
+                    $script:lastNoChromeLaunch = $now
+                    $script:lastOwnLaunch = $now
                     $script:lastCaptureReopen = $now
-                    Save-CaptureState $captureStateFile $script:lastCaptureRecover $script:lastCaptureRelaunch
-                } else { Write-Host "$(Get-Date) [capture-escalate] CAPTURE_RELAUNCH_CHROME=off; not restarting Chrome." -ForegroundColor DarkYellow }
+                    $captureStep.RecoverSentAt = $now   # our launch is the recover attempt: verify, don't reload
+                }
+                "restart" {
+                    Write-Host "$(Get-Date) [capture-escalate] $($z.Why); clean Chrome restart." -ForegroundColor Yellow
+                    if ($captureRelaunchChrome) {
+                        Restart-CaptureBrowser $captureUrl
+                        $script:lastCaptureRelaunch = $now
+                        $script:lastOwnLaunch = $now
+                        $script:lastCaptureReopen = $now
+                        $captureStep.RecoverSentAt = $now
+                        Save-CaptureState $captureStateFile $script:lastCaptureRecover $script:lastCaptureRelaunch
+                    } else { Write-Host "$(Get-Date) [capture-escalate] CAPTURE_RELAUNCH_CHROME=off; not restarting Chrome." -ForegroundColor DarkYellow }
+                }
+                "cooldown" { Write-Host "$(Get-Date) [capture-escalate] Not restarting Chrome: $($z.Why)." -ForegroundColor DarkYellow }
+                "grace" { }
+                default { }
             }
-            "cooldown" { Write-Host "$(Get-Date) [capture-escalate] Not restarting Chrome: $($z.Why)." -ForegroundColor DarkYellow }
-            default { }
+            $script:prevLiveTabs = 0
+            return @{ Action = "zero-tabs-$($z.Action)"; Why = $z.Why }
+        } elseif ($null -ne $captureStep.ZeroTabsSince) {
+            Write-Host "$(Get-Date) [capture-recover] Capture tab(s) back: $($status.liveTabs) live." -ForegroundColor Green
+            $captureStep.ZeroTabsSince = $null
         }
-        $script:prevLiveTabs = 0
-        return @{ Action = "zero-tabs-$($z.Action)"; Why = $z.Why }
-    } elseif ($null -ne $captureStep.ZeroTabsSince) {
-        Write-Host "$(Get-Date) [capture-recover] Capture tab(s) back: $(if ($null -ne $status) { $status.liveTabs } else { '?' }) live." -ForegroundColor Green
-        $captureStep.ZeroTabsSince = $null
     }
     $outage = Get-CaptureOutage 5000
     $pendingTabs = 0
@@ -700,6 +739,7 @@ function Invoke-CaptureRecoveryStep([DateTime]$now) {
     $step = Get-CaptureRecoveryStep @{
         Now = $now; Outage = ($null -ne $outage); PendingTabs = $pendingTabs; LockHeldCapturing = $lockHeld
         RecoverSentAt = $captureStep.RecoverSentAt; PendingSince = $captureStep.PendingSince
+        LastOwnLaunch = $script:lastOwnLaunch; LaunchGrace = $launchGrace
         LastRecover = $script:lastCaptureRecover; LastRelaunch = $script:lastCaptureRelaunch
         RecoverGap = $recoverMinGap; RelaunchGap = $relaunchMinGap; VerifyWindow = $recoverVerifyWindow; PendingEscalateAfter = $pendingEscalateAfter
     }
@@ -721,8 +761,8 @@ function Invoke-CaptureRecoveryStep([DateTime]$now) {
             Write-Host "$(Get-Date) [capture-escalate] Escalating to a clean Chrome restart: $($step.Why) (outage: $reason)." -ForegroundColor Yellow
             if ($captureRelaunchChrome) {
                 Restart-CaptureBrowser $captureUrl
-                Send-BrowserRestarted 5000
                 $script:lastCaptureRelaunch = $now
+                $script:lastOwnLaunch = $now
                 $script:lastCaptureReopen = $now
                 Save-CaptureState $captureStateFile $script:lastCaptureRecover $script:lastCaptureRelaunch
             } else {
@@ -834,10 +874,15 @@ function Request-CaptureRecover($port) {
 # After killing Chrome: tell the server every tab is gone so the stale lease /
 # tabs / outstanding recover clear at once (Disp-4: the lease took ~3 min).
 function Send-BrowserRestarted($port) {
+    Write-Host "$(Get-Date) [capture-escalate] POST /api/capture/browser-restarted (clear lease/tabs/recover)..." -ForegroundColor Cyan
     try {
-        $r = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/capture/browser-restarted" -Method POST -TimeoutSec 10 -UseBasicParsing
-        Write-Host "$(Get-Date) [capture-escalate] Server cleared lease/tabs/recover after Chrome restart (tabs dropped: $($r.tabsCleared))." -ForegroundColor Cyan
-    } catch { Write-Warning "$(Get-Date) [capture-escalate] Could not tell the server Chrome restarted (old server?): $_" }
+        $r = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/capture/browser-restarted" -Method POST -ContentType "application/json" -Body "{}" -TimeoutSec 10 -UseBasicParsing
+        Write-Host "$(Get-Date) [capture-escalate] Server cleared lease/tabs/recover (tabs dropped: $($r.tabsCleared), lease: $(if ($r.leaseCleared) { $r.leaseCleared } else { 'none' }))." -ForegroundColor Cyan
+        return $true
+    } catch {
+        Write-Warning "$(Get-Date) [capture-escalate] browser-restarted POST failed (old server?): $_"
+        return $false
+    }
 }
 
 function Get-CaptureStatusRaw($port) {
@@ -1065,7 +1110,16 @@ Write-Host "Watchdog running. Whisper restart every $($whisperRestartInterval.To
 $whisperFailStreak = 0
 
 while ($true) {
-    Start-Sleep -Seconds $healthCheckInterval.TotalSeconds
+    # Capture checks every $captureCheckInterval while waiting for the next
+    # full health check (2026-10-21: 60 s loop made Chrome-closed detection slow).
+    $nextFull = ([DateTime]::Now) + $healthCheckInterval
+    while (([DateTime]::Now) -lt $nextFull) {
+        $left = ($nextFull - ([DateTime]::Now)).TotalSeconds
+        Start-Sleep -Seconds ([Math]::Max(1, [Math]::Min($captureCheckInterval.TotalSeconds, [Math]::Ceiling($left))))
+        if (-not $capturePending.Active) {
+            try { [void](Invoke-CaptureRecoveryStep ([DateTime]::Now)) } catch { Write-Warning "$(Get-Date) Capture check failed (continuing): $_" }
+        }
+    }
     # 2026-10-21: one failing step must never stop the loop.
     try {
 
@@ -1101,9 +1155,7 @@ while ($true) {
     }
 
     # Heartbeating tab(s) but no audio chunks: idle capture page (2026-10-20).
-    if (-not $capturePending.Active) {
-        [void](Invoke-CaptureRecoveryStep ([DateTime]::Now))
-    }
+    # (Capture recovery runs every $captureCheckInterval in the wait loop above.)
 
     # Pull git updates periodically. Not while the boot capture page is still
     # pending (at most ~15 min): a pull can restart the app or hand off to a

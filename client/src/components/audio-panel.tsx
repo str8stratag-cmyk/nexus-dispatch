@@ -501,9 +501,31 @@ export default function AudioPanel({
     beat();
     heartbeatNowRef.current = beat;
     const timer = window.setInterval(beat, 60_000);
+    // 2026-10-21 retest: report "capturing" as soon as it starts (the
+    // watchdog verifies a launch within 90 s), and tell the server when this
+    // tab goes away so "0 live tabs" is seen in seconds, not 150 s.
+    let reportedCapturing = getHealthRef.current().startedAt > 0;
+    const capWatch = window.setInterval(() => {
+      const c = getHealthRef.current().startedAt > 0;
+      if (c !== reportedCapturing) {
+        reportedCapturing = c;
+        beat();
+      }
+    }, 3_000);
+    const onHide = (e: PageTransitionEvent) => {
+      if (e.persisted) return; // bfcache, page may come back
+      try {
+        navigator.sendBeacon("/api/capture/tab-closed", new Blob([JSON.stringify({ tabId: TAB_ID, lastChunkAgoMs: (() => { const h = getHealthRef.current(); return h.lastChunkAt ? Date.now() - h.lastChunkAt : null; })() })], { type: "text/plain" }));
+      } catch {
+        // best effort
+      }
+    };
+    window.addEventListener("pagehide", onHide);
     return () => {
       heartbeatNowRef.current = null;
       window.clearInterval(timer);
+      window.clearInterval(capWatch);
+      window.removeEventListener("pagehide", onHide);
     };
   }, [isInIframe]);
   // 2026-10-21: report lock changes at once (not up to 60 s later) so the

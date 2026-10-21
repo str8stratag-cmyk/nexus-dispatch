@@ -1130,11 +1130,40 @@ export async function registerRoutes(
     res.json({ ok: true, targetTabId: result.targetTabId, tabs: captureTabs.size });
   });
 
+  // 2026-10-21 retest: a closing tab (pagehide beacon) stops counting as live
+  // at once instead of after TAB_FRESH_MS (150 s), so the watchdog sees
+  // "0 live tabs" within one check. Its lastChunkAt is kept: a plain reload
+  // (close + new tab within seconds) must not look like "no chunk ever".
+  app.post("/api/capture/tab-closed", express.text({ type: "*/*" }), (req, res) => {
+    let tabId = "";
+    let chunkAgo: number | null = null;
+    try {
+      const raw = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+      tabId = typeof raw?.tabId === "string" ? raw.tabId.slice(0, 64) : "";
+      chunkAgo = typeof raw?.lastChunkAgoMs === "number" && Number.isFinite(raw.lastChunkAgoMs) && raw.lastChunkAgoMs >= 0 ? raw.lastChunkAgoMs : null;
+    } catch {
+      // ignore malformed beacon
+    }
+    const t = tabId ? captureTabs.get(tabId) : undefined;
+    if (t) {
+      if (chunkAgo != null) {
+        const at = Date.now() - chunkAgo;
+        if (t.lastChunkAt == null || at > t.lastChunkAt) t.lastChunkAt = at;
+      }
+      t.at = Date.now() - TAB_FRESH_MS - 1;
+      if (t.lock === "held") t.lock = "closed";
+      captureLease = releaseLease(captureLease, tabId);
+      console.log(`[capture] tab closed tab=${tabId} (live tabs now: ${Array.from(captureTabs.values()).filter((x) => Date.now() - x.at <= TAB_FRESH_MS).length})`);
+    }
+    res.json({ ok: true });
+  });
+
   // 2026-10-21 (Disp-4): the watchdog killed Chrome, so every tab is gone.
   // Clear the lease, tab table and any outstanding recover at once instead of
   // waiting ~3 min for the lease TTL / tab freshness to run out. Loopback only.
   app.post("/api/capture/browser-restarted", (req, res) => {
     const ip = req.socket.remoteAddress ?? "";
+    console.log(`[capture] browser-restarted request from ${ip || "?"}`);
     if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(ip)) {
       res.status(403).json({ ok: false });
       return;
