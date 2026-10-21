@@ -13,7 +13,7 @@ import {
 } from "@/lib/capture-supervisor";
 import { getCaptureLockState, subscribeCaptureLock, releaseCaptureLock } from "@/lib/capture-lock";
 import { requestLease, hookLeaseRelease, releaseLeaseNow, TAB_ID, type LeaseState } from "@/lib/capture-lease";
-import { LEASE_RENEW_MS, decideTabAction, mayRunCapture, type TabSnapshot } from "@shared/capture-lease";
+import { LEASE_RENEW_MS, decideTabAction, mayRunCapture, minuteLevel, type TabSnapshot } from "@shared/capture-lease";
 import { useDispatchBuffer } from "@/hooks/use-dispatch-buffer";
 import { isTrueRepeat } from "@/lib/dispatch-buffer-core";
 import { useKeywords } from "@/hooks/use-keywords";
@@ -183,7 +183,7 @@ export default function AudioPanel({
 
   const isInIframe = typeof window !== "undefined" && window.self !== window.top;
 
-  const { isCapturing, rms, error, devices, start, stop, getHealth, supported } = useAudioCapture({
+  const { isCapturing, rms, error, devices, start, stop, getHealth, takeLevelPeakMax, supported } = useAudioCapture({
     deviceId: selectedDevice || undefined,
     keywords: keywordList.map((keyword) => keyword.pattern),
     onTranscript: handleTranscript,
@@ -250,6 +250,8 @@ export default function AudioPanel({
   stopRef.current = stop;
   const getHealthRef = useRef(getHealth);
   getHealthRef.current = getHealth;
+  const takeLevelPeakMaxRef = useRef(takeLevelPeakMax);
+  takeLevelPeakMaxRef.current = takeLevelPeakMax;
   const supRef = useRef({ failures: 0, nextAttemptAt: 0, attempting: false, recoveries: 0, unhealthySince: 0 });
   // When this tab started holding the lock without capturing (0 = not idle).
   const idleHolderSinceRef = useRef(0);
@@ -444,7 +446,7 @@ export default function AudioPanel({
   heartbeatSourceRef.current = sourceName || district;
   useEffect(() => {
     if (isInIframe) return;
-    let prev = { chunksRecorded: 0, chunksSent: 0, sendErrors: 0, droppedChunks: 0 };
+    let prev = { chunksRecorded: 0, chunksSent: 0, sendErrors: 0, droppedChunks: 0, levelPeakSum: 0 };
     const beat = () => {
       const health = getHealthRef.current();
       const now = Date.now();
@@ -454,8 +456,10 @@ export default function AudioPanel({
         chunksSent: health.chunksSent - prev.chunksSent,
         sendErrors: health.sendErrors - prev.sendErrors,
         droppedChunks: health.droppedChunks - prev.droppedChunks,
+        ...minuteLevel(health.chunksRecorded - prev.chunksRecorded, health.levelPeakSum - prev.levelPeakSum, takeLevelPeakMaxRef.current()),
+        audioContextState: health.audioContextState,
       };
-      prev = { chunksRecorded: health.chunksRecorded, chunksSent: health.chunksSent, sendErrors: health.sendErrors, droppedChunks: health.droppedChunks };
+      prev = { chunksRecorded: health.chunksRecorded, chunksSent: health.chunksSent, sendErrors: health.sendErrors, droppedChunks: health.droppedChunks, levelPeakSum: health.levelPeakSum };
       void fetch("/api/capture/heartbeat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
