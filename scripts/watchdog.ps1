@@ -354,11 +354,11 @@ function Start-App($title, $directory, $port, $command, $log) {
 # 2026-10-21: a tab opened by the watchdog has no user gesture, so Chrome may
 # keep its AudioContext suspended / block getUserMedia until someone clicks
 # Start (DISP-1 after the 11:40 restart). Watchdog Chrome launches now pass
-# --autoplay-policy=no-user-gesture-required and --use-fake-ui-for-media-stream
-# (auto-accepts the mic prompt). Flags only apply when this launch starts the
+# --autoplay-policy=no-user-gesture-required; mic access comes from the
+# per-site HKCU policy below (capture origins only, no all-sites flag). Flags only apply when this launch starts the
 # Chrome process; if Chrome is already running the URL opens in it and the
 # flags are ignored, which is why the HKCU policy below is also written.
-$chromeCaptureFlags = @("--autoplay-policy=no-user-gesture-required", "--use-fake-ui-for-media-stream")
+$chromeCaptureFlags = @("--autoplay-policy=no-user-gesture-required")
 $captureOrigins = @("http://localhost:5000", "http://127.0.0.1:5000")
 
 function Get-ChromePath() {
