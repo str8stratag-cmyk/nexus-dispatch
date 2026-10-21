@@ -120,9 +120,37 @@ export class RecoverCoordinator {
     return { accepted: true, targetTabId: target.tabId };
   }
 
+  /** A recover is outstanding (accepted, target chosen, not yet resolved). */
+  outstanding(now: number): boolean {
+    const s = this.state;
+    return !!s.targetTabId && !!s.lastAcceptedAt && now - s.lastAcceptedAt < RECOVER_DELIVERY_TTL_MS;
+  }
+
+  /**
+   * Drop any outstanding recover (target + delivery). The 30-min gap
+   * (lastAcceptedAt) is kept. 2026-10-21: on 298a259 DISP-5's storm only
+   * ended when the :5000 app was killed; now it ends as soon as a tab captures
+   * with the lock held, or the watchdog restarts Chrome.
+   */
+  clearOutstanding(reason: string): boolean {
+    if (!this.state.targetTabId) return false;
+    this.log(`[capture] recover cleared (${reason}); target was tab=${this.state.targetTabId}${this.state.deliveredAt ? " (delivered)" : " (not delivered)"}`);
+    this.state = { ...this.state, targetTabId: null, deliveredAt: 0 };
+    this.store.save(this.state);
+    return true;
+  }
+
+  /** Browser was restarted by the watchdog: forget lock takeover + outstanding recover. */
+  onBrowserRestarted(): void {
+    this.lockTakeover = null;
+    this.clearOutstanding("watchdog restarted Chrome");
+  }
+
   /** Called on every heartbeat (tabs already updated with this beat). */
   onHeartbeat(tabId: string, tabs: Iterable<CoordTab>, now: number): HeartbeatReply {
     const all = Array.from(tabs);
+    const capturer = all.find((t) => isCapturingWithLock(t, now));
+    if (capturer && this.state.targetTabId) this.clearOutstanding(`tab=${capturer.tabId} is capturing with the lock held`);
     const me = all.find((t) => t.tabId === tabId);
     const reply: HeartbeatReply = {};
     const s = this.state;
@@ -173,6 +201,7 @@ export class RecoverCoordinator {
         nextAllowedInMs: s.lastAcceptedAt ? Math.max(0, RECOVER_MIN_GAP_MS - (now - s.lastAcceptedAt)) : 0,
         targetTabId: s.targetTabId,
         delivered: s.deliveredAt > 0,
+        outstanding: this.outstanding(now),
       },
     };
   }

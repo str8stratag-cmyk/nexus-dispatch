@@ -1130,6 +1130,25 @@ export async function registerRoutes(
     res.json({ ok: true, targetTabId: result.targetTabId, tabs: captureTabs.size });
   });
 
+  // 2026-10-21 (Disp-4): the watchdog killed Chrome, so every tab is gone.
+  // Clear the lease, tab table and any outstanding recover at once instead of
+  // waiting ~3 min for the lease TTL / tab freshness to run out. Loopback only.
+  app.post("/api/capture/browser-restarted", (req, res) => {
+    const ip = req.socket.remoteAddress ?? "";
+    if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(ip)) {
+      res.status(403).json({ ok: false });
+      return;
+    }
+    const tabsCleared = captureTabs.size;
+    const hadLease = captureLease?.tabId ?? null;
+    captureLease = null;
+    captureTabs.clear();
+    captureTabFirstSeen.clear();
+    recoverCoordinator.onBrowserRestarted();
+    console.log(`[capture] browser restarted by watchdog: cleared lease (${hadLease ?? "none"}) and ${tabsCleared} tab(s)`);
+    res.json({ ok: true, tabsCleared, leaseCleared: hadLease });
+  });
+
   // One capturing tab per box, across origins (shared/capture-lease.ts).
   app.post("/api/capture/lease", (req, res) => {
     const b = (req.body ?? {}) as Record<string, unknown>;

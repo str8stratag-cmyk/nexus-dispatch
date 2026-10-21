@@ -254,32 +254,103 @@ function Restart-Whisper() {
     $script:lastWhisperRestart = Get-Date
 }
 
+# 2026-10-21 (Disp-4 live test, 5:38 PM): the loop went silent right after
+# "Pull of origin/release failed (local changes?)" on a detached HEAD and never
+# ran another capture check. Every git/npm call used to run with no timeout in
+# the loop's own thread, so a git that waits for credentials / network / a
+# lock blocked the watchdog forever. Now every external call goes through
+# Invoke-External (hard timeout, process tree killed, no prompts), and
+# Pull-Repo never touches a detached HEAD or a checkout of another branch.
+$gitTimeoutSec = 60
+$gitPullTimeoutSec = 120
+$npmTimeoutSec = 600
+function Invoke-External([string]$file, [string[]]$argList, [int]$timeoutSec, [string]$workDir = $null) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $file
+    $psi.Arguments = (@($argList) | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join ' '
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $true
+    $psi.CreateNoWindow = $true
+    if ($workDir) { $psi.WorkingDirectory = $workDir }
+    # Never wait on a prompt nobody can see (hidden watchdog window).
+    $psi.EnvironmentVariables["GIT_TERMINAL_PROMPT"] = "0"
+    $psi.EnvironmentVariables["GCM_INTERACTIVE"] = "never"
+    $psi.EnvironmentVariables["GIT_ASKPASS"] = ""
+    $psi.EnvironmentVariables["SSH_ASKPASS"] = ""
+    $psi.EnvironmentVariables["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=15"
+    $psi.EnvironmentVariables["GIT_EDITOR"] = "true"
+    try {
+        $p = [System.Diagnostics.Process]::Start($psi)
+    } catch {
+        return @{ ExitCode = -1; TimedOut = $false; Out = ""; Err = "$_" }
+    }
+    try { $p.StandardInput.Close() } catch { }
+    $outTask = $p.StandardOutput.ReadToEndAsync()
+    $errTask = $p.StandardError.ReadToEndAsync()
+    if (-not $p.WaitForExit([Math]::Max(1, $timeoutSec) * 1000)) {
+        Write-Warning "$(Get-Date) TIMEOUT after ${timeoutSec}s: $file $($psi.Arguments); killing it."
+        if ($env:OS -eq "Windows_NT") { & taskkill.exe /PID $p.Id /T /F 2>&1 | Out-Null }
+        try { if (-not $p.HasExited) { $p.Kill() } } catch { }
+        return @{ ExitCode = -1; TimedOut = $true; Out = ""; Err = "timeout" }
+    }
+    $p.WaitForExit()
+    $out = ""; $err = ""
+    if ($outTask.Wait(5000)) { $out = $outTask.Result }
+    if ($errTask.Wait(5000)) { $err = $errTask.Result }
+    return @{ ExitCode = $p.ExitCode; TimedOut = $false; Out = "$out".Trim(); Err = "$err".Trim() }
+}
+function Invoke-Git($path, [string[]]$gitArgs, [int]$timeoutSec = $gitTimeoutSec) {
+    return Invoke-External "git" (@("-C", $path, "-c", "credential.interactive=never") + $gitArgs) $timeoutSec
+}
+function Invoke-NpmInstall($path) {
+    Write-Host "$(Get-Date) npm install ($path, timeout ${npmTimeoutSec}s)..." -ForegroundColor Cyan
+    $file = if ($env:OS -eq "Windows_NT") { "cmd.exe" } else { "sh" }
+    $a = if ($env:OS -eq "Windows_NT") { @("/c", "npm install --no-audit --no-fund") } else { @("-c", "npm install --no-audit --no-fund") }
+    $r = Invoke-External $file $a $npmTimeoutSec $path
+    if ($r.ExitCode -ne 0) { Write-Warning "$(Get-Date) npm install failed in $path (exit $($r.ExitCode)$(if ($r.TimedOut) { ', timed out' }))." }
+    return ($r.ExitCode -eq 0)
+}
+
 function Pull-Repo($path, $branch) {
     if (-not (Test-Path (Join-Path $path ".git"))) { return $false }
+    # Detached HEAD = a pinned checkout (e.g. a one-desk PR test): never pull.
+    $cur = Invoke-Git $path @("symbolic-ref", "--short", "-q", "HEAD")
+    if ($cur.TimedOut) { Write-Warning "$(Get-Date) git timed out reading HEAD for $path; skipping pull."; return $false }
+    if ($cur.ExitCode -ne 0 -or -not $cur.Out) {
+        $sha = (Invoke-Git $path @("rev-parse", "--short", "HEAD")).Out
+        Write-Host "$(Get-Date) $path is on a detached HEAD ($sha); skipping pull of origin/$branch (pinned checkout)." -ForegroundColor DarkYellow
+        return $false
+    }
+    if ($cur.Out -ne $branch) {
+        Write-Host "$(Get-Date) $path is on branch '$($cur.Out)', not '$branch'; skipping pull." -ForegroundColor DarkYellow
+        return $false
+    }
     Write-Host "$(Get-Date) Pulling origin/$branch for $path..." -ForegroundColor Cyan
     # Missing branch = do nothing. Never fall back to another branch: that
     # fallback is exactly how unreviewed code would reach the fleet.
-    git -C $path ls-remote --exit-code --heads origin $branch 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "$(Get-Date) origin/$branch not found for $path; skipping pull."
+    $ls = Invoke-Git $path @("ls-remote", "--exit-code", "--heads", "origin", $branch)
+    if ($ls.ExitCode -ne 0) {
+        Write-Warning "$(Get-Date) origin/$branch not reachable/found for $path$(if ($ls.TimedOut) { ' (timed out)' }); skipping pull."
         return $false
     }
-    $before = git -C $path rev-parse HEAD
-    git -C $path pull --no-edit origin $branch 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        # Conflict with local box edits: leave the tree exactly as it was.
-        Write-Warning "$(Get-Date) Pull of origin/$branch failed for $path (local changes?); left unchanged."
-        git -C $path merge --abort 2>&1 | Out-Null
+    $before = (Invoke-Git $path @("rev-parse", "HEAD")).Out
+    $pull = Invoke-Git $path @("pull", "--ff-only", "--no-edit", "origin", $branch) $gitPullTimeoutSec
+    if ($pull.ExitCode -ne 0) {
+        # Conflict with local box edits / diverged / timeout: leave the tree as it was.
+        Write-Warning "$(Get-Date) Pull of origin/$branch failed for $path$(if ($pull.TimedOut) { ' (timed out)' } else { ' (local changes or diverged?)' }); left unchanged."
+        [void](Invoke-Git $path @("merge", "--abort"))
         return $false
     }
-    $after = git -C $path rev-parse HEAD
+    $after = (Invoke-Git $path @("rev-parse", "HEAD")).Out
     if ($before -ne $after) {
         Write-Host "$(Get-Date) Updated $path" -ForegroundColor Green
         # A dependency change without an install leaves the app unable to boot.
-        $pkgChanged = git -C $path diff --name-only $before $after | Select-String -Quiet "^package(-lock)?\.json$"
-        if ($pkgChanged) {
+        $diff = Invoke-Git $path @("diff", "--name-only", $before, $after)
+        if ($diff.Out -match "(?m)^package(-lock)?\.json$") {
             Write-Host "$(Get-Date) package.json changed in $path - running npm install..." -ForegroundColor Cyan
-            npm --prefix $path install --no-audit --no-fund
+            [void](Invoke-NpmInstall $path)
         }
         return $true
     }
@@ -375,13 +446,25 @@ function Get-ChromePath() {
 # Per-user Chrome policy (no admin): allow mic capture and autoplay on the two
 # capture origins without a prompt or gesture. Chrome re-reads policy while
 # running (or chrome://policy -> Reload). Idempotent; CHROME_CAPTURE_POLICY=off skips.
+# "HKCU:\A\B\C" -> "HKCU:\A", "HKCU:\A\B", "HKCU:\A\B\C" (parents first).
+function Get-RegistryKeyChain([string]$key) {
+    $parts = @($key -split '\\' | Where-Object { $_ })
+    $out = @(); $acc = $parts[0]
+    for ($i = 1; $i -lt $parts.Count; $i++) { $acc = "$acc\$($parts[$i])"; $out += $acc }
+    return $out
+}
 function Set-ChromeCapturePolicy() {
     if (-not $chromeCapturePolicy) { return }
     try {
         $base = "HKCU:\Software\Policies\Google\Chrome"
         foreach ($name in @("AudioCaptureAllowedUrls", "AutoplayAllowlist")) {
             $key = Join-Path $base $name
-            New-Item -Path $key -Force | Out-Null
+            # 2026-10-21 (Disp-4): the registry provider does not create
+            # missing parents (PathNotFound on ...\Policies\Google\Chrome\
+            # AutoplayAllowlist): create each level first.
+            foreach ($k in (Get-RegistryKeyChain $key)) {
+                if (-not (Test-Path $k)) { New-Item -Path $k -Force -ErrorAction Stop | Out-Null }
+            }
             $i = 1
             foreach ($o in $captureOrigins) {
                 New-ItemProperty -Path $key -Name "$i" -Value $o -PropertyType String -Force | Out-Null
@@ -489,7 +572,31 @@ $recoverMinGap = [TimeSpan]::FromMinutes(30)
 $relaunchMinGap = [TimeSpan]::FromMinutes(30)
 $recoverVerifyWindow = [TimeSpan]::FromSeconds(90)
 $pendingEscalateAfter = [TimeSpan]::FromMinutes(5)
-$captureStep = @{ RecoverSentAt = $null; PendingSince = $null }
+$captureStep = @{ RecoverSentAt = $null; PendingSince = $null; ZeroTabsSince = $null }
+# 2026-10-21 (Disp-4 live test): with Chrome fully closed (0 live tabs) the
+# outage check returned "no live tab" and nothing happened for minutes. Now
+# 0 live tabs + no chunk for 90 s = launch Chrome directly (never a recover:
+# there is no tab to deliver it to). No Chrome running -> just launch (always
+# allowed, min $noChromeLaunchGap apart so a Chrome that will not start is not
+# spawned every loop); Chrome running with 0 live tabs -> clean restart, max
+# once per $relaunchMinGap.
+$zeroTabsEscalateAfter = [TimeSpan]::FromSeconds(90)
+$noChromeLaunchGap = [TimeSpan]::FromMinutes(2)
+$lastNoChromeLaunch = [DateTime]::MinValue
+function Test-ChromeRunning() { return [bool](Get-Process chrome -ErrorAction SilentlyContinue) }
+
+# Pure 0-live-tab decision. Returns @{ Action = none|wait|launch|restart|cooldown; Why }.
+function Get-ZeroTabStep($s) {
+    if ($null -eq $s.ZeroTabsSince) { return @{ Action = "none"; Why = "" } }
+    $for = $s.Now - $s.ZeroTabsSince
+    if ($for -lt $s.After) { return @{ Action = "wait"; Why = "0 live tabs for $([int]$for.TotalSeconds)s (escalating at $([int]$s.After.TotalSeconds)s)" } }
+    if (-not $s.ChromeRunning) {
+        if (($s.Now - $s.LastNoChromeLaunch) -lt $s.NoChromeGap) { return @{ Action = "wait"; Why = "Chrome launched $([int]($s.Now - $s.LastNoChromeLaunch).TotalSeconds)s ago, waiting for its tab" } }
+        return @{ Action = "launch"; Why = "0 live tabs and no chunk for $([int]$for.TotalSeconds)s, Chrome not running" }
+    }
+    if (($s.Now - $s.LastRelaunch) -lt $s.RelaunchGap) { return @{ Action = "cooldown"; Why = "0 live tabs for $([int]$for.TotalSeconds)s, Chrome running, but restarted $([int]($s.Now - $s.LastRelaunch).TotalMinutes) min ago (max once per $([int]$s.RelaunchGap.TotalMinutes) min)" } }
+    return @{ Action = "restart"; Why = "0 live tabs and no chunk for $([int]$for.TotalSeconds)s while Chrome is running" }
+}
 
 # Pure decision (tested by trial/test-watchdog-outage.ps1). $s: Now, Outage
 # (bool), PendingTabs, LockHeldCapturing (int, -1 = server too old to say),
@@ -540,8 +647,49 @@ function Save-CaptureState($file, [DateTime]$lastRecover, [DateTime]$lastRelaunc
 # Process/HTTP calls go through Get-CaptureStatusRaw / Request-CaptureRecover /
 # Restart-CaptureBrowser so the test can mock them.
 function Invoke-CaptureRecoveryStep([DateTime]$now) {
-    $outage = Get-CaptureOutage 5000
     $status = Get-CaptureStatusRaw 5000
+    # ---- 0 live tabs: launch Chrome directly (no recover) ----
+    $zero = $false
+    if ($null -ne $status -and $null -ne $status.PSObject.Properties['liveTabs'] -and [int]$status.liveTabs -eq 0) {
+        $chunkAgo = $status.lastChunkAgoMs
+        $zero = ($null -eq $chunkAgo -or [double]$chunkAgo -gt $zeroTabsEscalateAfter.TotalMilliseconds)
+    }
+    if ($zero) {
+        if ($null -eq $captureStep.ZeroTabsSince) {
+            $captureStep.ZeroTabsSince = $now
+            Write-Host "$(Get-Date) [capture-escalate] 0 live capture tabs (last chunk: $(if ($null -eq $status.lastChunkAgoMs) { 'never' } else { "$([int]([double]$status.lastChunkAgoMs / 1000))s ago" })); launching Chrome if still none in $([int]$zeroTabsEscalateAfter.TotalSeconds)s." -ForegroundColor Yellow
+        }
+        $captureStep.RecoverSentAt = $null
+        $captureStep.PendingSince = $null
+        $z = Get-ZeroTabStep @{ Now = $now; ZeroTabsSince = $captureStep.ZeroTabsSince; After = $zeroTabsEscalateAfter; ChromeRunning = (Test-ChromeRunning)
+            LastNoChromeLaunch = $script:lastNoChromeLaunch; NoChromeGap = $noChromeLaunchGap; LastRelaunch = $script:lastCaptureRelaunch; RelaunchGap = $relaunchMinGap }
+        switch ($z.Action) {
+            "launch" {
+                Write-Host "$(Get-Date) [capture-escalate] $($z.Why); launching a single tab $captureUrl." -ForegroundColor Yellow
+                Start-Browser $captureUrl
+                $script:lastNoChromeLaunch = $now
+                $script:lastCaptureReopen = $now
+            }
+            "restart" {
+                Write-Host "$(Get-Date) [capture-escalate] $($z.Why); clean Chrome restart." -ForegroundColor Yellow
+                if ($captureRelaunchChrome) {
+                    Restart-CaptureBrowser $captureUrl
+                    Send-BrowserRestarted 5000
+                    $script:lastCaptureRelaunch = $now
+                    $script:lastCaptureReopen = $now
+                    Save-CaptureState $captureStateFile $script:lastCaptureRecover $script:lastCaptureRelaunch
+                } else { Write-Host "$(Get-Date) [capture-escalate] CAPTURE_RELAUNCH_CHROME=off; not restarting Chrome." -ForegroundColor DarkYellow }
+            }
+            "cooldown" { Write-Host "$(Get-Date) [capture-escalate] Not restarting Chrome: $($z.Why)." -ForegroundColor DarkYellow }
+            default { }
+        }
+        $script:prevLiveTabs = 0
+        return @{ Action = "zero-tabs-$($z.Action)"; Why = $z.Why }
+    } elseif ($null -ne $captureStep.ZeroTabsSince) {
+        Write-Host "$(Get-Date) [capture-recover] Capture tab(s) back: $(if ($null -ne $status) { $status.liveTabs } else { '?' }) live." -ForegroundColor Green
+        $captureStep.ZeroTabsSince = $null
+    }
+    $outage = Get-CaptureOutage 5000
     $pendingTabs = 0
     $lockHeld = -1
     if ($null -ne $status) {
@@ -573,6 +721,7 @@ function Invoke-CaptureRecoveryStep([DateTime]$now) {
             Write-Host "$(Get-Date) [capture-escalate] Escalating to a clean Chrome restart: $($step.Why) (outage: $reason)." -ForegroundColor Yellow
             if ($captureRelaunchChrome) {
                 Restart-CaptureBrowser $captureUrl
+                Send-BrowserRestarted 5000
                 $script:lastCaptureRelaunch = $now
                 $script:lastCaptureReopen = $now
                 Save-CaptureState $captureStateFile $script:lastCaptureRecover $script:lastCaptureRelaunch
@@ -680,6 +829,15 @@ function Request-CaptureRecover($port) {
         Write-Warning "$(Get-Date) Capture recover request: $reason"
         return @{ Accepted = $false; Target = $null; Reason = $reason }
     }
+}
+
+# After killing Chrome: tell the server every tab is gone so the stale lease /
+# tabs / outstanding recover clear at once (Disp-4: the lease took ~3 min).
+function Send-BrowserRestarted($port) {
+    try {
+        $r = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/capture/browser-restarted" -Method POST -TimeoutSec 10 -UseBasicParsing
+        Write-Host "$(Get-Date) [capture-escalate] Server cleared lease/tabs/recover after Chrome restart (tabs dropped: $($r.tabsCleared))." -ForegroundColor Cyan
+    } catch { Write-Warning "$(Get-Date) [capture-escalate] Could not tell the server Chrome restarted (old server?): $_" }
 }
 
 function Get-CaptureStatusRaw($port) {
@@ -908,6 +1066,8 @@ $whisperFailStreak = 0
 
 while ($true) {
     Start-Sleep -Seconds $healthCheckInterval.TotalSeconds
+    # 2026-10-21: one failing step must never stop the loop.
+    try {
 
     $now = Get-Date
 
@@ -949,6 +1109,8 @@ while ($true) {
     # pending (at most ~15 min): a pull can restart the app or hand off to a
     # new watchdog instance (-NoInitialStart), which would drop that state.
     if (-not $capturePending.Active -and ($now - $lastGitPull) -gt $gitPullInterval) {
+        # Stamp first: a failed/timed-out pull waits for the next interval.
+        $lastGitPull = $now
         $dmUpdated = Pull-Repo $dispatchMonitor $deployBranch
         # nexus-dispatch is dormant on the fleet (never started), so it keeps
         # tracking main; switch it to $deployBranch before re-enabling it.
@@ -960,8 +1122,7 @@ while ($true) {
             # missing-dependency crash (e.g. express-rate-limit) on
             # post-pull restarts. Pull-Repo only installs when package.json
             # changed; this catches everything else.
-            Write-Host "$(Get-Date) npm install (dispatch-monitor)..." -ForegroundColor Cyan
-            cmd /c "cd /d `"$dispatchMonitor`" && npm install" | Out-Null
+            [void](Invoke-NpmInstall $dispatchMonitor)
             Restart-App "Dispatch Monitor" $dispatchMonitor 5000 "npm run dev" $dmLog
             $lastCodeUpdate = Get-Date
             $lastAppRestart["Dispatch Monitor"] = Get-Date
@@ -989,5 +1150,8 @@ while ($true) {
         }
 
         $lastGitPull = $now
+    }
+    } catch {
+        Write-Warning "$(Get-Date) Watchdog loop step failed (continuing): $_"
     }
 }

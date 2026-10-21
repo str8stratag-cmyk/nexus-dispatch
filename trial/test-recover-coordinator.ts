@@ -118,6 +118,26 @@ const T = 1_800_000_000_000;
   check("lease: unknown holder signal keeps old behaviour", decideLease(lease, { tabId: "P1", capturing: false }, T).granted, false);
 }
 
+// 4b. Outstanding recover is cleared once a tab captures with the lock held, and on browser restart.
+{
+  const c = new RecoverCoordinator(memoryStore(), quiet);
+  const A: CoordTab = { tabId: "A", at: T, firstSeenAt: T - 600_000, lock: "held", capturing: false, lastChunkAt: null };
+  c.request([A], T);
+  check("clear: outstanding after accept", c.status([A], T).recover.outstanding, true);
+  const N: CoordTab = { tabId: "N", at: T + 30_000, firstSeenAt: T + 25_000, lock: "held", capturing: true, lastChunkAt: T + 29_000 };
+  check("clear: capturing lock holder -> no delivery to anyone", c.onHeartbeat("A", [A, N], T + 30_000).recover, undefined);
+  check("clear: recover cleared", c.status([A, N], T + 30_000).recover.outstanding, false);
+  check("clear: 30-min gap still enforced", (c.request([{ ...A, at: T + 60_000 }], T + 60_000) as { reason?: string }).reason, "cooldown");
+  // Old 298a259 storm shape: many new tab ids heartbeating while recover outstanding -> none told.
+  const c2 = new RecoverCoordinator(memoryStore(), quiet);
+  c2.request([A], T);
+  let told = 0;
+  for (let i = 0; i < 50; i++) if (c2.onHeartbeat(`X${i}`, [A, { tabId: `X${i}`, at: T + i * 1000, firstSeenAt: T + i * 1000, lock: "standby", capturing: false, lastChunkAt: null }], T + i * 1000).recover) told++;
+  check("storm shape: 50 new tab ids, zero re-deliveries", told, 0);
+  c2.onBrowserRestarted();
+  check("browser restart clears outstanding recover", c2.status([], T + 60_000).recover.outstanding, false);
+}
+
 // 5. Quiet / missing level is unknown, not an outage.
 {
   const base = { uptimeMs: 3600_000, liveTabs: 1, wantingTabs: 1, lastChunkAgoMs: 4_000 };
