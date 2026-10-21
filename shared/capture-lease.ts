@@ -21,6 +21,38 @@ export interface CaptureLease {
   capturing?: boolean;
   /** When the holder started reporting "not capturing" (null while capturing). */
   idleSince?: number | null;
+  /**
+   * 2026-10-21 (Disp-1, 11:35-11:40 restarts): the server keeps the lease in
+   * memory, so after each restart the first tab to ask got it, even a leftover
+   * pre-restart page that never captured again ("lease -> mvi5iqqg" at every
+   * boot), and the watchdog treated "lease held" as capture confirmed. Leases
+   * granted since boot (or on handover) start unconfirmed and are confirmed by
+   * a heartbeat from the holder that shows real audio (chunks sent or a nonzero
+   * level). An unconfirmed lease can be taken by another tab after
+   * UNCONFIRMED_LEASE_GRACE_MS if the holder is not capturing, or after
+   * UNCONFIRMED_CAPTURING_GRACE_MS (3 heartbeats with no audio) if it claims to
+   * be capturing. Absent (older leases) = confirmed.
+   */
+  confirmed?: boolean;
+  grantedAt?: number;
+}
+
+/** Unconfirmed, NOT-capturing holder: another tab may take the lease after this. */
+export const UNCONFIRMED_LEASE_GRACE_MS = 45_000;
+/** Unconfirmed holder that claims to capture but showed no audio in ~3 heartbeats (they beat every 60 s). */
+export const UNCONFIRMED_CAPTURING_GRACE_MS = 200_000;
+
+/** A heartbeat minute shows real capture: chunks actually sent to Whisper, or a nonzero audio level. */
+export function minuteShowsAudio(m: { chunksSent?: number; chunksRecorded?: number; levelPeak?: number | null } | null | undefined): boolean {
+  if (!m) return false;
+  if ((m.chunksSent ?? 0) > 0) return true;
+  return (m.chunksRecorded ?? 0) > 0 && typeof m.levelPeak === "number" && m.levelPeak > 0;
+}
+
+/** Confirm the lease if the heartbeat comes from the holder and shows real audio. */
+export function confirmLease(current: CaptureLease | null, tabId: string, showsAudio: boolean): CaptureLease | null {
+  if (!current || current.tabId !== tabId || !showsAudio || current.confirmed !== false) return current;
+  return { ...current, confirmed: true };
 }
 
 export interface LeaseRequest {
@@ -48,13 +80,17 @@ export function decideLease(
 ): LeaseDecision {
   const live = current && current.expiresAt > now ? current : null;
   const grant = (): LeaseDecision => {
-    const keepIdle = live && live.tabId === req.tabId && live.idleSince != null ? live.idleSince : now;
+    const same = live && live.tabId === req.tabId;
+    const keepIdle = same && live.idleSince != null ? live.idleSince : now;
     return {
       lease: {
         tabId: req.tabId,
         expiresAt: now + LEASE_TTL_MS,
         capturing: req.capturing,
         idleSince: req.capturing ? null : keepIdle,
+        // Renewal keeps the holder's confirmation; a new holder starts unconfirmed.
+        confirmed: same ? live.confirmed : false,
+        grantedAt: same && live.grantedAt != null ? live.grantedAt : now,
       },
       granted: true,
     };
@@ -66,6 +102,11 @@ export function decideLease(
   // capturing -- hand the lease to the tab that is actually recording.
   if (req.capturing && live.capturing === false && live.idleSince != null && now - live.idleSince >= LEASE_IDLE_GRACE_MS) {
     return grant();
+  }
+  if (live.confirmed === false && live.grantedAt != null) {
+    const unconfirmedFor = now - live.grantedAt;
+    const grace = live.capturing === false ? UNCONFIRMED_LEASE_GRACE_MS : UNCONFIRMED_CAPTURING_GRACE_MS;
+    if (unconfirmedFor >= grace) return grant();
   }
   return { lease: live, granted: false };
 }
@@ -181,4 +222,16 @@ export function summarizeDesk(tabs: Iterable<TabHeartbeat>, now: number, chunkSt
     lastSentAt,
     lastSentAgoMs: lastSentAt == null ? null : now - lastSentAt,
   };
+}
+
+/**
+ * Per-minute audio level for the heartbeat / "[capture] minute" log line
+ * (2026-10-21). levelAvg = mean of per-chunk peak RMS over the minute's
+ * chunks; levelPeak = loudest chunk peak. A suspended AudioContext (no user
+ * gesture) records chunks but reads exactly 0 here, which chunks>0 alone hides.
+ */
+export function minuteLevel(chunks: number, peakSumDelta: number, peakMax: number): { levelAvg: number | null; levelPeak: number | null } {
+  if (!(chunks > 0)) return { levelAvg: null, levelPeak: null };
+  const r = (v: number) => Math.round(Math.max(0, Math.min(1, v)) * 10_000) / 10_000;
+  return { levelAvg: r(peakSumDelta / chunks), levelPeak: r(peakMax) };
 }

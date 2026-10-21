@@ -13,6 +13,9 @@ param([switch]$NoInitialStart)
 #   DEPLOY_BRANCH=release                                  (default: release)
 #   APP_BOOT_WAIT_SEC=300                                  (default: 300; see boot grace below)
 #   CAPTURE_NO_CHUNK_MIN=5                                 (default: 5; see capture outage below)
+#   CAPTURE_INACTIVE_MIN=5     no REAL audio (sent>0 or level>0) this long = outage (default: CAPTURE_NO_CHUNK_MIN)
+#   CAPTURE_RELAUNCH_CHROME=on recover didn't help: close Chrome and reopen ONE capture tab (on|off, default on)
+#   CHROME_CAPTURE_POLICY=on   write HKCU Chrome policy allowing mic/autoplay on the capture origins (on|off, default on)
 $dispatchMonitor = Split-Path -Parent $PSScriptRoot
 $whisperRoot = $dispatchMonitor
 $nexusDispatch = Join-Path (Split-Path -Parent $dispatchMonitor) "nexus-dispatch"
@@ -22,10 +25,13 @@ $nexusDispatch = Join-Path (Split-Path -Parent $dispatchMonitor) "nexus-dispatch
 $deployBranch = "release"
 $appBootWaitSec = 300
 $captureNoChunkMin = 5
+$captureInactiveMin = 0
+$captureRelaunchChrome = $true
+$chromeCapturePolicy = $true
 $watchdogLocal = Join-Path $dispatchMonitor "watchdog.local"
 if (Test-Path $watchdogLocal) {
     foreach ($line in Get-Content $watchdogLocal) {
-        if ($line -match '^\s*(WHISPER_ROOT|NEXUS_DISPATCH|DEPLOY_BRANCH|APP_BOOT_WAIT_SEC|CAPTURE_NO_CHUNK_MIN)\s*=\s*(.+?)\s*$') {
+        if ($line -match '^\s*(WHISPER_ROOT|NEXUS_DISPATCH|DEPLOY_BRANCH|APP_BOOT_WAIT_SEC|CAPTURE_NO_CHUNK_MIN|CAPTURE_INACTIVE_MIN|CAPTURE_RELAUNCH_CHROME|CHROME_CAPTURE_POLICY)\s*=\s*(.+?)\s*$') {
             switch ($Matches[1]) {
                 "WHISPER_ROOT" { $whisperRoot = $Matches[2] }
                 "NEXUS_DISPATCH" { $nexusDispatch = $Matches[2] }
@@ -39,6 +45,12 @@ if (Test-Path $watchdogLocal) {
                     $parsedMin = 0
                     if ([int]::TryParse($Matches[2], [ref]$parsedMin) -and $parsedMin -ge 2) { $captureNoChunkMin = $parsedMin }
                 }
+                "CAPTURE_INACTIVE_MIN" {
+                    $parsedMin = 0
+                    if ([int]::TryParse($Matches[2], [ref]$parsedMin) -and $parsedMin -ge 2) { $captureInactiveMin = $parsedMin }
+                }
+                "CAPTURE_RELAUNCH_CHROME" { $captureRelaunchChrome = ($Matches[2] -notmatch '^(off|0|false|no)$') }
+                "CHROME_CAPTURE_POLICY" { $chromeCapturePolicy = ($Matches[2] -notmatch '^(off|0|false|no)$') }
             }
         }
     }
@@ -47,6 +59,7 @@ if (Test-Path $watchdogLocal) {
 $whisperRestartInterval = [TimeSpan]::FromHours(4)
 $gitPullInterval = [TimeSpan]::FromHours(4)
 $healthCheckInterval = [TimeSpan]::FromMinutes(1)
+if ($captureInactiveMin -lt 2) { $captureInactiveMin = $captureNoChunkMin }
 
 $lastWhisperRestart = [DateTime]::MinValue
 $lastGitPull = [DateTime]::MinValue
@@ -143,21 +156,69 @@ function Stop-StrayWhisper() {
 
 # Per-app restart throttling: minimum gap between restarts of one app
 $minAppRestartGap = [TimeSpan]::FromMinutes(2)
+# Restart back-off (2026-10-21): during the fleet-wide connection drop the
+# DB-backed health check failed on every desk and the watchdog restarted the
+# app every ~2.5 min (DISP-1: 11:35, 11:38, 11:40), minting a new capture tab
+# id each time. Restarting cannot fix a network/Mongo outage. Now: while the
+# network or the Mongo DNS is down, a listening app is NOT restarted; and
+# consecutive restarts back off 2 -> 4 -> 8 -> 15 min until the app stays up
+# for 10 min.
+$maxAppRestartGap = [TimeSpan]::FromMinutes(15)
+$appRestartStreak = @{ "Dispatch Monitor" = 0; "Nexus Dispatch" = 0 }
+$appStableResetAfter = [TimeSpan]::FromMinutes(10)
+
+function Get-AppRestartGap($streak) {
+    $min = [Math]::Min($maxAppRestartGap.TotalMinutes, $minAppRestartGap.TotalMinutes * [Math]::Pow(2, [Math]::Max(0, $streak - 1)))
+    return [TimeSpan]::FromMinutes($min)
+}
+
+# $true when DNS + outbound connectivity look healthy. Checks the public Atlas
+# domain (not this desk's cluster host, so nothing from .env is read here).
+function Test-NetworkUp() {
+    try {
+        $null = Resolve-DnsName -Name "mongodb.net" -Type A -DnsOnly -QuickTimeout -ErrorAction Stop
+    } catch {
+        return $false
+    }
+    try {
+        $c = New-Object System.Net.Sockets.TcpClient
+        $t = $c.ConnectAsync("cloud.mongodb.com", 443)
+        $ok = $t.Wait(5000) -and $c.Connected
+        $c.Close()
+        return $ok
+    } catch {
+        return $false
+    }
+}
 $lastAppRestart = @{ "Dispatch Monitor" = [DateTime]::MinValue; "Nexus Dispatch" = [DateTime]::MinValue }
 
 function Restart-AppIfDead($title, $directory, $port, $command, $log) {
-    if (Test-AppAlive $port) { return }
+    if (Test-AppAlive $port) {
+        if ($appRestartStreak[$title] -gt 0 -and (([DateTime]::Now) - $lastAppRestart[$title]) -gt $appStableResetAfter) { $appRestartStreak[$title] = 0 }
+        return
+    }
+    # Process up and listening but the DB-backed check fails while the network
+    # is down: a restart can't help and only churns capture tabs.
+    if (-not (Test-AppProcessDead $title $port) -and -not (Test-NetworkUp)) {
+        Write-Host "$(Get-Date) $title is not answering but the network/Mongo DNS is down; not restarting (back-off)." -ForegroundColor DarkYellow
+        return
+    }
     # NOTE: parenthesize Get-Date -- "Get-Date - $x" parses '-' as a parameter
     # token, $elapsed becomes $null, and the throttle below silently blocks
     # every restart (this watchdog never recovered a dead app until 2026-09-17).
     $elapsed = ([DateTime]::Now) - $lastAppRestart[$title]
-    if ($elapsed -lt $minAppRestartGap) {
+    $gap = Get-AppRestartGap $appRestartStreak[$title]
+    if ($elapsed -lt $gap) {
         Write-Host "$(Get-Date) $title is down but was restarted $([int]$elapsed.TotalSeconds)s ago; skipping this cycle." -ForegroundColor DarkYellow
         return
     }
     Write-Host "$(Get-Date) $title (port $port) is not responding; restarting..." -ForegroundColor Cyan
     Restart-App $title $directory $port $command $log
     $lastAppRestart[$title] = Get-Date
+    $appRestartStreak[$title]++
+    if ($appRestartStreak[$title] -gt 1) {
+        Write-Host "$(Get-Date) $title restart #$($appRestartStreak[$title]) in a row; next restart no sooner than $([int](Get-AppRestartGap $appRestartStreak[$title]).TotalMinutes) min." -ForegroundColor DarkYellow
+    }
 }
 
 function Start-Whisper() {
@@ -289,13 +350,78 @@ function Start-App($title, $directory, $port, $command, $log) {
 # app is confirmed listening, in the user's interactive desktop session (the
 # Startup .vbs that launches this script runs at logon, not as a service, so
 # a GUI window here is visible on the real desktop, same as a manual open).
-function Start-Browser($url) {
-    Write-Host "$(Get-Date) Opening $url in the default browser..." -ForegroundColor Cyan
+#
+# 2026-10-21: a tab opened by the watchdog has no user gesture, so Chrome may
+# keep its AudioContext suspended / block getUserMedia until someone clicks
+# Start (DISP-1 after the 11:40 restart). Watchdog Chrome launches now pass
+# --autoplay-policy=no-user-gesture-required and --use-fake-ui-for-media-stream
+# (auto-accepts the mic prompt). Flags only apply when this launch starts the
+# Chrome process; if Chrome is already running the URL opens in it and the
+# flags are ignored, which is why the HKCU policy below is also written.
+$chromeCaptureFlags = @("--autoplay-policy=no-user-gesture-required", "--use-fake-ui-for-media-stream")
+$captureOrigins = @("http://localhost:5000", "http://127.0.0.1:5000")
+
+function Get-ChromePath() {
+    foreach ($p in @(
+        (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe"),
+        (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
+    )) {
+        if ($p -and (Test-Path $p)) { return $p }
+    }
+    return $null
+}
+
+# Per-user Chrome policy (no admin): allow mic capture and autoplay on the two
+# capture origins without a prompt or gesture. Chrome re-reads policy while
+# running (or chrome://policy -> Reload). Idempotent; CHROME_CAPTURE_POLICY=off skips.
+function Set-ChromeCapturePolicy() {
+    if (-not $chromeCapturePolicy) { return }
     try {
-        Start-Process $url
+        $base = "HKCU:\Software\Policies\Google\Chrome"
+        foreach ($name in @("AudioCaptureAllowedUrls", "AutoplayAllowlist")) {
+            $key = Join-Path $base $name
+            New-Item -Path $key -Force | Out-Null
+            $i = 1
+            foreach ($o in $captureOrigins) {
+                New-ItemProperty -Path $key -Name "$i" -Value $o -PropertyType String -Force | Out-Null
+                $i++
+            }
+        }
+    } catch {
+        Write-Warning "$(Get-Date) Could not write Chrome capture policy: $_"
+    }
+}
+
+function Start-Browser($url) {
+    Write-Host "$(Get-Date) Opening $url in Chrome (capture flags)..." -ForegroundColor Cyan
+    Set-ChromeCapturePolicy
+    $chrome = Get-ChromePath
+    try {
+        if ($chrome) {
+            Start-Process -FilePath $chrome -ArgumentList ($chromeCaptureFlags + @($url))
+        } else {
+            Start-Process $url
+        }
     } catch {
         Write-Warning "Could not open browser: $_"
     }
+}
+
+# Last resort after /api/capture/recover did not bring audio back: close Chrome
+# (graceful first) and open ONE capture tab with the capture flags, so stale
+# pre-restart pages and gesture-less tabs are gone and the flags take effect.
+$captureRelaunchGap = [TimeSpan]::FromMinutes(30)
+$lastCaptureRelaunch = [DateTime]::MinValue
+function Restart-CaptureBrowser($url) {
+    Write-Host "$(Get-Date) Relaunching Chrome with a single capture tab ($url)." -ForegroundColor Yellow
+    $procs = @(Get-Process chrome -ErrorAction SilentlyContinue)
+    foreach ($p in $procs) { try { if ($p.MainWindowHandle -ne 0) { $null = $p.CloseMainWindow() } } catch { } }
+    $deadline = ([DateTime]::Now).AddSeconds(15)
+    while ((Get-Process chrome -ErrorAction SilentlyContinue) -and ([DateTime]::Now) -lt $deadline) { Start-Sleep -Seconds 1 }
+    Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    Start-Browser $url
 }
 
 # Capture-page liveness (2026-10-03). The capture tab POSTs a heartbeat to the
@@ -338,6 +464,10 @@ function Test-CapturePageSilent($port) {
 $captureNoChunkLimit = [TimeSpan]::FromMinutes($captureNoChunkMin)
 $captureRecoverGap = [TimeSpan]::FromMinutes([Math]::Max(10, 2 * $captureNoChunkMin))
 $lastCaptureRecover = [DateTime]::MinValue
+$captureInactiveLimit = [TimeSpan]::FromMinutes($captureInactiveMin)
+# After a recover request, how long to wait for real audio before relaunching Chrome.
+$captureRecoverVerifyWait = [TimeSpan]::FromSeconds(120)
+$captureRecoverPendingSince = $null
 
 # Returns $null (healthy / unknown) or @{ Reason; LiveTabs }.
 function Get-CaptureOutage($port) {
@@ -355,6 +485,18 @@ function Get-CaptureOutage($port) {
     # Operator pressed Stop in every live tab: not an outage.
     $wanting = @($status.tabs | Where-Object { $_.agoMs -lt 150000 -and $_.autoCapture -ne $false })
     if ($wanting.Count -eq 0) { return $null }
+    # 2026-10-21: judge REAL activity (a minute with chunks sent to Whisper or
+    # a nonzero level) when the server reports it. Chunk counts alone include
+    # silent chunks, and a gesture-less tab with a suspended AudioContext
+    # records chunks while hearing nothing.
+    if ($null -ne $status.PSObject.Properties['lastActiveAgoMs']) {
+        $inactiveMs = $captureInactiveLimit.TotalMilliseconds
+        if ([double]$status.uptimeMs -lt $inactiveMs) { return $null }
+        $act = $status.lastActiveAgoMs
+        if ($null -ne $act -and [double]$act -le $inactiveMs) { return $null }
+        $actText = if ($null -eq $act) { "never since boot" } else { "$([int]([double]$act / 60000)) min ago" }
+        return @{ Reason = "no real audio (sent>0 or level>0) for $($captureInactiveLimit.TotalMinutes)+ min (last: $actText, live tabs: $live, capturing: $($status.capturingTabs), lease: $($status.leaseHolder) confirmed=$($status.leaseConfirmed))"; LiveTabs = $live }
+    }
     $ago = $status.lastChunkAgoMs
     if ($null -ne $ago -and [double]$ago -le $limitMs) { return $null }
     $agoText = if ($null -eq $ago) { "never" } else { "$([int]([double]$ago / 60000)) min ago" }
@@ -420,6 +562,15 @@ function Get-CaptureStatus($port) {
 
 function Test-CaptureConfirmed($status) {
     if ($null -eq $status) { return $false }
+    # 2026-10-21: a lease (or a heartbeat) alone is not capture -- after the
+    # 11:40 restart DISP-1's lease went to a leftover tab that never captured.
+    # Servers that report real activity: confirmed only by recent real audio
+    # or a lease the server has confirmed from such a heartbeat.
+    if ($null -ne $status.PSObject.Properties['lastActiveAgoMs']) {
+        if ($null -ne $status.lastActiveAgoMs -and [double]$status.lastActiveAgoMs -lt $captureFreshHeartbeat.TotalMilliseconds) { return $true }
+        if ($status.leaseHolder -and $status.leaseConfirmed -eq $true) { return $true }
+        return $false
+    }
     if ($status.leaseHolder) { return $true }
     if ($null -ne $status.lastHeartbeatAgoMs -and [double]$status.lastHeartbeatAgoMs -lt $captureFreshHeartbeat.TotalMilliseconds) { return $true }
     return $false
@@ -600,9 +751,23 @@ while ($true) {
     # Heartbeating tab(s) but no audio chunks: idle capture page (2026-10-20).
     if (-not $capturePending.Active) {
         $outage = Get-CaptureOutage 5000
-        if ($null -ne $outage -and (([DateTime]::Now) - $lastCaptureRecover) -gt $captureRecoverGap) {
+        if ($null -eq $outage) {
+            $captureRecoverPendingSince = $null
+        } elseif ($null -ne $captureRecoverPendingSince) {
+            # Recover was requested and audio still isn't back: relaunch Chrome
+            # with ONE capture tab (throttled), so the capture flags apply.
+            if ((([DateTime]::Now) - $captureRecoverPendingSince) -ge $captureRecoverVerifyWait) {
+                if ($captureRelaunchChrome -and (([DateTime]::Now) - $lastCaptureRelaunch) -gt $captureRelaunchGap) {
+                    Write-Host "$(Get-Date) Capture still out $([int]$captureRecoverVerifyWait.TotalSeconds)s after recover: $($outage.Reason)" -ForegroundColor Yellow
+                    Restart-CaptureBrowser $captureUrl
+                    $lastCaptureRelaunch = Get-Date
+                    $lastCaptureReopen = Get-Date
+                }
+                $captureRecoverPendingSince = $null
+            }
+        } elseif ((([DateTime]::Now) - $lastCaptureRecover) -gt $captureRecoverGap) {
             Write-Host "$(Get-Date) Capture outage: $($outage.Reason); asking the capture tab(s) to recover (reload on $captureUrl)." -ForegroundColor Yellow
-            if (Request-CaptureRecover 5000) { $lastCaptureRecover = Get-Date }
+            if (Request-CaptureRecover 5000) { $lastCaptureRecover = Get-Date; $captureRecoverPendingSince = Get-Date }
         }
     }
 
