@@ -21,11 +21,6 @@ export default defineConfig({
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
   },
-  // Pre-bundle leaflet at dev-server startup so a first visit to #/drivers
-  // never triggers "optimized dependencies changed. reloading" on a desk.
-  optimizeDeps: {
-    include: ["leaflet"],
-  },
   server: {
     fs: {
       strict: true,
