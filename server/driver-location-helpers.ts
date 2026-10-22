@@ -93,7 +93,7 @@ export function isStartShiftCommand(text: unknown): boolean {
 
 export const START_SHIFT_INSTRUCTIONS = [
   "📍 Start of shift — share your Live Location so accepted calls can be verified:",
-  "1. Tap the 📎 (attach) button in this chat.",
+  "1. In the dispatch group chat, tap the 📎 (attach) button.",
   "2. Choose Location → Share My Live Location.",
   "3. Pick \"Until I turn it off\" (Telegram has no 12-hour option — 15 min, 1 h and 8 h all run out mid-shift).",
   "4. Keep it on all shift; stop sharing when you clock out.",
@@ -147,4 +147,22 @@ export function formatAge(ms: number): string {
   if (m < 60) return `${m}m`;
   const h = Math.floor(m / 60);
   return `${h}h${String(m % 60).padStart(2, "0")}m`;
+}
+
+/**
+ * Locations are only kept from the dispatch group (the chat call alerts go to).
+ * Missing config or a missing chat id means "drop".
+ */
+export function isDispatchGroupChat(chatId: string | null | undefined, configuredChatId: string | null | undefined): boolean {
+  if (chatId == null || configuredChatId == null) return false;
+  const a = String(chatId).trim();
+  const b = String(configuredChatId).trim();
+  return a !== "" && a === b;
+}
+
+/** Board staleness bucket for a driver's last fix. */
+export function driverFreshness(ageMs: number): "fresh" | "stale" | "offline" {
+  if (ageMs <= FRESH_LOCATION_MS) return "fresh";
+  if (ageMs <= 60 * 60_000) return "stale";
+  return "offline";
 }

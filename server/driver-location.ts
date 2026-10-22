@@ -7,6 +7,7 @@ import {
   ARRIVAL_WINDOW_MS,
   evaluateArrival,
   isLocationFresh,
+  driverFreshness,
   type AcceptedCallRecord,
   type DriverLocationPoint,
 } from "./driver-location-helpers";
@@ -90,6 +91,7 @@ export async function driverBoard(now = Date.now()) {
         at: new Date(l.at).toISOString(),
         ageSec: Math.round((now - l.at) / 1000),
         fresh: isLocationFresh(l, now),
+        freshness: driverFreshness(now - l.at),
       };
     }),
     calls: calls.map((c: any) => ({

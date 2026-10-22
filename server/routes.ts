@@ -59,6 +59,7 @@ import {
   parseLocationUpdate,
   isStartShiftCommand,
   isLocationFresh,
+  isDispatchGroupChat,
   reminderText,
   START_SHIFT_INSTRUCTIONS,
 } from "./driver-location-helpers";
@@ -2124,6 +2125,11 @@ export async function handleTelegramUpdate(update: any): Promise<void> {
   const point = parseLocationUpdate(update);
   if (point) {
     try {
+      const { chatId: dispatchChatId } = await getTelegramCredentials();
+      if (!isDispatchGroupChat(point.chatId, dispatchChatId)) {
+        console.log(`[driver-gps] dropped fix from non-dispatch chat user=${point.telegramUserId}`);
+        return;
+      }
       await recordDriverLocation(point);
       console.log(`[driver-gps] fix user=${point.telegramUserId} live=${point.isLive}`);
     } catch (err: any) {

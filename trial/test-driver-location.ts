@@ -4,7 +4,7 @@
  */
 import {
   haversineMeters, parseLocationUpdate, isStartShiftCommand, evaluateArrival,
-  isLocationFresh, formatAge, reminderText, START_SHIFT_INSTRUCTIONS,
+  isLocationFresh, formatAge, isDispatchGroupChat, driverFreshness, reminderText, START_SHIFT_INSTRUCTIONS,
 } from "../server/driver-location-helpers";
 
 let fail = 0;
@@ -66,6 +66,17 @@ check("no driver id", evaluateArrival({ ...call, telegramUserId: null }, [], 61 
 check("age s", formatAge(42_000), "42s");
 check("age m", formatAge(5 * 60_000), "5m");
 check("age h", formatAge(125 * 60_000), "2h05m");
+
+check("group match", isDispatchGroupChat("-100123", "-100123"), true);
+check("group match trims", isDispatchGroupChat("-100123", " -100123 "), true);
+check("other chat dropped", isDispatchGroupChat("555", "-100123"), false);
+check("private chat dropped", isDispatchGroupChat("77", "-100123"), false);
+check("no config drops", isDispatchGroupChat("-100123", undefined), false);
+check("no chat drops", isDispatchGroupChat(null, "-100123"), false);
+check("empty config drops", isDispatchGroupChat("", ""), false);
+check("fresh bucket", driverFreshness(5 * 60_000), "fresh");
+check("stale bucket", driverFreshness(30 * 60_000), "stale");
+check("offline bucket", driverFreshness(2 * 3600_000), "offline");
 
 console.log(fail ? `\n${fail} FAILED` : "\nall passed");
 process.exit(fail ? 1 : 0);
