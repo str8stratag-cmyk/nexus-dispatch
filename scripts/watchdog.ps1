@@ -608,6 +608,17 @@ $launchGrace = [TimeSpan]::FromSeconds(90)
 $lastNoChromeLaunch = [DateTime]::MinValue
 $lastOwnLaunch = [DateTime]::MinValue
 function Test-ChromeRunning() { return [bool](Get-Process chrome -ErrorAction SilentlyContinue) }
+# Seconds since the oldest chrome process started ($null = not running / unknown).
+# 2026-10-22: never launch/restart Chrome within $chromeYoungGrace of a Chrome
+# start (by the watchdog OR a person), its tab needs time to check in.
+$chromeYoungGrace = [TimeSpan]::FromSeconds(60)
+function Get-ChromeAgeSec() {
+    try {
+        $starts = @(Get-Process chrome -ErrorAction SilentlyContinue | ForEach-Object { try { $_.StartTime } catch { } } | Where-Object { $_ })
+        if (-not $starts.Count) { return $null }
+        return ([DateTime]::Now - ($starts | Sort-Object | Select-Object -First 1)).TotalSeconds
+    } catch { return $null }
+}
 
 # Pure 0-tab / no-Chrome decision. $s: Now, LiveTabs, ChromeRunning,
 # LastChunkAgoMs, NoChromeSince, LastOwnLaunch, LaunchGrace, NoChromeConfirm,
@@ -620,6 +631,7 @@ function Get-ZeroTabStep($s) {
     $zeroTabs = $s.ChromeRunning -and [int]$s.LiveTabs -eq 0
     if (-not $noChrome -and -not $zeroTabs) { return @{ Action = "none"; Why = "" } }
     if (($s.Now - $s.LastOwnLaunch) -lt $s.LaunchGrace) { return @{ Action = "grace"; Why = "Chrome launched by the watchdog $([int]($s.Now - $s.LastOwnLaunch).TotalSeconds)s ago; waiting for its tab" } }
+    if ($s.ChromeRunning -and $null -ne $s.ChromeAgeSec -and $null -ne $s.ChromeYoungGrace -and [double]$s.ChromeAgeSec -lt $s.ChromeYoungGrace.TotalSeconds) { return @{ Action = "grace"; Why = "Chrome started $([int]$s.ChromeAgeSec)s ago; waiting for its tab" } }
     if ($noChrome) {
         if ($null -eq $s.NoChromeSince -or ($s.Now - $s.NoChromeSince) -lt $s.NoChromeConfirm) { return @{ Action = "wait"; Why = "Chrome not running (last chunk: $chunkTxt); confirming on the next check" } }
         if (($s.Now - $s.LastNoChromeLaunch) -lt $s.NoChromeGap) { return @{ Action = "wait"; Why = "Chrome launched $([int]($s.Now - $s.LastNoChromeLaunch).TotalSeconds)s ago and is not running" } }
@@ -677,6 +689,26 @@ function Save-CaptureState($file, [DateTime]$lastRecover, [DateTime]$lastRelaunc
     } catch { Write-Warning "$(Get-Date) Could not write $file : $_" }
 }
 
+# 2026-10-22: after the Disp-4 boot the watchdog logged nothing for 3.5 h, so
+# a stall was indistinguishable from "all fine". Every $watchdogBeatInterval
+# it now writes one state line.
+$watchdogBeatInterval = [TimeSpan]::FromMinutes(5)
+$lastWatchdogBeat = [DateTime]::MinValue
+function Format-WatchdogBeat($status, [bool]$chromeRunning, $bootPending, [DateTime]$lastRecover, [DateTime]$lastRelaunch) {
+    $t = { param($d) if ($d -eq [DateTime]::MinValue) { "never" } else { $d.ToString("HH:mm:ss") } }
+    if ($null -eq $status) { $cap = "app status unavailable" } else {
+        $chunk = if ($null -eq $status.lastChunkAgoMs) { "never" } else { "$([int]([double]$status.lastChunkAgoMs / 1000))s ago" }
+        $cap = "live tabs $($status.liveTabs), capturing-with-lock $($status.lockHeldCapturingTabs), pending $($status.pendingTabs), lease $(if ($status.leaseHolder) { $status.leaseHolder } else { 'none' }), last chunk $chunk"
+    }
+    return "[watchdog] alive: $cap; Chrome running: $chromeRunning; boot pending: $bootPending; last recover: $(& $t $lastRecover); last Chrome restart: $(& $t $lastRelaunch)"
+}
+function Write-WatchdogBeat([DateTime]$now) {
+    if (($now - $script:lastWatchdogBeat) -lt $watchdogBeatInterval) { return $false }
+    $script:lastWatchdogBeat = $now
+    Write-Host "$(Get-Date) $(Format-WatchdogBeat (Get-CaptureStatusRaw 5000) (Test-ChromeRunning) $capturePending.Active $script:lastCaptureRecover $script:lastCaptureRelaunch)" -ForegroundColor DarkGray
+    return $true
+}
+
 # One loop step of capture recovery: reads status, decides, acts, logs.
 # Process/HTTP calls go through Get-CaptureStatusRaw / Request-CaptureRecover /
 # Restart-CaptureBrowser so the test can mock them.
@@ -686,7 +718,8 @@ function Invoke-CaptureRecoveryStep([DateTime]$now) {
     if ($null -ne $status -and $null -ne $status.PSObject.Properties['liveTabs']) {
         $chrome = Test-ChromeRunning
         if ($chrome) { $captureStep.NoChromeSince = $null } elseif ($null -eq $captureStep.NoChromeSince) { $captureStep.NoChromeSince = $now }
-        $z = Get-ZeroTabStep @{ Now = $now; LiveTabs = [int]$status.liveTabs; ChromeRunning = $chrome; LastChunkAgoMs = $status.lastChunkAgoMs
+        $chromeAge = if ($chrome) { Get-ChromeAgeSec } else { $null }
+        $z = Get-ZeroTabStep @{ Now = $now; LiveTabs = [int]$status.liveTabs; ChromeRunning = $chrome; LastChunkAgoMs = $status.lastChunkAgoMs; ChromeAgeSec = $chromeAge; ChromeYoungGrace = $chromeYoungGrace
             NoChromeSince = $captureStep.NoChromeSince; LastOwnLaunch = $script:lastOwnLaunch; LaunchGrace = $launchGrace; NoChromeConfirm = $noChromeConfirm
             NoChromeChunkQuiet = $noChromeChunkQuiet; ZeroTabsAfter = $zeroTabsEscalateAfter; LastNoChromeLaunch = $script:lastNoChromeLaunch; NoChromeGap = $noChromeLaunchGap
             LastRelaunch = $script:lastCaptureRelaunch; RelaunchGap = $relaunchMinGap }
@@ -1001,6 +1034,9 @@ function Step-BootCapturePage($port, [switch]$Block) {
         if (-not $capturePending.AnsweredAt) { $capturePending.AnsweredAt = Get-Date }
         while (-not (Test-CaptureConfirmed $status) -and ([DateTime]::Now) -lt $until) {
             Start-Sleep -Seconds 5
+            # Chrome closed / 0 tabs at boot: the recovery step launches ONE tab
+            # (never next to a live tab or a Chrome younger than 60 s).
+            try { [void](Invoke-CaptureRecoveryStep ([DateTime]::Now)) } catch { }
             $status = Get-CaptureStatus $port
         }
     }
@@ -1026,19 +1062,16 @@ function Step-BootCapturePage($port, [switch]$Block) {
         return
     }
     if (($now - $capturePending.AnsweredAt) -lt $captureConfirmWait) { return }
-    if (($now - $capturePending.LastAttempt) -lt $captureRetryGap) { return }
-    if ($capturePending.Attempts -ge $captureMaxOpenAttempts) {
-        Write-Warning "$(Get-Date) Capture page still not confirmed after $($capturePending.Attempts) opens; leaving it to the 15-min no-heartbeat check."
-        $capturePending.Active = $false
-        return
-    }
-    $capturePending.Attempts++
-    Write-Host "$(Get-Date) No capture tab holds the lease or heartbeated; opening capture page (boot attempt $($capturePending.Attempts)/$captureMaxOpenAttempts)." -ForegroundColor Yellow
-    Start-Browser $bootCaptureUrl
-    $capturePending.LastAttempt = $now
-    # Counts as a reopen for the 2h no-heartbeat gap, so the two paths can't
-    # stack extra tabs on a page that never manages to heartbeat.
-    $script:lastCaptureReopen = $now
+    # 2026-10-22 (Disp-4 boot 7:32-7:46 PM): the boot check used to open an
+    # extra page whenever no tab held the lease -- next to a live standby tab,
+    # 90 s after a clean Chrome restart -- and both tabs sat in standby. It
+    # never opens a page now: it hands off to Invoke-CaptureRecoveryStep,
+    # which launches/restarts Chrome (single tab) only with 0 live tabs or no
+    # Chrome, never within $chromeYoungGrace of a Chrome start, and the server
+    # hands the lock+lease to exactly one tab when nobody holds it.
+    $live = if ($null -ne $status.PSObject.Properties['liveTabs']) { [int]$status.liveTabs } else { -1 }
+    Write-Host "$(Get-Date) [capture-boot] Capture not confirmed $([int]($now - $capturePending.AnsweredAt).TotalSeconds)s after the app answered (live tabs: $live, lease: $(if ($status.leaseHolder) { $status.leaseHolder } else { 'none' })); NOT opening another page -- handing over to capture recovery." -ForegroundColor Yellow
+    $capturePending.Active = $false
 }
 
 # Always log to a file, including the -NoInitialStart self-update path: the
@@ -1116,9 +1149,10 @@ while ($true) {
     while (([DateTime]::Now) -lt $nextFull) {
         $left = ($nextFull - ([DateTime]::Now)).TotalSeconds
         Start-Sleep -Seconds ([Math]::Max(1, [Math]::Min($captureCheckInterval.TotalSeconds, [Math]::Ceiling($left))))
-        if (-not $capturePending.Active) {
-            try { [void](Invoke-CaptureRecoveryStep ([DateTime]::Now)) } catch { Write-Warning "$(Get-Date) Capture check failed (continuing): $_" }
-        }
+        # Runs during the boot window too (2026-10-22): it is the only path that
+        # opens Chrome, and it never adds a tab next to a live one.
+        try { [void](Invoke-CaptureRecoveryStep ([DateTime]::Now)) } catch { Write-Warning "$(Get-Date) Capture check failed (continuing): $_" }
+        try { [void](Write-WatchdogBeat ([DateTime]::Now)) } catch { Write-Warning "$(Get-Date) Watchdog heartbeat line failed: $_" }
     }
     # 2026-10-21: one failing step must never stop the loop.
     try {

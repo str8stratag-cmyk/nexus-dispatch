@@ -448,7 +448,9 @@ export default function AudioPanel({
   useEffect(() => {
     if (isInIframe) return;
     let prev = { chunksRecorded: 0, chunksSent: 0, sendErrors: 0, droppedChunks: 0, levelPeakSum: 0 };
+    let lastBeatAt = 0;
     const beat = () => {
+      lastBeatAt = Date.now();
       const health = getHealthRef.current();
       const now = Date.now();
       // Deltas since the previous beat: the server logs one summary line per tab per minute.
@@ -510,7 +512,11 @@ export default function AudioPanel({
       if (c !== reportedCapturing) {
         reportedCapturing = c;
         beat();
+        return;
       }
+      // 2026-10-22: a waiting tab (standby/pending, not capturing) beats every
+      // 15 s so the server can hand it the lock promptly when nobody holds it.
+      if (!c && lockStateRef.current !== "held" && Date.now() - lastBeatAt >= 15_000) beat();
     }, 3_000);
     const onHide = (e: PageTransitionEvent) => {
       if (e.persisted) return; // bfcache, page may come back

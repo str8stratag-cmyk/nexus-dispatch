@@ -1069,6 +1069,12 @@ export async function registerRoutes(
       );
     }
     const reply = recoverCoordinator.onHeartbeat(tabId, coordTabs(), now);
+    // 2026-10-22: the tab told to take the lock also gets the lease if the
+    // current holder is not capturing (standby deadlock on Disp-4's boot).
+    if (reply.takeLock && captureLease && captureLease.tabId !== tabId && captureLease.capturing !== true) {
+      console.log(`[capture] lease freed from non-capturing ${captureLease.tabId} for lock takeover by ${tabId}`);
+      captureLease = null;
+    }
     res.json({ ok: true, ...reply });
   });
 

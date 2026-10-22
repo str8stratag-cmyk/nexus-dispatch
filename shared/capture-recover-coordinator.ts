@@ -25,6 +25,13 @@ export const RECOVER_DELIVERY_TTL_MS = 5 * 60_000;
 export const DEAD_HOLDER_MS = 5 * 60_000;
 /** After telling one tab to take the lock, wait this long before picking another. */
 export const LOCK_TAKEOVER_RETRY_MS = 2 * 60_000;
+/**
+ * 2026-10-22 (Disp-4 boot, 7:34-7:46 PM): two tabs sat in standby with no
+ * lock holder and no lease holder (nobody reported lock=held) for 12 min.
+ * After this long with no live holder and nobody capturing, ONE waiting tab
+ * (the oldest) is told to take the lock (and then the free lease).
+ */
+export const HOLDERLESS_GRACE_MS = 20_000;
 /** A "capturing with the lock held" tab must have produced a chunk this recently. */
 export const CAPTURING_CHUNK_FRESH_MS = 90_000;
 
@@ -77,6 +84,7 @@ export type HeartbeatReply = { recover?: "reload" | "navigate"; url?: string; ta
 export class RecoverCoordinator {
   private state: PersistedRecoverState;
   private lockTakeover: { tabId: string; at: number } | null = null;
+  private holderlessSince: number | null = null;
   constructor(
     private store: RecoverStore,
     private log: (line: string) => void = () => undefined,
@@ -143,6 +151,7 @@ export class RecoverCoordinator {
   /** Browser was restarted by the watchdog: forget lock takeover + outstanding recover. */
   onBrowserRestarted(): void {
     this.lockTakeover = null;
+    this.holderlessSince = null;
     this.clearOutstanding("watchdog restarted Chrome");
   }
 
@@ -166,26 +175,46 @@ export class RecoverCoordinator {
         return { recover: action, url: `${this.canonicalOrigin}/` };
       }
     }
+    this.updateHolderless(all, now);
     if (me && isLive(me, now) && (me.lock === "pending" || me.lock === "standby") && this.shouldTakeLock(me, all, now)) {
       reply.takeLock = true;
     }
     return reply;
   }
 
+  /** Track how long no live tab has held the lock or captured (called per heartbeat). */
+  private updateHolderless(all: CoordTab[], now: number): number | null {
+    const live = all.filter((t) => isLive(t, now));
+    const anyHolder = live.some((t) => (t.lock === "held" && !isDeadLockHolder(t, now)) || t.capturing);
+    if (anyHolder || !live.length) this.holderlessSince = null;
+    else if (this.holderlessSince == null) this.holderlessSince = now;
+    return this.holderlessSince;
+  }
+
   private shouldTakeLock(me: CoordTab, all: CoordTab[], now: number): boolean {
     const liveHolder = all.find((t) => t.tabId !== me.tabId && t.lock === "held" && !isDeadLockHolder(t, now));
     if (liveHolder) return false;
     const dead = all.filter((t) => t.tabId !== me.tabId && isDeadLockHolder(t, now));
-    // Only act on evidence of a dead holder, or on a tab stuck pending for DEAD_HOLDER_MS.
+    // Act on evidence of a dead holder, a tab stuck pending for DEAD_HOLDER_MS,
+    // or no live holder/capturer at all for HOLDERLESS_GRACE_MS (standby deadlock).
     const stuckPending = me.lock === "pending" && now - me.firstSeenAt >= DEAD_HOLDER_MS;
-    if (!dead.length && !stuckPending) return false;
+    const holderless = this.holderlessSince != null && now - this.holderlessSince >= HOLDERLESS_GRACE_MS;
+    if (!dead.length && !stuckPending && !holderless) return false;
     const lt = this.lockTakeover;
-    if (lt && lt.tabId !== me.tabId && now - lt.at < LOCK_TAKEOVER_RETRY_MS) return false;
-    if (lt && lt.tabId === me.tabId && now - lt.at < LOCK_TAKEOVER_RETRY_MS) return true;
+    if (lt && now - lt.at < LOCK_TAKEOVER_RETRY_MS) return lt.tabId === me.tabId;
+    // Exactly one tab: the oldest live waiting tab (skipping the one that just failed).
+    const waiting = all
+      .filter((t) => isLive(t, now) && (t.lock === "pending" || t.lock === "standby") && t.tabId !== lt?.tabId)
+      .sort((a, b) => a.firstSeenAt - b.firstSeenAt || (a.tabId < b.tabId ? -1 : 1));
+    const pick = waiting[0] ?? me;
+    if (pick.tabId !== me.tabId) return false;
     this.lockTakeover = { tabId: me.tabId, at: now };
-    this.log(
-      `[capture] lock takeover -> tab=${me.tabId} (lock=${me.lock}); dead holder(s): ${dead.map((t) => `${t.tabId} silent ${Math.round((now - lastSignalAt(t)) / 1000)}s`).join(", ") || "none seen, tab pending 5+ min"}`,
-    );
+    const why = dead.length
+      ? `dead holder(s): ${dead.map((t) => `${t.tabId} silent ${Math.round((now - lastSignalAt(t)) / 1000)}s`).join(", ")}`
+      : holderless
+        ? `no live lock holder or capturer for ${Math.round((now - (this.holderlessSince ?? now)) / 1000)}s (${waiting.length} waiting tab(s))`
+        : "tab pending 5+ min";
+    this.log(`[capture] lock takeover -> tab=${me.tabId} (lock=${me.lock}); ${why}`);
     return true;
   }
 

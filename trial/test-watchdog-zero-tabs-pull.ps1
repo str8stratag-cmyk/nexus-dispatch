@@ -61,6 +61,7 @@ function Get-CaptureStatusRaw($port) {
 function Get-CaptureOutage($port) { if ($sim.Live -gt 0 -and -not $sim.Capturing) { @{ Reason = "chunks stopped"; LiveTabs = $sim.Live } } else { $null } }
 function Request-CaptureRecover($port) { $sim.Recovers++; @{ Accepted = $true; Target = "x" } }
 function Test-ChromeRunning() { $sim.Chrome }
+function Get-ChromeAgeSec() { 3600 }
 function Start-Browser($url) { $sim.Launches++; if (-not $sim.ChromeFails) { $sim.Chrome = $true; $sim.LaunchedAt = $sim.Now } }
 function Restart-CaptureBrowser($url) { $sim.Restarts++; $sim.Live = 0; $sim.Capturing = $false; Send-BrowserRestarted 5000; $sim.Chrome = $true; $sim.LaunchedAt = $sim.Now }
 function Send-BrowserRestarted($port) { $sim.Notified++; $sim.LastChunk = $null; return $true }

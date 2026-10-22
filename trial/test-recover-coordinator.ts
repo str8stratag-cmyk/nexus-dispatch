@@ -138,6 +138,52 @@ const T = 1_800_000_000_000;
   check("browser restart clears outstanding recover", c2.status([], T + 60_000).recover.outstanding, false);
 }
 
+// 6. Boot race (Disp-4 7:32-7:46 PM): 2 tabs both in standby, nobody holds lock or lease.
+// Waiting tabs beat every 15 s; a told tab steals the lock and is capturing 10 s later.
+{
+  const c = new RecoverCoordinator(memoryStore(), quiet);
+  const boot = T;
+  const tabs = new Map<string, CoordTab>([
+    ["A", { tabId: "A", at: boot, firstSeenAt: boot, lock: "standby", capturing: false, lastChunkAt: null }],
+    ["B", { tabId: "B", at: boot + 7_000, firstSeenAt: boot + 7_000, lock: "standby", capturing: false, lastChunkAt: null }],
+  ]);
+  const toldAt = new Map<string, number>();
+  let captureAt: number | null = null;
+  for (let now = boot; now <= boot + 180_000; now += 1_000) {
+    for (const t of Array.from(tabs.values())) {
+      const offset = t.tabId === "A" ? 0 : 7_000;
+      const told = toldAt.get(t.tabId);
+      if (told != null && now - told >= 10_000 && !t.capturing) {
+        t.capturing = true;
+      }
+      if (t.capturing) t.lastChunkAt = now;
+      if ((now - boot - offset) % 15_000 === 0 && now >= boot + offset) {
+        t.at = now;
+        const r = c.onHeartbeat(t.tabId, tabs.values(), now);
+        if (r.takeLock && !toldAt.has(t.tabId)) {
+          toldAt.set(t.tabId, now);
+          t.lock = "held"; // stealCaptureLock(); the other tab stays standby
+          for (const o of Array.from(tabs.values())) if (o.tabId !== t.tabId && o.lock === "held") o.lock = "standby";
+        }
+      }
+    }
+    if (captureAt == null && c.status(tabs.values(), now).lockHeldCapturingTabs > 0) captureAt = now;
+  }
+  check("standby deadlock: exactly one tab told to take the lock", toldAt.size, 1);
+  check("standby deadlock: the oldest tab (A) gets it", Array.from(toldAt.keys()), ["A"]);
+  check(`standby deadlock: capture within 2 min of boot (${captureAt == null ? "never" : Math.round((captureAt - boot) / 1000) + "s"})`, captureAt != null && captureAt - boot <= 120_000, true);
+  check("standby deadlock: exactly one capturing lock holder", Array.from(tabs.values()).filter((t) => t.lock === "held" && t.capturing).length, 1);
+}
+// 6b. Not while someone holds the lock (healthy standby tab next to a capturer).
+{
+  const c = new RecoverCoordinator(memoryStore(), quiet);
+  const H: CoordTab = { tabId: "H", at: T, firstSeenAt: T - 600_000, lock: "held", capturing: true, lastChunkAt: T };
+  const S: CoordTab = { tabId: "S", at: T, firstSeenAt: T - 60_000, lock: "standby", capturing: false, lastChunkAt: null };
+  let told = 0;
+  for (let i = 0; i < 20; i++) if (c.onHeartbeat("S", [{ ...H, at: T + i * 15_000, lastChunkAt: T + i * 15_000 }, { ...S, at: T + i * 15_000 }], T + i * 15_000).takeLock) told++;
+  check("healthy holder: standby tab never told to steal", told, 0);
+}
+
 // 5. Quiet / missing level is unknown, not an outage.
 {
   const base = { uptimeMs: 3600_000, liveTabs: 1, wantingTabs: 1, lastChunkAgoMs: 4_000 };
