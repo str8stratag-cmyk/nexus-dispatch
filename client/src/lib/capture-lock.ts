@@ -95,3 +95,34 @@ export function releaseCaptureLock(): boolean {
   s.release();
   return true;
 }
+
+/**
+ * 2026-10-21 (DISP-5): the server saw no live lock holder (the last holder sent
+ * no heartbeat or chunk for 5+ min: a dead/frozen page that still owns the Web
+ * Lock) and told THIS tab to take over. steal:true revokes the dead page's lock.
+ */
+export function stealCaptureLock(): boolean {
+  const s = store();
+  const locks = (navigator as Navigator & { locks?: LockManager }).locks;
+  if (s.state === "held" || !locks?.request) return false;
+  console.warn("[capture-lock] server reports a dead lock holder; stealing the capture lock");
+  let acquired = false;
+  locks
+    .request(LOCK_NAME, { steal: true }, (lock) => {
+      if (!lock) return undefined;
+      acquired = true;
+      set(s, "held");
+      return new Promise<void>((resolve) => {
+        s.release = resolve;
+      });
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      if (acquired) {
+        s.release = null;
+        set(s, "standby");
+        request(s, locks, false);
+      }
+    });
+  return true;
+}

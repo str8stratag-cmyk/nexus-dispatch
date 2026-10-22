@@ -33,7 +33,10 @@ import {
   TAB_FRESH_MS,
   type CaptureLease,
   type TabHeartbeat,
+  DEAD_HOLDER_LEASE_MS,
 } from "@shared/capture-lease";
+import { RecoverCoordinator, lastSignalAt, type CoordTab, type PersistedRecoverState, type RecoverStore } from "@shared/capture-recover-coordinator";
+import { existsSync, writeFileSync } from "node:fs";
 import {
   NEEDS_REVIEW_STATUS,
   REVIEW_DEDUP_WINDOW_MS,
@@ -70,10 +73,42 @@ const captureTabs = new Map<string, TabHeartbeat & { detail: NonNullable<typeof 
 const CAPTURE_CHUNK_STALE_MS = TAB_FRESH_MS;
 // Watchdog-requested recovery (POST /api/capture/recover): each tab is told
 // once, on its next heartbeat, to reload (or move to the canonical origin).
-const CAPTURE_CANONICAL_ORIGIN = "http://localhost:5000";
-const CAPTURE_RECOVER_TTL_MS = 5 * 60_000;
-let captureRecoverRequestedAt = 0;
-const captureRecoverTold = new Map<string, number>();
+// 2026-10-21: recover policy lives in RecoverCoordinator (single target tab,
+// 30-min gap persisted in logs/capture-recover-state.json, never while a tab is
+// lock=pending, dead-lock-holder takeover).
+function fileRecoverStore(file: string): RecoverStore {
+  return {
+    load(): PersistedRecoverState | null {
+      try {
+        if (!existsSync(file)) return null;
+        const j = JSON.parse(readFileSync(file, "utf8"));
+        return typeof j?.lastAcceptedAt === "number" ? { lastAcceptedAt: j.lastAcceptedAt, targetTabId: j.targetTabId ?? null, deliveredAt: j.deliveredAt ?? 0 } : null;
+      } catch {
+        return null;
+      }
+    },
+    save(st: PersistedRecoverState) {
+      try {
+        mkdirSync(path.dirname(file), { recursive: true });
+        const tmp = `${file}.tmp`;
+        writeFileSync(tmp, JSON.stringify(st));
+        renameSync(tmp, file);
+      } catch (err) {
+        console.error("[capture] failed to persist recover state:", err);
+      }
+    },
+  };
+}
+const recoverCoordinator = new RecoverCoordinator(
+  fileRecoverStore(path.join(process.cwd(), "logs", "capture-recover-state.json")),
+  (line) => console.log(line),
+  "http://localhost:5000",
+);
+/** First heartbeat per tab id: recover only reaches tabs that predate the request (shared/capture-recover.ts). */
+const captureTabFirstSeen = new Map<string, number>();
+// Last minute (any tab) that reported a level at all / a nonzero level.
+let captureLevelReportedAt: number | null = null;
+let captureNonzeroLevelAt: number | null = null;
 let lastCaptureHeartbeat: {
   at: number;
   tabId?: string | null;
@@ -925,6 +960,27 @@ async function rejectAutoDispatch(res: Response, parsed: InsertDispatchEvent, re
   return res.status(400).json({ message: `Auto-dispatch rejected: ${reason}`, ...(review ? { reviewEventId: review.id } : {}) });
 }
 
+function coordTabs(): CoordTab[] {
+  return Array.from(captureTabs.values()).map((t) => ({
+    tabId: t.tabId,
+    at: t.at,
+    firstSeenAt: captureTabFirstSeen.get(t.tabId) ?? t.at,
+    lock: t.lock,
+    capturing: t.capturing,
+    lastChunkAt: t.lastChunkAt,
+    origin: t.origin,
+  }));
+}
+/** Holder's last heartbeat/chunk; undefined if we never heard from it (keep old rules). */
+function holderSignalAt(tabId: string | undefined): number | null {
+  const t = tabId ? captureTabs.get(tabId) : undefined;
+  return t ? lastSignalAt(t) : null;
+}
+function holderDead(tabId: string): boolean {
+  const at = holderSignalAt(tabId);
+  return at != null && Date.now() - at >= DEAD_HOLDER_LEASE_MS;
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -984,7 +1040,11 @@ export async function registerRoutes(
       lastSentAt: ago(beat.lastSentAgoMs),
       detail: beat,
     });
+    if (!captureTabFirstSeen.has(tabId)) captureTabFirstSeen.set(tabId, now);
     pruneTabs(captureTabs, now);
+    captureTabFirstSeen.forEach((_at, id) => {
+      if (!captureTabs.has(id)) captureTabFirstSeen.delete(id);
+    });
     // Per-minute capture summary (tabs beat every 60s) -> dispatch-monitor.log.
     const m = (b.minute ?? null) as Record<string, unknown> | null;
     if (m && typeof m === "object") {
@@ -994,6 +1054,10 @@ export async function registerRoutes(
       const levelAvg = lvl(m.levelAvg);
       const showsAudio = minuteShowsAudio({ chunksSent: n(m.chunksSent), chunksRecorded: n(m.chunksRecorded), levelPeak });
       if (showsAudio) captureLastActiveAt = now;
+      if (n(m.chunksRecorded) > 0 && levelPeak != null) {
+        captureLevelReportedAt = now;
+        if (levelPeak > 0) captureNonzeroLevelAt = now;
+      }
       captureLease = confirmLease(captureLease, tabId, showsAudio);
       console.log(
         `[capture] minute tab=${tabId} origin=${typeof b.origin === "string" ? b.origin.slice(0, 64) : "?"}` +
@@ -1004,15 +1068,14 @@ export async function registerRoutes(
           ` lastChunkAgoMs=${beat.lastChunkAgoMs ?? "null"} tabs=${captureTabs.size}`,
       );
     }
-    if (captureRecoverRequestedAt && now - captureRecoverRequestedAt < CAPTURE_RECOVER_TTL_MS && (captureRecoverTold.get(tabId) ?? 0) < captureRecoverRequestedAt) {
-      captureRecoverTold.set(tabId, now);
-      const origin = typeof b.origin === "string" ? b.origin : "";
-      const action = origin && origin !== CAPTURE_CANONICAL_ORIGIN ? "navigate" : "reload";
-      console.log(`[capture] recover -> tab=${tabId} origin=${origin || "?"} action=${action}`);
-      res.json({ ok: true, recover: action, url: `${CAPTURE_CANONICAL_ORIGIN}/` });
-      return;
+    const reply = recoverCoordinator.onHeartbeat(tabId, coordTabs(), now);
+    // 2026-10-22: the tab told to take the lock also gets the lease if the
+    // current holder is not capturing (standby deadlock on Disp-4's boot).
+    if (reply.takeLock && captureLease && captureLease.tabId !== tabId && captureLease.capturing !== true) {
+      console.log(`[capture] lease freed from non-capturing ${captureLease.tabId} for lock takeover by ${tabId}`);
+      captureLease = null;
     }
-    res.json({ ok: true });
+    res.json({ ok: true, ...reply });
   });
 
   app.get("/api/capture/status", (_req, res) => {
@@ -1039,6 +1102,12 @@ export async function registerRoutes(
       leaseConfirmed: leaseHolder ? captureLease?.confirmed !== false : null,
       lastActiveAt: captureLastActiveAt,
       lastActiveAgoMs: captureLastActiveAt == null ? null : now - captureLastActiveAt,
+      // Level reporting (null = no tab has reported a level: pre-#55 bundle -> unknown, not silent).
+      levelReportedAgoMs: captureLevelReportedAt == null ? null : now - captureLevelReportedAt,
+      nonzeroLevelAgoMs: captureNonzeroLevelAt == null ? null : now - captureNonzeroLevelAt,
+      wantingTabs: Array.from(captureTabs.values()).filter((t) => now - t.at <= TAB_FRESH_MS && t.detail.autoCapture !== false).length,
+      // 2026-10-21: pendingTabs, lockHeldCapturingTabs, deadLockHolders, recover{...}.
+      ...recoverCoordinator.status(coordTabs(), now),
       // Per-desk effective state across all tabs (2026-10-20).
       capturing: desk.effectiveCapturing,
       effectiveCapturing: desk.effectiveCapturing,
@@ -1059,10 +1128,60 @@ export async function registerRoutes(
       res.status(403).json({ ok: false });
       return;
     }
-    captureRecoverRequestedAt = Date.now();
-    captureRecoverTold.clear();
-    console.log(`[capture] recover requested by watchdog (live tabs: ${captureTabs.size})`);
-    res.json({ ok: true, tabs: captureTabs.size });
+    const result = recoverCoordinator.request(coordTabs(), Date.now());
+    if (!result.accepted) {
+      res.status(429).json({ ok: false, ...result, tabs: captureTabs.size });
+      return;
+    }
+    res.json({ ok: true, targetTabId: result.targetTabId, tabs: captureTabs.size });
+  });
+
+  // 2026-10-21 retest: a closing tab (pagehide beacon) stops counting as live
+  // at once instead of after TAB_FRESH_MS (150 s), so the watchdog sees
+  // "0 live tabs" within one check. Its lastChunkAt is kept: a plain reload
+  // (close + new tab within seconds) must not look like "no chunk ever".
+  app.post("/api/capture/tab-closed", express.text({ type: "*/*" }), (req, res) => {
+    let tabId = "";
+    let chunkAgo: number | null = null;
+    try {
+      const raw = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+      tabId = typeof raw?.tabId === "string" ? raw.tabId.slice(0, 64) : "";
+      chunkAgo = typeof raw?.lastChunkAgoMs === "number" && Number.isFinite(raw.lastChunkAgoMs) && raw.lastChunkAgoMs >= 0 ? raw.lastChunkAgoMs : null;
+    } catch {
+      // ignore malformed beacon
+    }
+    const t = tabId ? captureTabs.get(tabId) : undefined;
+    if (t) {
+      if (chunkAgo != null) {
+        const at = Date.now() - chunkAgo;
+        if (t.lastChunkAt == null || at > t.lastChunkAt) t.lastChunkAt = at;
+      }
+      t.at = Date.now() - TAB_FRESH_MS - 1;
+      if (t.lock === "held") t.lock = "closed";
+      captureLease = releaseLease(captureLease, tabId);
+      console.log(`[capture] tab closed tab=${tabId} (live tabs now: ${Array.from(captureTabs.values()).filter((x) => Date.now() - x.at <= TAB_FRESH_MS).length})`);
+    }
+    res.json({ ok: true });
+  });
+
+  // 2026-10-21 (Disp-4): the watchdog killed Chrome, so every tab is gone.
+  // Clear the lease, tab table and any outstanding recover at once instead of
+  // waiting ~3 min for the lease TTL / tab freshness to run out. Loopback only.
+  app.post("/api/capture/browser-restarted", (req, res) => {
+    const ip = req.socket.remoteAddress ?? "";
+    console.log(`[capture] browser-restarted request from ${ip || "?"}`);
+    if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(ip)) {
+      res.status(403).json({ ok: false });
+      return;
+    }
+    const tabsCleared = captureTabs.size;
+    const hadLease = captureLease?.tabId ?? null;
+    captureLease = null;
+    captureTabs.clear();
+    captureTabFirstSeen.clear();
+    recoverCoordinator.onBrowserRestarted();
+    console.log(`[capture] browser restarted by watchdog: cleared lease (${hadLease ?? "none"}) and ${tabsCleared} tab(s)`);
+    res.json({ ok: true, tabsCleared, leaseCleared: hadLease });
   });
 
   // One capturing tab per box, across origins (shared/capture-lease.ts).
@@ -1074,14 +1193,17 @@ export async function registerRoutes(
       captureLease,
       { tabId, capturing: b.capturing === true, force: b.force === true },
       Date.now(),
+      holderSignalAt(prevHolder?.tabId),
     );
     if (decision.lease?.tabId !== captureLease?.tabId && decision.granted) {
       const why = b.force === true
         ? " (Start pressed)"
         : prevHolder
-          ? prevHolder.confirmed === false
+          ? holderDead(prevHolder.tabId)
+            ? ` (took over from dead holder ${prevHolder.tabId}: no heartbeat/chunk 5+ min)`
+            : prevHolder.confirmed === false
             ? ` (took over from unconfirmed ${prevHolder.tabId})`
-            : ` (took over from idle ${prevHolder.tabId})`
+              : ` (took over from idle ${prevHolder.tabId})`
           : "";
       console.log(`[capture] lease -> ${tabId}${why}`);
     }
