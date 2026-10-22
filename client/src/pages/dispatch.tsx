@@ -152,9 +152,6 @@ export default function DispatchPage() {
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse-live" />
             Live
           </span>
-          <a href="#/drivers" className="ml-2 rounded-md border border-border px-2 py-1 text-[11px] font-semibold hover:bg-muted" data-testid="link-drivers">
-            Drivers
-          </a>
         </div>
         <TabsList className="absolute left-1/2 hidden h-auto w-auto -translate-x-1/2 grid-cols-5 gap-1 rounded-lg bg-muted/50 p-1 lg:grid">
           <TabsTrigger value="monitor" className="px-4 py-2 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground" data-testid="tab-monitor">
