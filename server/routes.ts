@@ -26,12 +26,24 @@ import {
 import {
   decideLease,
   releaseLease,
+  confirmLease,
+  minuteShowsAudio,
   pruneTabs,
   summarizeDesk,
   TAB_FRESH_MS,
   type CaptureLease,
   type TabHeartbeat,
+  DEAD_HOLDER_LEASE_MS,
 } from "@shared/capture-lease";
+import { RecoverCoordinator, lastSignalAt, type CoordTab, type PersistedRecoverState, type RecoverStore } from "@shared/capture-recover-coordinator";
+import { existsSync, writeFileSync } from "node:fs";
+import {
+  NEEDS_REVIEW_STATUS,
+  REVIEW_DEDUP_WINDOW_MS,
+  isSameReviewCall,
+  shouldCreateReviewEvent,
+} from "@shared/review-event";
+import { DISPATCH_RETRY_HEADER, DispatchRetryQueue, isTransientDbError } from "./dispatch-retry-queue";
 import {
   parseAcceptCallbackData,
   formatTelegramAccepterName,
@@ -49,6 +61,10 @@ const sseClients = new Set<Response>();
 
 const serverStartedAt = Date.now();
 let captureLease: CaptureLease | null = null;
+// Last heartbeat minute (any tab) that showed REAL audio: chunks sent to
+// Whisper or a nonzero level (2026-10-21). The watchdog judges capture health
+// from this, not from lease state or chunk counts (silent/suspended chunks count).
+let captureLastActiveAt: number | null = null;
 // Per-tab heartbeats (2026-10-20). One "last heartbeat per desk" slot used to
 // be overwritten by every tab, so with two tabs /api/capture/status flipped
 // between an idle lock holder and the real capturer.
@@ -57,10 +73,42 @@ const captureTabs = new Map<string, TabHeartbeat & { detail: NonNullable<typeof 
 const CAPTURE_CHUNK_STALE_MS = TAB_FRESH_MS;
 // Watchdog-requested recovery (POST /api/capture/recover): each tab is told
 // once, on its next heartbeat, to reload (or move to the canonical origin).
-const CAPTURE_CANONICAL_ORIGIN = "http://localhost:5000";
-const CAPTURE_RECOVER_TTL_MS = 5 * 60_000;
-let captureRecoverRequestedAt = 0;
-const captureRecoverTold = new Map<string, number>();
+// 2026-10-21: recover policy lives in RecoverCoordinator (single target tab,
+// 30-min gap persisted in logs/capture-recover-state.json, never while a tab is
+// lock=pending, dead-lock-holder takeover).
+function fileRecoverStore(file: string): RecoverStore {
+  return {
+    load(): PersistedRecoverState | null {
+      try {
+        if (!existsSync(file)) return null;
+        const j = JSON.parse(readFileSync(file, "utf8"));
+        return typeof j?.lastAcceptedAt === "number" ? { lastAcceptedAt: j.lastAcceptedAt, targetTabId: j.targetTabId ?? null, deliveredAt: j.deliveredAt ?? 0 } : null;
+      } catch {
+        return null;
+      }
+    },
+    save(st: PersistedRecoverState) {
+      try {
+        mkdirSync(path.dirname(file), { recursive: true });
+        const tmp = `${file}.tmp`;
+        writeFileSync(tmp, JSON.stringify(st));
+        renameSync(tmp, file);
+      } catch (err) {
+        console.error("[capture] failed to persist recover state:", err);
+      }
+    },
+  };
+}
+const recoverCoordinator = new RecoverCoordinator(
+  fileRecoverStore(path.join(process.cwd(), "logs", "capture-recover-state.json")),
+  (line) => console.log(line),
+  "http://localhost:5000",
+);
+/** First heartbeat per tab id: recover only reaches tabs that predate the request (shared/capture-recover.ts). */
+const captureTabFirstSeen = new Map<string, number>();
+// Last minute (any tab) that reported a level at all / a nonzero level.
+let captureLevelReportedAt: number | null = null;
+let captureNonzeroLevelAt: number | null = null;
 let lastCaptureHeartbeat: {
   at: number;
   tabId?: string | null;
@@ -85,6 +133,12 @@ const dispatchCounters = {
   quarantined: 0,
   quarantineFailed: 0,
   quarantineFallbackWrites: 0,
+  /** Dispatches parked in logs/dispatch-retry-queue.json after a Mongo/network error. */
+  retryQueued: 0,
+  /** Queued dispatches that later got a definitive answer on replay. */
+  retryReplayed: 0,
+  /** Address-rejected keyword calls shown on the board as needs_review. */
+  reviewEvents: 0,
   zod400: 0,
   dedupSuppressed: 0,
   repeatRequestIdsIgnored: 0,
@@ -774,6 +828,12 @@ function getStreetDictionary(): StreetDictionary | null {
 const QUARANTINE_INSERT_TIMEOUT_MS = 1_500;
 const QUARANTINE_FALLBACK_MAX_BYTES = 5 * 1024 * 1024;
 
+let retryQueue: DispatchRetryQueue | null = null;
+function dispatchRetryQueue(): DispatchRetryQueue {
+  if (!retryQueue) retryQueue = new DispatchRetryQueue(path.join(process.cwd(), "logs", "dispatch-retry-queue.json"));
+  return retryQueue;
+}
+
 function writeQuarantineFallback(doc: Record<string, unknown>): void {
   try {
     const dir = path.join(process.cwd(), "logs");
@@ -851,6 +911,42 @@ async function quarantineRejection(parsed: InsertDispatchEvent, reason: string):
   writeQuarantineFallback({ ...doc, createdAt: (doc.createdAt as Date).toISOString(), insertError: String((lastErr as Error)?.message ?? lastErr) });
 }
 
+// Address-rejected keyword call -> board event flagged for review (shared/review-event.ts).
+// Best effort: the quarantine record above is the durable copy.
+async function createReviewEvent(parsed: InsertDispatchEvent, reason: string): Promise<DispatchEvent | null> {
+  if (!shouldCreateReviewEvent(reason, parsed)) return null;
+  try {
+    const db = await getDatabase();
+    const recent = await db
+      .collection("dispatchEvents")
+      .find({ status: NEEDS_REVIEW_STATUS, createdAt: { $gte: new Date(Date.now() - REVIEW_DEDUP_WINDOW_MS) } })
+      .toArray();
+    if (recent.some((e) => isSameReviewCall(e as { transcript?: string; signalType?: string }, parsed))) return null;
+    const event = await storage.createEvent({
+      transcript: parsed.transcript,
+      keywords: parsed.keywords,
+      address: parsed.address ?? null,
+      crossStreet: parsed.crossStreet ?? null,
+      signalType: parsed.signalType ?? null,
+      description: `Needs review: ${reason}`,
+      district: parsed.district,
+      source: parsed.source,
+      status: NEEDS_REVIEW_STATUS,
+      isManual: false,
+      whisperModel: parsed.whisperModel ?? null,
+      audioStartedAt: parsed.audioStartedAt ?? null,
+      audioEndedAt: parsed.audioEndedAt ?? null,
+    } as InsertDispatchEvent);
+    dispatchCounters.reviewEvents++;
+    console.log(`[review] event=${event.id} ${reason} :: source=${parsed.source || "?"} :: signal=${parsed.signalType || "?"}`);
+    broadcastEvent(event);
+    return event;
+  } catch (err) {
+    console.error("[review] could not create review event:", (err as Error)?.message ?? err);
+    return null;
+  }
+}
+
 async function rejectAutoDispatch(res: Response, parsed: InsertDispatchEvent, reason: string) {
   console.log(
     `[quarantine] ${reason} :: transcript="${(parsed.transcript || "").slice(0, 140)}" :: address=${parsed.address || "(none)"} :: source=${parsed.source || "?"}`
@@ -860,7 +956,29 @@ async function rejectAutoDispatch(res: Response, parsed: InsertDispatchEvent, re
   } else {
     await quarantineRejection(parsed, reason);
   }
-  return res.status(400).json({ message: `Auto-dispatch rejected: ${reason}` });
+  const review = await createReviewEvent(parsed, reason);
+  return res.status(400).json({ message: `Auto-dispatch rejected: ${reason}`, ...(review ? { reviewEventId: review.id } : {}) });
+}
+
+function coordTabs(): CoordTab[] {
+  return Array.from(captureTabs.values()).map((t) => ({
+    tabId: t.tabId,
+    at: t.at,
+    firstSeenAt: captureTabFirstSeen.get(t.tabId) ?? t.at,
+    lock: t.lock,
+    capturing: t.capturing,
+    lastChunkAt: t.lastChunkAt,
+    origin: t.origin,
+  }));
+}
+/** Holder's last heartbeat/chunk; undefined if we never heard from it (keep old rules). */
+function holderSignalAt(tabId: string | undefined): number | null {
+  const t = tabId ? captureTabs.get(tabId) : undefined;
+  return t ? lastSignalAt(t) : null;
+}
+function holderDead(tabId: string): boolean {
+  const at = holderSignalAt(tabId);
+  return at != null && Date.now() - at >= DEAD_HOLDER_LEASE_MS;
 }
 
 export async function registerRoutes(
@@ -922,27 +1040,42 @@ export async function registerRoutes(
       lastSentAt: ago(beat.lastSentAgoMs),
       detail: beat,
     });
+    if (!captureTabFirstSeen.has(tabId)) captureTabFirstSeen.set(tabId, now);
     pruneTabs(captureTabs, now);
+    captureTabFirstSeen.forEach((_at, id) => {
+      if (!captureTabs.has(id)) captureTabFirstSeen.delete(id);
+    });
     // Per-minute capture summary (tabs beat every 60s) -> dispatch-monitor.log.
     const m = (b.minute ?? null) as Record<string, unknown> | null;
     if (m && typeof m === "object") {
       const n = (v: unknown) => num(v) ?? 0;
+      const lvl = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.min(v, 1) : null);
+      const levelPeak = lvl(m.levelPeak);
+      const levelAvg = lvl(m.levelAvg);
+      const showsAudio = minuteShowsAudio({ chunksSent: n(m.chunksSent), chunksRecorded: n(m.chunksRecorded), levelPeak });
+      if (showsAudio) captureLastActiveAt = now;
+      if (n(m.chunksRecorded) > 0 && levelPeak != null) {
+        captureLevelReportedAt = now;
+        if (levelPeak > 0) captureNonzeroLevelAt = now;
+      }
+      captureLease = confirmLease(captureLease, tabId, showsAudio);
       console.log(
         `[capture] minute tab=${tabId} origin=${typeof b.origin === "string" ? b.origin.slice(0, 64) : "?"}` +
           ` capturing=${beat.capturing} lock=${beat.lock ?? "?"} lease=${beat.lease ?? "?"}` +
           ` chunks=${n(m.chunksRecorded)} sent=${n(m.chunksSent)} errors=${n(m.sendErrors)} dropped=${n(m.droppedChunks)}` +
+          ` level=${levelAvg == null ? "?" : levelAvg.toFixed(4)} peak=${levelPeak == null ? "?" : levelPeak.toFixed(4)}` +
+          ` ctx=${typeof m.audioContextState === "string" ? m.audioContextState.slice(0, 12) : "?"}` +
           ` lastChunkAgoMs=${beat.lastChunkAgoMs ?? "null"} tabs=${captureTabs.size}`,
       );
     }
-    if (captureRecoverRequestedAt && now - captureRecoverRequestedAt < CAPTURE_RECOVER_TTL_MS && (captureRecoverTold.get(tabId) ?? 0) < captureRecoverRequestedAt) {
-      captureRecoverTold.set(tabId, now);
-      const origin = typeof b.origin === "string" ? b.origin : "";
-      const action = origin && origin !== CAPTURE_CANONICAL_ORIGIN ? "navigate" : "reload";
-      console.log(`[capture] recover -> tab=${tabId} origin=${origin || "?"} action=${action}`);
-      res.json({ ok: true, recover: action, url: `${CAPTURE_CANONICAL_ORIGIN}/` });
-      return;
+    const reply = recoverCoordinator.onHeartbeat(tabId, coordTabs(), now);
+    // 2026-10-22: the tab told to take the lock also gets the lease if the
+    // current holder is not capturing (standby deadlock on Disp-4's boot).
+    if (reply.takeLock && captureLease && captureLease.tabId !== tabId && captureLease.capturing !== true) {
+      console.log(`[capture] lease freed from non-capturing ${captureLease.tabId} for lock takeover by ${tabId}`);
+      captureLease = null;
     }
-    res.json({ ok: true });
+    res.json({ ok: true, ...reply });
   });
 
   app.get("/api/capture/status", (_req, res) => {
@@ -965,6 +1098,16 @@ export async function registerRoutes(
       lastHeartbeatAgoMs: lastCaptureHeartbeat ? now - lastCaptureHeartbeat.at : null,
       last: preferred,
       leaseHolder,
+      // false = granted since boot / handover but no heartbeat with real audio yet.
+      leaseConfirmed: leaseHolder ? captureLease?.confirmed !== false : null,
+      lastActiveAt: captureLastActiveAt,
+      lastActiveAgoMs: captureLastActiveAt == null ? null : now - captureLastActiveAt,
+      // Level reporting (null = no tab has reported a level: pre-#55 bundle -> unknown, not silent).
+      levelReportedAgoMs: captureLevelReportedAt == null ? null : now - captureLevelReportedAt,
+      nonzeroLevelAgoMs: captureNonzeroLevelAt == null ? null : now - captureNonzeroLevelAt,
+      wantingTabs: Array.from(captureTabs.values()).filter((t) => now - t.at <= TAB_FRESH_MS && t.detail.autoCapture !== false).length,
+      // 2026-10-21: pendingTabs, lockHeldCapturingTabs, deadLockHolders, recover{...}.
+      ...recoverCoordinator.status(coordTabs(), now),
       // Per-desk effective state across all tabs (2026-10-20).
       capturing: desk.effectiveCapturing,
       effectiveCapturing: desk.effectiveCapturing,
@@ -985,23 +1128,83 @@ export async function registerRoutes(
       res.status(403).json({ ok: false });
       return;
     }
-    captureRecoverRequestedAt = Date.now();
-    captureRecoverTold.clear();
-    console.log(`[capture] recover requested by watchdog (live tabs: ${captureTabs.size})`);
-    res.json({ ok: true, tabs: captureTabs.size });
+    const result = recoverCoordinator.request(coordTabs(), Date.now());
+    if (!result.accepted) {
+      res.status(429).json({ ok: false, ...result, tabs: captureTabs.size });
+      return;
+    }
+    res.json({ ok: true, targetTabId: result.targetTabId, tabs: captureTabs.size });
+  });
+
+  // 2026-10-21 retest: a closing tab (pagehide beacon) stops counting as live
+  // at once instead of after TAB_FRESH_MS (150 s), so the watchdog sees
+  // "0 live tabs" within one check. Its lastChunkAt is kept: a plain reload
+  // (close + new tab within seconds) must not look like "no chunk ever".
+  app.post("/api/capture/tab-closed", express.text({ type: "*/*" }), (req, res) => {
+    let tabId = "";
+    let chunkAgo: number | null = null;
+    try {
+      const raw = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+      tabId = typeof raw?.tabId === "string" ? raw.tabId.slice(0, 64) : "";
+      chunkAgo = typeof raw?.lastChunkAgoMs === "number" && Number.isFinite(raw.lastChunkAgoMs) && raw.lastChunkAgoMs >= 0 ? raw.lastChunkAgoMs : null;
+    } catch {
+      // ignore malformed beacon
+    }
+    const t = tabId ? captureTabs.get(tabId) : undefined;
+    if (t) {
+      if (chunkAgo != null) {
+        const at = Date.now() - chunkAgo;
+        if (t.lastChunkAt == null || at > t.lastChunkAt) t.lastChunkAt = at;
+      }
+      t.at = Date.now() - TAB_FRESH_MS - 1;
+      if (t.lock === "held") t.lock = "closed";
+      captureLease = releaseLease(captureLease, tabId);
+      console.log(`[capture] tab closed tab=${tabId} (live tabs now: ${Array.from(captureTabs.values()).filter((x) => Date.now() - x.at <= TAB_FRESH_MS).length})`);
+    }
+    res.json({ ok: true });
+  });
+
+  // 2026-10-21 (Disp-4): the watchdog killed Chrome, so every tab is gone.
+  // Clear the lease, tab table and any outstanding recover at once instead of
+  // waiting ~3 min for the lease TTL / tab freshness to run out. Loopback only.
+  app.post("/api/capture/browser-restarted", (req, res) => {
+    const ip = req.socket.remoteAddress ?? "";
+    console.log(`[capture] browser-restarted request from ${ip || "?"}`);
+    if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(ip)) {
+      res.status(403).json({ ok: false });
+      return;
+    }
+    const tabsCleared = captureTabs.size;
+    const hadLease = captureLease?.tabId ?? null;
+    captureLease = null;
+    captureTabs.clear();
+    captureTabFirstSeen.clear();
+    recoverCoordinator.onBrowserRestarted();
+    console.log(`[capture] browser restarted by watchdog: cleared lease (${hadLease ?? "none"}) and ${tabsCleared} tab(s)`);
+    res.json({ ok: true, tabsCleared, leaseCleared: hadLease });
   });
 
   // One capturing tab per box, across origins (shared/capture-lease.ts).
   app.post("/api/capture/lease", (req, res) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const tabId = typeof b.tabId === "string" ? b.tabId.slice(0, 64) : "";
+    const prevHolder = captureLease && captureLease.expiresAt > Date.now() ? captureLease : null;
     const decision = decideLease(
       captureLease,
       { tabId, capturing: b.capturing === true, force: b.force === true },
       Date.now(),
+      holderSignalAt(prevHolder?.tabId),
     );
     if (decision.lease?.tabId !== captureLease?.tabId && decision.granted) {
-      const why = b.force === true ? " (Start pressed)" : captureLease && captureLease.expiresAt > Date.now() ? ` (took over from idle ${captureLease.tabId})` : "";
+      const why = b.force === true
+        ? " (Start pressed)"
+        : prevHolder
+          ? holderDead(prevHolder.tabId)
+            ? ` (took over from dead holder ${prevHolder.tabId}: no heartbeat/chunk 5+ min)`
+            : prevHolder.confirmed === false
+            ? ` (took over from unconfirmed ${prevHolder.tabId})`
+              : ` (took over from idle ${prevHolder.tabId})`
+          : "";
       console.log(`[capture] lease -> ${tabId}${why}`);
     }
     captureLease = decision.lease;
@@ -1533,9 +1736,61 @@ export async function registerRoutes(
       res.status(201).json(event);
     } catch (err: any) {
       if (err?.name === "ZodError") dispatchCounters.zod400++;
+      if (isTransientDbError(err)) {
+        // Never return-and-drop on a Mongo/network failure (2026-10-21).
+        // Forget the request id so the replay isn't ignored as a repeat.
+        const reqId = (req.body as { clientRequestId?: unknown })?.clientRequestId;
+        if (typeof reqId === "string") seenRequestIds.delete(reqId);
+        if (req.get(DISPATCH_RETRY_HEADER)) {
+          return res.status(503).json({ message: err.message, retry: true });
+        }
+        try {
+          const queueId = dispatchRetryQueue().enqueue((req.body ?? {}) as Record<string, unknown>, err);
+          dispatchCounters.retryQueued++;
+          console.error(`[dispatch-retry] queued ${queueId} after ${err.message} :: source=${(req.body as { source?: string })?.source || "?"} (queue: ${dispatchRetryQueue().size})`);
+          return res.status(202).json({ queued: true, queueId, message: `Saved for retry: ${err.message}` });
+        } catch (qErr) {
+          console.error("[dispatch-retry] could not queue dispatch:", qErr);
+          writeQuarantineFallback({ reason: `dispatch write failed: ${err.message}`, body: req.body ?? null, createdAt: new Date().toISOString() });
+          return res.status(503).json({ message: err.message });
+        }
+      }
       res.status(400).json({ message: err.message });
     }
   });
+
+  // Replay queued dispatches through this same route (validation, dedup and
+  // address gates all apply). One pass every 15 s; each item backs off
+  // 15 s -> 10 min while the backend stays down.
+  const replayPort = parseInt(process.env.PORT || "5000", 10);
+  setInterval(() => {
+    const q = dispatchRetryQueue();
+    if (q.size === 0) return;
+    void q
+      .drain(
+        async (item) => {
+          const r = await fetch(`http://127.0.0.1:${replayPort}/api/dispatch`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", [DISPATCH_RETRY_HEADER]: item.id },
+            body: JSON.stringify(item.body),
+            signal: AbortSignal.timeout(120_000),
+          });
+          // 503 = still transient; 429 = our own rate limit. Anything else is a definitive answer.
+          if (r.status === 503 || r.status === 429) {
+            item.lastError = `HTTP ${r.status}`;
+            return "retry";
+          }
+          dispatchCounters.retryReplayed++;
+          console.log(`[dispatch-retry] replayed ${item.id} after ${item.attempts + 1} attempt(s) -> HTTP ${r.status}`);
+          return "done";
+        },
+        (item) => {
+          console.error(`[dispatch-retry] giving up on ${item.id} (queued ${new Date(item.queuedAt).toISOString()}); moved to quarantine fallback`);
+          writeQuarantineFallback({ reason: "dispatch retry expired", body: item.body, queuedAt: new Date(item.queuedAt).toISOString(), lastError: item.lastError, createdAt: new Date().toISOString() });
+        },
+      )
+      .catch((err) => console.error("[dispatch-retry] drain failed:", err));
+  }, 15_000).unref();
 
   // Update event status
   app.patch("/api/events/:id/status", requireAuth, writeLimiter, async (req, res) => {
@@ -1563,9 +1818,9 @@ export async function registerRoutes(
   // Every 5 min: intake counters, so rejected-vs-quarantined mismatches show in the app log.
   setInterval(() => {
     const c = dispatchCounters;
-    if (c.rejected || c.zod400 || c.dedupSuppressed || c.addressContextSaves || c.addressContextNone) {
+    if (c.rejected || c.zod400 || c.retryQueued || c.reviewEvents || c.dedupSuppressed || c.addressContextSaves || c.addressContextNone) {
       console.log(
-        `[dispatch-counters] rejected=${c.rejected} quarantined=${c.quarantined} quarantineFailed=${c.quarantineFailed} fallbackWrites=${c.quarantineFallbackWrites} zod400=${c.zod400} dedup=${c.dedupSuppressed} repeatIds=${c.repeatRequestIdsIgnored} contextSaves=${c.addressContextSaves} contextNone=${c.addressContextNone}`,
+        `[dispatch-counters] rejected=${c.rejected} quarantined=${c.quarantined} quarantineFailed=${c.quarantineFailed} fallbackWrites=${c.quarantineFallbackWrites} zod400=${c.zod400} retryQueued=${c.retryQueued} retryReplayed=${c.retryReplayed} retryPending=${retryQueue?.size ?? 0} review=${c.reviewEvents} dedup=${c.dedupSuppressed} repeatIds=${c.repeatRequestIdsIgnored} contextSaves=${c.addressContextSaves} contextNone=${c.addressContextNone}`,
       );
     }
   }, 5 * 60 * 1000).unref();
