@@ -76,7 +76,7 @@ export default function DriversPage() {
 
   useEffect(() => {
     if (!mapEl.current || map.current) return;
-    map.current = L.map(mapEl.current).setView([39.95, -75.16], 10);
+    map.current = L.map(mapEl.current).setView([27.95, -82.46], 11);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution: "&copy; OpenStreetMap contributors",
