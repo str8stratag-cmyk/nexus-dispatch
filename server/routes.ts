@@ -15,6 +15,7 @@ import { suggestStreets, levenshtein, type StreetDictionary } from "@shared/stre
 import { getDatabase, getDatabaseName, isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
 import { getWhisperModel } from "./whisper";
+import { isValidAdminSecretFormat, secureCompare, LoginLockout } from "./admin-auth";
 import {
   HARD_PRODUCTION_PHRASES,
   DISPATCH_SIGNALS,
@@ -233,10 +234,40 @@ const writeLimiter = rateLimit({
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
 
+// ADMIN_SECRET is a 4-digit PIN the owner sets per desk (never generated/invented
+// here). Warn loudly if it's set but malformed — requireAuth below still fails
+// closed either way, but a bad PIN that can never match is easy to miss otherwise.
+if (ADMIN_SECRET && !isValidAdminSecretFormat(ADMIN_SECRET)) {
+  console.warn(
+    `[auth] ADMIN_SECRET is set but is not a 4-digit PIN (expected /^\\d{4}$/). ` +
+      `Admin endpoints will reject every request, including the correct PIN, until this is fixed.`,
+  );
+}
+
+const adminLockout = new LoginLockout();
+
 function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  if (!ADMIN_SECRET) return next();
+  if (!ADMIN_SECRET) {
+    console.error(`[auth] ADMIN_SECRET is not set; blocking ${req.method} ${req.path} (fail-closed).`);
+    res.status(503).json({ message: "Admin authentication is not configured on this server. Set ADMIN_SECRET to enable this endpoint." });
+    return;
+  }
+
+  const ip = req.socket.remoteAddress ?? "";
+  const lockedMs = adminLockout.checkLocked(ip);
+  if (lockedMs !== null) {
+    console.warn(`[auth] ${ip} is locked out after repeated failed attempts; ${req.method} ${req.path} blocked.`);
+    res.status(429).json({ message: `Too many failed attempts. Try again in ${Math.ceil(lockedMs / 60_000)} minute(s).` });
+    return;
+  }
+
   const token = req.headers["x-admin-secret"] || req.query.secret;
-  if (token === ADMIN_SECRET) return next();
+  if (typeof token === "string" && secureCompare(token, ADMIN_SECRET)) {
+    adminLockout.recordSuccess(ip);
+    return next();
+  }
+
+  adminLockout.recordFailure(ip);
   res.status(401).json({ message: "Unauthorized. Set x-admin-secret header." });
 }
 
