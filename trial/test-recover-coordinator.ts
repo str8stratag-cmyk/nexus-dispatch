@@ -6,6 +6,7 @@ import {
   memoryStore,
   RECOVER_MIN_GAP_MS,
   DEAD_HOLDER_MS,
+  STUCK_PENDING_MS,
   type CoordTab,
 } from "../shared/capture-recover-coordinator";
 import { decideLease, DEAD_HOLDER_LEASE_MS, type CaptureLease } from "../shared/capture-lease";
@@ -116,6 +117,30 @@ const T = 1_800_000_000_000;
   check("lease: live holder keeps lease", decideLease(lease, { tabId: "P1", capturing: false }, T, T - 60_000).granted, false);
   check("lease: dead holder (5+ min silent) loses lease", decideLease(lease, { tabId: "P1", capturing: false }, T, T - DEAD_HOLDER_LEASE_MS).granted, true);
   check("lease: unknown holder signal keeps old behaviour", decideLease(lease, { tabId: "P1", capturing: false }, T).granted, false);
+}
+
+// 4a. Stuck pending (2026-10-23): with no dead/live holder elsewhere, a tab
+// still reporting lock=pending is offered a takeover once past
+// STUCK_PENDING_MS (capture-lock.ts's own ~12s abort should have already
+// resolved a normal hang well before this), but not a moment before. A real
+// live holder elsewhere still wins. Once the stuck tab takes the lock, it
+// stops vetoing recover for the whole desk (rule 1).
+{
+  const c = new RecoverCoordinator(memoryStore(), quiet);
+  const young: CoordTab = { tabId: "Y", at: T, firstSeenAt: T - (STUCK_PENDING_MS - 1_000), lock: "pending", capturing: false, lastChunkAt: null };
+  check("stuck pending: not yet offered a takeover just under the threshold", c.onHeartbeat("Y", [young], T).takeLock, undefined);
+  const c2 = new RecoverCoordinator(memoryStore(), quiet);
+  const stuck: CoordTab = { tabId: "S", at: T, firstSeenAt: T - STUCK_PENDING_MS, lock: "pending", capturing: false, lastChunkAt: null };
+  check("stuck pending: offered a takeover once the threshold is reached", c2.onHeartbeat("S", [stuck], T).takeLock, true);
+  const c3 = new RecoverCoordinator(memoryStore(), quiet);
+  const holder: CoordTab = { tabId: "H", at: T, firstSeenAt: T - 600_000, lock: "held", capturing: true, lastChunkAt: T };
+  const stuck2: CoordTab = { tabId: "S2", at: T, firstSeenAt: T - STUCK_PENDING_MS, lock: "pending", capturing: false, lastChunkAt: null };
+  check("stuck pending: a live holder elsewhere still wins (no takeover)", c3.onHeartbeat("S2", [holder, stuck2], T).takeLock, undefined);
+  check(
+    "stuck pending: no longer vetoes recover for the desk once it holds the lock",
+    c2.request([{ ...stuck, lock: "held" }], T + 1_000),
+    { accepted: true, targetTabId: "S" },
+  );
 }
 
 // 4b. Outstanding recover is cleared once a tab captures with the lock held, and on browser restart.

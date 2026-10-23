@@ -63,6 +63,15 @@ import {
   reminderText,
   START_SHIFT_INSTRUCTIONS,
 } from "./driver-location-helpers";
+import {
+  parseWhereCommand,
+  parseAdminIds,
+  isWhereAllowed,
+  isWhereChatAllowed,
+  filterDrivers,
+  formatWhereReply,
+  WHERE_MAX_PINS,
+} from "./telegram-where-helpers";
 import { recordDriverLocation, recordAcceptedCall, getLastDriverLocation, driverBoard } from "./driver-location";
 
 
@@ -2137,16 +2146,30 @@ export async function handleTelegramUpdate(update: any): Promise<void> {
     }
     return;
   }
-  // /startshift instructions.
   const textMsg = update?.message;
+  // /where [name] — admin-only (TELEGRAM_ADMIN_IDS); everyone else silently ignored.
+  const whereCmd = textMsg ? parseWhereCommand(textMsg.text) : null;
+  if (whereCmd) {
+    try {
+      await handleWhereCommand(textMsg, whereCmd.query);
+    } catch (err: any) {
+      console.error("[driver-gps] /where failed:", err?.message ?? err);
+    }
+    return;
+  }
+  // /startshift instructions.
   if (textMsg && isStartShiftCommand(textMsg.text)) {
-    const { botToken } = await getTelegramCredentials();
-    if (botToken && textMsg.chat?.id != null) {
-      await telegramApiCall(botToken, "sendMessage", {
-        chat_id: textMsg.chat.id,
-        text: START_SHIFT_INSTRUCTIONS,
-        reply_to_message_id: textMsg.message_id,
-      });
+    try {
+      const { botToken } = await getTelegramCredentials();
+      if (botToken && textMsg.chat?.id != null) {
+        await telegramApiCall(botToken, "sendMessage", {
+          chat_id: textMsg.chat.id,
+          text: START_SHIFT_INSTRUCTIONS,
+          reply_to_message_id: textMsg.message_id,
+        });
+      }
+    } catch (err: any) {
+      console.error("[driver-gps] /startshift failed:", err?.message ?? err);
     }
     return;
   }
@@ -2298,6 +2321,30 @@ async function trackAcceptedCall(
       text: reminderText(accepter, event.id),
       reply_to_message_id: messageId,
     });
+  }
+}
+
+async function handleWhereCommand(msg: any, query: string): Promise<void> {
+  const fromId = msg.from?.id;
+  if (!isWhereAllowed(fromId, parseAdminIds(process.env.TELEGRAM_ADMIN_IDS))) {
+    console.log(`[driver-gps] /where ignored (not allowlisted) user=${fromId ?? "?"}`);
+    return;
+  }
+  const { botToken, chatId: dispatchChatId } = await getTelegramCredentials();
+  if (!botToken || !isWhereChatAllowed(msg.chat, dispatchChatId)) return;
+  const now = Date.now();
+  const { drivers } = await driverBoard(now);
+  const matches = filterDrivers(drivers, query);
+  await telegramApiCall(botToken, "sendMessage", {
+    chat_id: msg.chat.id,
+    text: formatWhereReply(matches, query, now),
+    reply_to_message_id: msg.message_id,
+    disable_web_page_preview: true,
+  });
+  if (matches.length > 0 && matches.length <= WHERE_MAX_PINS) {
+    for (const d of matches) {
+      await telegramApiCall(botToken, "sendLocation", { chat_id: msg.chat.id, latitude: d.lat, longitude: d.lon });
+    }
   }
 }
 
