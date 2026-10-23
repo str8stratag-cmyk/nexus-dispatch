@@ -59,6 +59,12 @@ if (Test-Path $watchdogLocal) {
 $whisperRestartInterval = [TimeSpan]::FromHours(4)
 $gitPullInterval = [TimeSpan]::FromHours(4)
 $healthCheckInterval = [TimeSpan]::FromMinutes(1)
+# Branch-drift alert (2026-10-23): a desk left on the wrong branch never gets
+# release updates, and Pull-Repo used to skip it silently (see below). The
+# Telegram side of this alert is rate-limited and the timestamp is persisted
+# here so a watchdog restart does not reset the hourly cap.
+$branchAlertCooldown = [TimeSpan]::FromHours(1)
+$branchAlertStateFile = Join-Path $dispatchMonitor "logs\watchdog-branch-alert-state.json"
 if ($captureInactiveMin -lt 2) { $captureInactiveMin = $captureNoChunkMin }
 
 $lastWhisperRestart = [DateTime]::MinValue
@@ -324,7 +330,10 @@ function Pull-Repo($path, $branch) {
         return $false
     }
     if ($cur.Out -ne $branch) {
-        Write-Host "$(Get-Date) $path is on branch '$($cur.Out)', not '$branch'; skipping pull." -ForegroundColor DarkYellow
+        # Loud: a desk stuck on the wrong branch silently stops getting
+        # fleet updates forever, with nothing in the log calling it out.
+        Write-Warning "$(Get-Date) BRANCH DRIFT: $path is on branch '$($cur.Out)', not '$branch'; skipping pull (no auto-checkout). This desk will NOT receive fleet updates until the branch is fixed by hand."
+        [void](Send-BranchDriftAlert $path $cur.Out $branch)
         return $false
     }
     Write-Host "$(Get-Date) Pulling origin/$branch for $path..." -ForegroundColor Cyan
@@ -355,6 +364,82 @@ function Pull-Repo($path, $branch) {
         return $true
     }
     return $false
+}
+
+# Telegram credentials live in the main repo's .env (same vars the app reads
+# via dotenv: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID). The watchdog is a
+# separate process with no access to the app's in-memory/DB-backed settings,
+# so this is a best-effort read of the same file -- never logged or echoed.
+function Get-TelegramCredentials($repoPath) {
+    $bot = $env:TELEGRAM_BOT_TOKEN
+    $chat = $env:TELEGRAM_CHAT_ID
+    $envFile = Join-Path $repoPath ".env"
+    if ((-not $bot -or -not $chat) -and (Test-Path $envFile)) {
+        foreach ($line in Get-Content $envFile -ErrorAction SilentlyContinue) {
+            if (-not $bot -and $line -match '^\s*TELEGRAM_BOT_TOKEN\s*=\s*(.+?)\s*$') { $bot = $Matches[1].Trim().Trim('"').Trim("'") }
+            if (-not $chat -and $line -match '^\s*TELEGRAM_CHAT_ID\s*=\s*(.+?)\s*$') { $chat = $Matches[1].Trim().Trim('"').Trim("'") }
+        }
+    }
+    return @{ BotToken = $bot; ChatId = $chat }
+}
+function Send-TelegramAlert($repoPath, [string]$text) {
+    $creds = Get-TelegramCredentials $repoPath
+    if (-not $creds.BotToken -or -not $creds.ChatId) {
+        Write-Warning "$(Get-Date) Telegram alert not sent (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not configured): $text"
+        return $false
+    }
+    try {
+        $body = (@{ chat_id = $creds.ChatId; text = $text } | ConvertTo-Json -Compress)
+        [void](Invoke-RestMethod -Uri "https://api.telegram.org/bot$($creds.BotToken)/sendMessage" -Method POST -ContentType "application/json" -Body $body -TimeoutSec 15 -UseBasicParsing)
+        return $true
+    } catch {
+        Write-Warning "$(Get-Date) Telegram alert send failed: $_"
+        return $false
+    }
+}
+
+# Pure decision, no I/O -- directly unit-testable (see Get-CaptureOutageDecision above).
+function Test-BranchAlertAllowed([DateTime]$now, [DateTime]$lastAlert, [TimeSpan]$cooldown) {
+    return ($now - $lastAlert) -ge $cooldown
+}
+function Read-BranchAlertState($file) {
+    $st = @{}
+    try {
+        if (Test-Path $file) {
+            $j = Get-Content $file -Raw | ConvertFrom-Json
+            foreach ($p in $j.PSObject.Properties) {
+                $st[$p.Name] = [DateTime]::Parse($p.Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime()
+            }
+        }
+    } catch { Write-Warning "$(Get-Date) Could not read $file : $_" }
+    return $st
+}
+function Save-BranchAlertState($file, [hashtable]$state) {
+    try {
+        $dir = Split-Path $file -Parent
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $out = @{}
+        foreach ($k in $state.Keys) { $out[$k] = $state[$k].ToUniversalTime().ToString("o") }
+        $out | ConvertTo-Json | Set-Content -Path $file -Encoding UTF8
+    } catch { Write-Warning "$(Get-Date) Could not write $file : $_" }
+}
+# Rate-limited to once per hour per repo path; the timestamp is persisted
+# ($script:branchAlertStateFile) so a watchdog restart never resets the cap.
+# $script:branchAlertStateFile is unset (and this is a no-op) when Pull-Repo
+# is exercised outside the full script, e.g. an isolated unit test.
+function Send-BranchDriftAlert($path, $actualBranch, $expectedBranch, [DateTime]$now = (Get-Date)) {
+    $stateFile = $script:branchAlertStateFile
+    if (-not $stateFile) { return $false }
+    $cooldown = if ($script:branchAlertCooldown) { $script:branchAlertCooldown } else { [TimeSpan]::FromHours(1) }
+    $state = Read-BranchAlertState $stateFile
+    $last = if ($state.ContainsKey($path)) { $state[$path] } else { [DateTime]::MinValue }
+    if (-not (Test-BranchAlertAllowed $now $last $cooldown)) { return $false }
+    $credsRepo = if ($script:dispatchMonitor) { $script:dispatchMonitor } else { Split-Path -Parent $path }
+    $text = "[watchdog] BRANCH DRIFT: $path is on branch '$actualBranch', expected '$expectedBranch'. Auto-pull is skipped (no auto-checkout) -- this desk will NOT receive fleet updates until the branch is fixed by hand."
+    $sent = Send-TelegramAlert $credsRepo $text
+    $state[$path] = $now
+    Save-BranchAlertState $stateFile $state
+    return $sent
 }
 
 # App output is redirected to a log file. Like Whisper (see
