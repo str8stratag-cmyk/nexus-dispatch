@@ -14,6 +14,7 @@ import { compareHouseNumbers, hasFragmentedHouseNumber } from "@shared/house-num
 import { suggestStreets, levenshtein, type StreetDictionary } from "@shared/street-match";
 import { getDatabase, getDatabaseName, isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
+import { registerWhisperProxyRoutes } from "./whisper-proxy";
 import { getWhisperModel } from "./whisper";
 import { getGitInfo } from "./git-info";
 import {
@@ -2041,6 +2042,9 @@ export async function registerRoutes(
 
   // Audio upload: optimize with ffmpeg and store in Supabase
   registerAudioUploadRoutes(app);
+
+  // Same-origin proxy to Whisper (local or remote, per watchdog failover state).
+  registerWhisperProxyRoutes(app);
 
   return httpServer;
 }

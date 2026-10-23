@@ -53,7 +53,14 @@ function parseChunkMs(raw: unknown): number {
   return Number.isFinite(value) && value >= 2_000 && value <= 15_000 ? value : DEFAULT_CHUNK_MS;
 }
 export const CHUNK_DURATION_MS = parseChunkMs(import.meta.env.VITE_CHUNK_MS);
-const WHISPER_SERVICE_URL = import.meta.env.VITE_WHISPER_SERVICE_URL || "http://127.0.0.1:8178";
+// VITE_WHISPER_SERVICE_URL is baked in at Vite build time, so it can't react
+// to a runtime (watchdog-driven) local/remote failover. Default to the
+// same-origin server proxy (/api/whisper, see server/whisper-proxy.ts), which
+// re-resolves local vs. remote on every request; an explicit
+// VITE_WHISPER_SERVICE_URL still bypasses the proxy entirely (old direct-call
+// behavior, e.g. for debugging one desk).
+const EXPLICIT_WHISPER_URL = import.meta.env.VITE_WHISPER_SERVICE_URL?.trim();
+const WHISPER_SERVICE_URL = EXPLICIT_WHISPER_URL || "/api/whisper";
 const WHISPER_API_KEY = import.meta.env.VITE_WHISPER_API_KEY;
 
 // Chunks whose average RMS falls below this are treated as silence and never
@@ -174,7 +181,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       const response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, { method: "POST", body: form, headers });
       const result = await response.json() as { text?: string; message?: string };
       if (!response.ok) {
-        throw new Error(result.message || "Local Whisper transcription failed.");
+        throw new Error(result.message || "Whisper transcription failed.");
       }
       lastSentAtRef.current = Date.now();
       chunksSentRef.current += 1;
@@ -186,13 +193,13 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}): UseAudioC
       if (transcribeFailStreakRef.current > 0) setError(null);
       transcribeFailStreakRef.current = 0;
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Local Whisper transcription failed.";
+      const message = err instanceof Error ? err.message : "Whisper transcription failed.";
       console.error(message);
       sendErrorsRef.current += 1;
       transcribeFailStreakRef.current += 1;
       if (transcribeFailStreakRef.current >= 3) {
         setError(
-          `Local Whisper is NOT RESPONDING (${transcribeFailStreakRef.current} consecutive failures) — ` +
+          `Whisper is NOT RESPONDING (${transcribeFailStreakRef.current} consecutive failures) — ` +
           "capture is running but nothing is being transcribed. Restart Whisper/the watchdog on this machine, then Stop+Start Capture."
         );
       } else {
