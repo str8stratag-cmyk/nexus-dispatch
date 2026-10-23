@@ -74,6 +74,21 @@ import {
   WHERE_MAX_PINS,
 } from "./telegram-where-helpers";
 import { recordDriverLocation, recordAcceptedCall, getLastDriverLocation, driverBoard } from "./driver-location";
+import {
+  readCheckinConfig,
+  shouldPostDailyCheckin,
+  dailyCheckinText,
+  dailyCheckinMarkup,
+  parseCheckinCallbackData,
+  checkinAckText,
+  ineligibleAcceptText,
+  isCheckinsCommand,
+  formatRoster,
+  localClock,
+  shouldRemind,
+  expiryReminderHtml,
+} from "./driver-checkin-helpers";
+import { recordCheckin, driverEligibility, checkinRoster, getReminder, setReminder } from "./driver-checkin";
 
 
 const sseClients = new Set<Response>();
@@ -1249,7 +1264,11 @@ export async function registerRoutes(
   // Driver Live Location board: last fix per driver + accepted-call arrival status.
   app.get("/api/drivers/board", requireAuth, async (_req, res) => {
     try {
-      res.json(await driverBoard());
+      const board = await driverBoard();
+      // Eligibility (check-in + live location) per driver; informative even when the gate is off.
+      const cfg = readCheckinConfig();
+      const { date, rows } = await checkinRoster(cfg);
+      res.json({ ...board, checkin: { gateEnabled: cfg.enabled, date, freshMin: cfg.freshMs / 60_000, rows } });
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }
@@ -2162,6 +2181,15 @@ export async function handleTelegramUpdate(update: any): Promise<void> {
     }
     return;
   }
+  // /checkins — admin-only roster of who's checked in and sharing.
+  if (textMsg && isCheckinsCommand(textMsg.text)) {
+    try {
+      await handleCheckinsCommand(textMsg);
+    } catch (err: any) {
+      console.error("[driver-checkin] /checkins failed:", err?.message ?? err);
+    }
+    return;
+  }
   // /startshift instructions.
   if (textMsg && isStartShiftCommand(textMsg.text)) {
     try {
@@ -2182,6 +2210,14 @@ export async function handleTelegramUpdate(update: any): Promise<void> {
 
   const callback = update.callback_query;
   const data = typeof callback.data === "string" ? callback.data : null;
+  // Daily check-in button (✅ Check in for today).
+  const checkinDate = parseCheckinCallbackData(data);
+  if (checkinDate) {
+    await handleCheckinTap(callback, checkinDate).catch((err: any) =>
+      console.error("[driver-checkin] check-in tap failed:", err?.message ?? err),
+    );
+    return;
+  }
   const chatId = callback.message?.chat?.id;
   const messageId: number | null = callback.message?.message_id ?? null;
 
@@ -2260,6 +2296,24 @@ export async function handleTelegramUpdate(update: any): Promise<void> {
 
     const accepter = formatTelegramAccepterName(callback.from);
 
+    // Location gate (DRIVER_LOCATION_GATE=1): only checked-in drivers with a
+    // fresh, unexpired Live Location may accept. Owner rule: no location, no calls.
+    const gateCfg = readCheckinConfig();
+    if (gateCfg.enabled) {
+      const uid = typeof callback.from?.id === "number" ? callback.from.id : null;
+      const elig = uid == null ? "not_checked_in" : await driverEligibility(uid, gateCfg);
+      if (elig !== "eligible") {
+        log.error = `ineligible:${elig}`;
+        emit("ineligible");
+        await telegramApiCall(botToken, "answerCallbackQuery", {
+          callback_query_id: callback.id,
+          text: ineligibleAcceptText(elig, gateCfg.freshMs / 60_000),
+          show_alert: true,
+        });
+        return;
+      }
+    }
+
     // Atomic claim — if another tap (or desk) already accepted, treat as already taken.
     const updated = await storage.claimEventAccepted(eventId, accepter);
     if (!updated) {
@@ -2326,6 +2380,106 @@ async function trackAcceptedCall(
       text: reminderText(accepter, event.id),
       reply_to_message_id: messageId,
     });
+  }
+}
+
+async function handleCheckinTap(callback: any, date: string): Promise<void> {
+  const { botToken, chatId: dispatchChatId } = await getTelegramCredentials();
+  if (!botToken) return;
+  const cfg = readCheckinConfig();
+  const uid = typeof callback.from?.id === "number" ? callback.from.id : null;
+  const chatOk = isDispatchGroupChat(callback.message?.chat?.id != null ? String(callback.message.chat.id) : null, dispatchChatId);
+  const today = localClock(Date.now(), cfg.timeZone).date;
+  if (uid == null || !chatOk || date !== today) {
+    await telegramApiCall(botToken, "answerCallbackQuery", {
+      callback_query_id: callback.id,
+      text: date !== today ? "That check-in is from another day — use today's check-in message." : "Check-in only works in the dispatch group.",
+      show_alert: true,
+    });
+    return;
+  }
+  const name = formatTelegramAccepterName(callback.from);
+  const isNew = await recordCheckin(date, uid, name);
+  const elig = await driverEligibility(uid, cfg);
+  console.log(`[driver-checkin] ${JSON.stringify({ date, user: uid, isNew, eligibility: elig })}`);
+  await telegramApiCall(botToken, "answerCallbackQuery", {
+    callback_query_id: callback.id,
+    text: checkinAckText(!isNew, elig === "eligible"),
+    show_alert: elig !== "eligible",
+  });
+}
+
+async function handleCheckinsCommand(msg: any): Promise<void> {
+  const fromId = msg.from?.id;
+  if (!isWhereAllowed(fromId, parseAdminIds(process.env.TELEGRAM_ADMIN_IDS))) {
+    console.log(`[driver-checkin] /checkins ignored (not allowlisted) user=${fromId ?? "?"}`);
+    return;
+  }
+  const { botToken, chatId: dispatchChatId } = await getTelegramCredentials();
+  if (!botToken || !isWhereChatAllowed(msg.chat, dispatchChatId)) return;
+  const cfg = readCheckinConfig();
+  const now = Date.now();
+  const { date, rows } = await checkinRoster(cfg, now);
+  await telegramApiCall(botToken, "sendMessage", {
+    chat_id: msg.chat.id,
+    text: formatRoster(date, rows, now, cfg.enabled),
+    reply_to_message_id: msg.message_id,
+    disable_web_page_preview: true,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Daily check-in post + expiry reminders (poller desk only, DRIVER_LOCATION_GATE=1)
+// ---------------------------------------------------------------------------
+const DRIVER_CHECKIN_LAST_SENT_KEY = "driver_checkin_last_sent_date";
+let checkinTickerStarted = false;
+let checkinTickBusy = false;
+
+function startDriverCheckinTicker(): void {
+  if (checkinTickerStarted) return;
+  checkinTickerStarted = true;
+  const t = setInterval(() => {
+    if (checkinTickBusy) return;
+    checkinTickBusy = true;
+    driverCheckinTick()
+      .catch((err) => console.error("[driver-checkin] tick failed:", err?.message ?? err))
+      .finally(() => { checkinTickBusy = false; });
+  }, 60_000);
+  (t as { unref?: () => void }).unref?.();
+}
+
+async function driverCheckinTick(now = Date.now()): Promise<void> {
+  const cfg = readCheckinConfig();
+  if (!cfg.enabled) return;
+  const { botToken, chatId } = await getTelegramCredentials();
+  if (!botToken || !chatId) return;
+
+  const lastSent = (await storage.getSetting(DRIVER_CHECKIN_LAST_SENT_KEY))?.value ?? null;
+  const postDate = shouldPostDailyCheckin(now, lastSent, cfg);
+  if (postDate) {
+    // Persist first so a crash/retry can never double-post the same day.
+    await storage.upsertSetting({ key: DRIVER_CHECKIN_LAST_SENT_KEY, value: postDate });
+    const r = await telegramApiCall(botToken, "sendMessage", {
+      chat_id: chatId,
+      text: dailyCheckinText(postDate, cfg.freshMs / 60_000),
+      reply_markup: dailyCheckinMarkup(postDate),
+    });
+    console.log(`[driver-checkin] daily check-in posted date=${postDate} ok=${r?.ok}`);
+  }
+
+  // Expiry/stale reminders for drivers checked in today.
+  const { date, rows } = await checkinRoster(cfg, now);
+  for (const row of rows) {
+    if (!row.checkedIn) continue;
+    const prev = await getReminder(date, row.telegramUserId);
+    if (!shouldRemind(row.status, row.lastFixAt, prev, now, cfg.reminderCooldownMs)) continue;
+    await setReminder(date, row.telegramUserId, now, row.lastFixAt);
+    await telegramApiCall(botToken, "sendMessage", {
+      chat_id: chatId,
+      text: expiryReminderHtml(row.telegramUserId, row.driverName, row.status),
+      parse_mode: "HTML",
+    });
+    console.log(`[driver-checkin] reminder user=${row.telegramUserId} status=${row.status}`);
   }
 }
 
@@ -2462,6 +2616,8 @@ export function startTelegramPolling(): void {
   if (telegramPollingStarted) return;
   telegramPollingStarted = true;
   void telegramPollLoop();
+  // Only the polling desk posts the daily check-in / reminders (no-op unless DRIVER_LOCATION_GATE=1).
+  startDriverCheckinTicker();
 }
 
 async function telegramPollLoop(): Promise<void> {
