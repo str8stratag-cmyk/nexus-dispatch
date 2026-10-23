@@ -15,6 +15,7 @@ import { suggestStreets, levenshtein, type StreetDictionary } from "@shared/stre
 import { getDatabase, getDatabaseName, isMongoConfigured } from "./mongodb";
 import { registerAudioUploadRoutes } from "./audio-upload";
 import { getWhisperModel } from "./whisper";
+import { getGitInfo } from "./git-info";
 import {
   HARD_PRODUCTION_PHRASES,
   DISPATCH_SIGNALS,
@@ -1012,6 +1013,10 @@ export async function registerRoutes(
       hasMongoUri: Boolean(process.env.MONGODB_URI),
       hasMongoDbName: Boolean(process.env.MONGODB_DB_NAME),
       nodeEnv: process.env.NODE_ENV || null,
+      // Current checkout's branch/commit (see scripts/watchdog.ps1's
+      // branch-drift alert, which this corroborates from the app side).
+      // null fields mean git itself is unavailable, not a crash.
+      git: getGitInfo(),
       // Intake counters since process start (see dispatchCounters).
       dispatch: dispatchCounters,
     });
