@@ -61,7 +61,7 @@ Check "WHISPER_REMOTE_URL takes precedence over VITE_WHISPER_SERVICE_URL" (Get-C
 $env:WHISPER_REMOTE_URL = $oldRemote; $env:VITE_WHISPER_SERVICE_URL = $oldVite
 
 # ---------------- Get-WhisperFailoverStep: pure decision ----------------
-$failoverAfter = [TimeSpan]::FromSeconds(30)
+$failoverAfter = [TimeSpan]::FromSeconds(60)
 $failbackAfter = [TimeSpan]::FromMinutes(3)
 $minDwell = [TimeSpan]::FromSeconds(30)
 $t0 = Get-Date "2026-10-23T12:00:00"
@@ -71,18 +71,18 @@ $r = Get-WhisperFailoverStep @{ Now = $t0; Mode = "remote"; RemoteOk = $true; Re
 Check "remote healthy: action" $r.Action "healthy"
 Check "remote healthy: fail-since cleared" $r.RemoteFailSince $null
 
-# Remote mode, just started failing: wait, not yet 30s.
+# Remote mode, just started failing: wait, not yet 60s.
 $r = Get-WhisperFailoverStep @{ Now = $t0; Mode = "remote"; RemoteOk = $false; RemoteFailSince = $null; RemoteHealthySince = $null; LastSwitch = [DateTime]::MinValue; FailoverAfter = $failoverAfter; FailbackAfter = $failbackAfter; MinDwell = $minDwell }
 Check "remote first failure: action" $r.Action "wait-fail"
 Check "remote first failure: fail-since stamped to now" $r.RemoteFailSince $t0
 
 # Remote mode, failing for 29s: still waiting.
-$r = Get-WhisperFailoverStep @{ Now = $t0.AddSeconds(29); Mode = "remote"; RemoteOk = $false; RemoteFailSince = $t0; RemoteHealthySince = $null; LastSwitch = [DateTime]::MinValue; FailoverAfter = $failoverAfter; FailbackAfter = $failbackAfter; MinDwell = $minDwell }
+$r = Get-WhisperFailoverStep @{ Now = $t0.AddSeconds(59); Mode = "remote"; RemoteOk = $false; RemoteFailSince = $t0; RemoteHealthySince = $null; LastSwitch = [DateTime]::MinValue; FailoverAfter = $failoverAfter; FailbackAfter = $failbackAfter; MinDwell = $minDwell }
 Check "remote failing 29s: action" $r.Action "wait-fail"
 
-# Remote mode, failing for exactly 30s: fails over.
-$r = Get-WhisperFailoverStep @{ Now = $t0.AddSeconds(30); Mode = "remote"; RemoteOk = $false; RemoteFailSince = $t0; RemoteHealthySince = $null; LastSwitch = [DateTime]::MinValue; FailoverAfter = $failoverAfter; FailbackAfter = $failbackAfter; MinDwell = $minDwell }
-Check "remote failing 30s: action" $r.Action "failover-to-local"
+# Remote mode, failing for exactly 60s: fails over.
+$r = Get-WhisperFailoverStep @{ Now = $t0.AddSeconds(60); Mode = "remote"; RemoteOk = $false; RemoteFailSince = $t0; RemoteHealthySince = $null; LastSwitch = [DateTime]::MinValue; FailoverAfter = $failoverAfter; FailbackAfter = $failbackAfter; MinDwell = $minDwell }
+Check "remote failing 60s: action" $r.Action "failover-to-local"
 
 # Local mode, remote still down: no-op.
 $r = Get-WhisperFailoverStep @{ Now = $t0; Mode = "local"; RemoteOk = $false; RemoteFailSince = $null; RemoteHealthySince = $t0.AddSeconds(-10); LastSwitch = $t0.AddMinutes(-5); FailoverAfter = $failoverAfter; FailbackAfter = $failbackAfter; MinDwell = $minDwell }
@@ -172,13 +172,13 @@ $script:remoteAlive = $false
 Invoke-WhisperFailoverStep ($tStart.AddSeconds(1))
 Check "check-interval gate: no-op within 12s of last check" $script:whisperRemoteFailSince $null
 
-# Advance past the check interval repeatedly until the 30s failover threshold trips.
+# Advance past the check interval repeatedly until the 60s failover threshold trips.
 $t = $tStart
-for ($i = 0; $i -lt 4; $i++) {
+for ($i = 0; $i -lt 6; $i++) {
     $t = $t.AddSeconds(12)
     Invoke-WhisperFailoverStep $t
 }
-Check "remote down >=30s across ticks: failed over to local" $script:whisperFailoverMode "local"
+Check "remote down >=60s across ticks: failed over to local" $script:whisperFailoverMode "local"
 Check "failover: Start-Whisper called exactly once" $script:starts 1
 Check "failover: Telegram alert sent" $script:tgCalls.Count 1
 Check "failover: alert mentions FAILOVER" ($script:tgCalls[0].Text -match "FAILOVER") $true
