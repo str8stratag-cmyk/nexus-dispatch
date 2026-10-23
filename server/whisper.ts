@@ -1,5 +1,13 @@
-const WHISPER_SERVICE_URL = process.env.WHISPER_SERVICE_URL || "http://127.0.0.1:8178";
+import { resolveWhisperTarget } from "./whisper-failover";
+
+// process.env.WHISPER_SERVICE_URL is a legacy direct override (bypasses
+// failover entirely, same as before this existed); otherwise resolved
+// dynamically per call so a watchdog-driven local/remote switch takes
+// effect without a server restart.
 const WHISPER_API_KEY = process.env.WHISPER_API_KEY;
+function getWhisperServiceUrl(): string {
+  return process.env.WHISPER_SERVICE_URL || resolveWhisperTarget();
+}
 
 interface WhisperResponse {
   text: string;
@@ -24,9 +32,10 @@ export async function transcribeAudio(
   body.set("audio", new Blob([audio]), filename);
   body.set("prompt", prompt);
 
+  const whisperServiceUrl = getWhisperServiceUrl();
   let response: Response;
   try {
-    response = await fetch(`${WHISPER_SERVICE_URL}/transcribe`, {
+    response = await fetch(`${whisperServiceUrl}/transcribe`, {
       method: "POST",
       body,
       headers: WHISPER_API_KEY ? { "X-Whisper-Key": WHISPER_API_KEY } : undefined,
@@ -34,12 +43,12 @@ export async function transcribeAudio(
     });
   } catch (error) {
     throw new Error(
-      `Local Whisper service is unavailable at ${WHISPER_SERVICE_URL}. Start it with "npm run whisper:start".`
+      `Whisper service is unavailable at ${whisperServiceUrl}. Start it with "npm run whisper:start".`
     );
   }
 
   if (!response.ok) {
-    throw new Error(`Local Whisper transcription failed: ${await response.text()}`);
+    throw new Error(`Whisper transcription failed: ${await response.text()}`);
   }
 
   const result = await response.json() as Partial<WhisperResponse>;
@@ -55,19 +64,33 @@ export async function transcribeAudio(
   };
 }
 
-// Cached model name of the local Whisper service (from /health). Used to stamp
+// Cached model name of the Whisper service (from /health). Used to stamp
 // dispatch events with which model produced them (fleet accuracy comparison).
+// Keyed off the resolved URL so a watchdog failover (local <-> remote, which
+// typically also means a different model, e.g. small.en vs. medium.en) never
+// serves a stale model name from the side that answered before the switch.
 let cachedWhisperModel: string | undefined;
+let cachedWhisperModelUrl: string | undefined;
 let whisperModelPromise: Promise<string | undefined> | undefined;
 
 export function getWhisperModel(): Promise<string | undefined> {
-  if (cachedWhisperModel) return Promise.resolve(cachedWhisperModel);
-  whisperModelPromise ??= fetch(`${WHISPER_SERVICE_URL}/health`, {
+  const whisperServiceUrl = getWhisperServiceUrl();
+  if (cachedWhisperModel && cachedWhisperModelUrl === whisperServiceUrl) {
+    return Promise.resolve(cachedWhisperModel);
+  }
+  if (cachedWhisperModelUrl !== whisperServiceUrl) {
+    // Target changed since the last successful lookup: drop any in-flight
+    // promise for the old target too, not just the cached value.
+    cachedWhisperModel = undefined;
+    whisperModelPromise = undefined;
+  }
+  whisperModelPromise ??= fetch(`${whisperServiceUrl}/health`, {
     signal: AbortSignal.timeout(10_000),
   })
     .then((res) => (res.ok ? res.json() : undefined))
     .then((health: { model?: string } | undefined) => {
       cachedWhisperModel = typeof health?.model === "string" ? health.model : undefined;
+      cachedWhisperModelUrl = cachedWhisperModel ? whisperServiceUrl : undefined;
       return cachedWhisperModel;
     })
     .catch(() => undefined)

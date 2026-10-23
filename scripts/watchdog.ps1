@@ -260,6 +260,181 @@ function Restart-Whisper() {
     $script:lastWhisperRestart = Get-Date
 }
 
+function Stop-LocalWhisper() {
+    Write-Host "$(Get-Date) Stopping local Whisper (failing back to remote)..." -ForegroundColor Cyan
+    Stop-ProcessOnPort 8178
+    Stop-StrayWhisper
+    Stop-WhisperLauncher
+}
+
+# ---------------------------------------------------------------------------
+# Whisper GPU failover (2026-10-23). Desks can point at a remote Whisper
+# (e.g. the GPU box, WHISP-1) instead of running one locally. Configured via
+# WHISPER_REMOTE_URL (server-side, preferred) or VITE_WHISPER_SERVICE_URL
+# (legacy/client var, also read here as a fallback) in .env. If that URL's
+# host is 127.0.0.1/localhost, Whisper is purely local and none of this
+# engages -- Start-Whisper/Restart-Whisper above run exactly as before.
+#
+# When it IS a remote host: this watchdog never starts/manages local Whisper
+# while the remote is healthy (no 4h schedule restart, no fail-streak
+# restart, no start at boot). It health-checks the remote every
+# ~$whisperFailoverCheckInterval; after ~$whisperFailoverToLocalAfter of
+# consecutive failures it starts local Whisper (small.en/CPU/int8, beam/
+# best_of from whisper-model.local same as any local desk -- Start-Whisper is
+# unchanged) and flips the runtime-state file so server/whisper-proxy.ts
+# (the client always calls /api/whisper, never Whisper directly -- its own
+# VITE_WHISPER_SERVICE_URL is baked in at build time and can't react to this)
+# starts forwarding to local instead of remote. No Chrome/capture restart is
+# needed for that switch. Once the remote has been healthy continuously for
+# ~$whisperFailoverToRemoteAfter, it switches back and stops local Whisper.
+# $whisperFailoverMinDwell (and the asymmetric 30s-to-fail-over vs.
+# 3min-to-fail-back thresholds themselves) keep a flapping remote from
+# bouncing the desk back and forth.
+function Get-ConfiguredWhisperUrl($repoPath) {
+    $remote = $env:WHISPER_REMOTE_URL
+    $vite = $env:VITE_WHISPER_SERVICE_URL
+    $envFile = Join-Path $repoPath ".env"
+    if ((-not $remote -or -not $vite) -and (Test-Path $envFile)) {
+        foreach ($line in Get-Content $envFile -ErrorAction SilentlyContinue) {
+            if (-not $remote -and $line -match '^\s*WHISPER_REMOTE_URL\s*=\s*(.+?)\s*$') { $remote = $Matches[1].Trim().Trim('"').Trim("'") }
+            if (-not $vite -and $line -match '^\s*VITE_WHISPER_SERVICE_URL\s*=\s*(.+?)\s*$') { $vite = $Matches[1].Trim().Trim('"').Trim("'") }
+        }
+    }
+    if ($remote) { return $remote }
+    if ($vite) { return $vite }
+    return "http://127.0.0.1:8178"
+}
+# Malformed/relative URL -> treated as local: never silently manage a
+# garbage config value as "remote" with no local Whisper ever started to
+# fall back to. Uri.IsLoopback already normalizes 127.0.0.1/localhost/::1
+# (including the bracketed canonical IPv6 form), so no manual host matching.
+function Test-WhisperUrlLocal($url) {
+    try {
+        $u = [Uri]$url
+        if (-not $u.IsAbsoluteUri) { return $true }
+        return $u.IsLoopback
+    } catch {
+        return $true
+    }
+}
+function Test-RemoteWhisperAlive($url) {
+    try {
+        $res = Invoke-WebRequest -Uri "$($url.TrimEnd('/'))/health" -Method GET -TimeoutSec 10 -UseBasicParsing
+        return $res.StatusCode -eq 200
+    } catch {
+        return $false
+    }
+}
+
+# Pure decision (tested by trial/test-watchdog-whisper-failover.ps1). $s: Now,
+# Mode (remote|local), RemoteOk (bool), RemoteFailSince, RemoteHealthySince,
+# LastSwitch, FailoverAfter, FailbackAfter, MinDwell (TimeSpans). Returns
+# @{ Action; Why; RemoteFailSince; RemoteHealthySince } -- caller persists the
+# two returned timestamps for the next tick (and across a watchdog restart).
+# Actions: healthy | unhealthy | wait-fail | failover-to-local | dwell |
+#          wait-healthy | failback-to-remote
+function Get-WhisperFailoverStep($s) {
+    if ($s.Mode -eq "remote") {
+        if ($s.RemoteOk) { return @{ Action = "healthy"; Why = ""; RemoteFailSince = $null; RemoteHealthySince = $null } }
+        $failSince = if ($s.RemoteFailSince) { $s.RemoteFailSince } else { $s.Now }
+        $elapsed = $s.Now - $failSince
+        if ($elapsed -ge $s.FailoverAfter) {
+            return @{ Action = "failover-to-local"; Why = "remote Whisper unhealthy for $([int]$elapsed.TotalSeconds)s (>= $([int]$s.FailoverAfter.TotalSeconds)s)"; RemoteFailSince = $failSince; RemoteHealthySince = $null }
+        }
+        return @{ Action = "wait-fail"; Why = "remote Whisper unhealthy for $([int]$elapsed.TotalSeconds)s, failing over to local at $([int]$s.FailoverAfter.TotalSeconds)s"; RemoteFailSince = $failSince; RemoteHealthySince = $null }
+    }
+    # $s.Mode -eq "local": we're serving from local Whisper, watching for the
+    # remote to come back.
+    if (-not $s.RemoteOk) { return @{ Action = "unhealthy"; Why = ""; RemoteFailSince = $null; RemoteHealthySince = $null } }
+    if (($s.Now - $s.LastSwitch) -lt $s.MinDwell) {
+        return @{ Action = "dwell"; Why = "switched to local $([int]($s.Now - $s.LastSwitch).TotalSeconds)s ago; minimum dwell $([int]$s.MinDwell.TotalSeconds)s before failing back"; RemoteFailSince = $null; RemoteHealthySince = $s.RemoteHealthySince }
+    }
+    $healthySince = if ($s.RemoteHealthySince) { $s.RemoteHealthySince } else { $s.Now }
+    $elapsed = $s.Now - $healthySince
+    if ($elapsed -ge $s.FailbackAfter) {
+        return @{ Action = "failback-to-remote"; Why = "remote Whisper healthy for $([int]$elapsed.TotalSeconds)s (>= $([int]$s.FailbackAfter.TotalSeconds)s)"; RemoteFailSince = $null; RemoteHealthySince = $healthySince }
+    }
+    return @{ Action = "wait-healthy"; Why = "remote Whisper healthy for $([int]$elapsed.TotalSeconds)s, failing back to remote at $([int]$s.FailbackAfter.TotalSeconds)s"; RemoteFailSince = $null; RemoteHealthySince = $healthySince }
+}
+
+# Runtime state shared with the Node app (server/whisper-failover.ts reads
+# the same file, default path logs\whisper-runtime-state.json under the repo
+# root -- matches process.cwd() for "npm run dev" launched from here). Only
+# mode/remoteUrl/localUrl matter to the app; the rest is this watchdog's own
+# bookkeeping so a restart (or a self-update respawn) doesn't lose the
+# in-progress fail/healthy streak timers.
+function Read-WhisperRuntimeState($file) {
+    $st = @{ Mode = "remote"; RemoteFailSince = $null; RemoteHealthySince = $null; LastSwitch = [DateTime]::MinValue }
+    try {
+        if (Test-Path $file) {
+            $j = Get-Content $file -Raw | ConvertFrom-Json
+            if ($j.mode -eq "local" -or $j.mode -eq "remote") { $st.Mode = "$($j.mode)" }
+            if ($j.remoteFailSince) { $st.RemoteFailSince = [DateTime]::Parse($j.remoteFailSince, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime() }
+            if ($j.remoteHealthySince) { $st.RemoteHealthySince = [DateTime]::Parse($j.remoteHealthySince, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime() }
+            if ($j.lastSwitch) { $st.LastSwitch = [DateTime]::Parse($j.lastSwitch, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime() }
+        }
+    } catch { Write-Warning "$(Get-Date) Could not read $file : $_" }
+    return $st
+}
+function Save-WhisperRuntimeState($file, [string]$mode, [string]$remoteUrl, [string]$localUrl, [DateTime]$lastSwitch, $remoteFailSince, $remoteHealthySince) {
+    try {
+        $dir = Split-Path $file -Parent
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $out = @{
+            mode = $mode
+            remoteUrl = $remoteUrl
+            localUrl = $localUrl
+            since = $lastSwitch.ToUniversalTime().ToString("o")
+            lastSwitch = $lastSwitch.ToUniversalTime().ToString("o")
+            remoteFailSince = if ($remoteFailSince) { $remoteFailSince.ToUniversalTime().ToString("o") } else { $null }
+            remoteHealthySince = if ($remoteHealthySince) { $remoteHealthySince.ToUniversalTime().ToString("o") } else { $null }
+        }
+        $out | ConvertTo-Json | Set-Content -Path $file -Encoding UTF8
+    } catch { Write-Warning "$(Get-Date) Could not write $file : $_" }
+}
+
+# One loop tick, gated to run at most every $whisperFailoverCheckInterval.
+# No-op entirely when $whisperFailoverEnabled is $false (Whisper configured
+# locally) -- today's Start-Whisper/Restart-Whisper behavior is untouched.
+function Invoke-WhisperFailoverStep([DateTime]$now) {
+    if (-not $script:whisperFailoverEnabled) { return }
+    if (($now - $script:lastWhisperFailoverCheck) -lt $script:whisperFailoverCheckInterval) { return }
+    $script:lastWhisperFailoverCheck = $now
+    $remoteOk = Test-RemoteWhisperAlive $script:remoteWhisperUrl
+    $step = Get-WhisperFailoverStep @{
+        Now = $now; Mode = $script:whisperFailoverMode; RemoteOk = $remoteOk
+        RemoteFailSince = $script:whisperRemoteFailSince; RemoteHealthySince = $script:whisperRemoteHealthySince
+        LastSwitch = $script:whisperFailoverLastSwitch
+        FailoverAfter = $script:whisperFailoverToLocalAfter; FailbackAfter = $script:whisperFailoverToRemoteAfter; MinDwell = $script:whisperFailoverMinDwell
+    }
+    $script:whisperRemoteFailSince = $step.RemoteFailSince
+    $script:whisperRemoteHealthySince = $step.RemoteHealthySince
+    switch ($step.Action) {
+        "failover-to-local" {
+            Write-Warning "$(Get-Date) [whisper-failover] $($step.Why); starting local Whisper and switching capture to it."
+            Start-Whisper
+            $script:lastWhisperRestart = $now
+            $script:whisperFailoverMode = "local"
+            $script:whisperFailoverLastSwitch = $now
+            Save-WhisperRuntimeState $script:whisperFailoverStateFile "local" $script:remoteWhisperUrl $script:localWhisperUrl $now $null $null
+            [void](Send-TelegramAlert $script:dispatchMonitor "[watchdog] WHISPER FAILOVER: $($script:dispatchMonitor) switched from remote ($script:remoteWhisperUrl) to LOCAL Whisper -- $($step.Why).")
+        }
+        "failback-to-remote" {
+            Write-Host "$(Get-Date) [whisper-failover] $($step.Why); stopping local Whisper and switching capture back to remote." -ForegroundColor Green
+            Stop-LocalWhisper
+            $script:whisperFailoverMode = "remote"
+            $script:whisperFailoverLastSwitch = $now
+            $script:whisperFailStreak = 0
+            Save-WhisperRuntimeState $script:whisperFailoverStateFile "remote" $script:remoteWhisperUrl $script:localWhisperUrl $now $null $null
+            [void](Send-TelegramAlert $script:dispatchMonitor "[watchdog] WHISPER FAILBACK: $($script:dispatchMonitor) switched back to remote Whisper ($script:remoteWhisperUrl) -- $($step.Why).")
+        }
+        default {
+            Save-WhisperRuntimeState $script:whisperFailoverStateFile $script:whisperFailoverMode $script:remoteWhisperUrl $script:localWhisperUrl $script:whisperFailoverLastSwitch $script:whisperRemoteFailSince $script:whisperRemoteHealthySince
+            if ($step.Action -ne "healthy") { Write-Host "$(Get-Date) [whisper-failover] $($step.Action): $($step.Why)" -ForegroundColor DarkGray }
+        }
+    }
+}
+
 # 2026-10-21 (Disp-4 live test, 5:38 PM): the loop went silent right after
 # "Pull of origin/release failed (local changes?)" on a detached HEAD and never
 # ran another capture check. Every git/npm call used to run with no timeout in
@@ -1174,9 +1349,43 @@ try {
 }
 Write-Host "$(Get-Date) Watchdog starting (repo: $dispatchMonitor, whisper: $whisperRoot, NoInitialStart: $NoInitialStart)" -ForegroundColor Green
 
+# Whisper GPU failover setup (see the functions above). Resolved once at
+# startup from .env, same as the other config read at the top of this script;
+# WHISPER_REMOTE_URL/VITE_WHISPER_SERVICE_URL changing requires a watchdog
+# restart to take effect, matching how every other .env-sourced setting here
+# already works (e.g. Telegram credentials).
+$whisperFailoverStateFile = Join-Path $dispatchMonitor "logs\whisper-runtime-state.json"
+$remoteWhisperUrl = Get-ConfiguredWhisperUrl $dispatchMonitor
+$localWhisperUrl = "http://127.0.0.1:8178"
+$whisperFailoverEnabled = -not (Test-WhisperUrlLocal $remoteWhisperUrl)
+$whisperFailoverCheckInterval = [TimeSpan]::FromSeconds(12)
+$whisperFailoverToLocalAfter = [TimeSpan]::FromSeconds(30)
+$whisperFailoverToRemoteAfter = [TimeSpan]::FromMinutes(3)
+$whisperFailoverMinDwell = [TimeSpan]::FromSeconds(30)
+$lastWhisperFailoverCheck = [DateTime]::MinValue
+$whisperFailoverMode = "remote"
+$whisperRemoteFailSince = $null
+$whisperRemoteHealthySince = $null
+$whisperFailoverLastSwitch = [DateTime]::MinValue
+if ($whisperFailoverEnabled) {
+    $persistedWhisper = Read-WhisperRuntimeState $whisperFailoverStateFile
+    $whisperFailoverMode = $persistedWhisper.Mode
+    $whisperRemoteFailSince = $persistedWhisper.RemoteFailSince
+    $whisperRemoteHealthySince = $persistedWhisper.RemoteHealthySince
+    $whisperFailoverLastSwitch = $persistedWhisper.LastSwitch
+    Write-Host "$(Get-Date) Whisper failover ENABLED: configured remote $remoteWhisperUrl; starting in '$whisperFailoverMode' mode (persisted)." -ForegroundColor Cyan
+    Save-WhisperRuntimeState $whisperFailoverStateFile $whisperFailoverMode $remoteWhisperUrl $localWhisperUrl $whisperFailoverLastSwitch $whisperRemoteFailSince $whisperRemoteHealthySince
+} else {
+    Write-Host "$(Get-Date) Whisper configured locally ($remoteWhisperUrl); failover disabled, managing local Whisper as before." -ForegroundColor DarkGray
+}
+
 # Initial start
 if (-not $NoInitialStart) {
-    Start-Whisper
+    if (-not ($whisperFailoverEnabled -and $whisperFailoverMode -eq "remote")) {
+        Start-Whisper
+    } else {
+        Write-Host "$(Get-Date) Skipping local Whisper start at boot: configured remote ($remoteWhisperUrl, mode=remote)." -ForegroundColor DarkGray
+    }
     $dmLog = Join-Path $dispatchMonitor "logs\dispatch-monitor.log"
 $captureStateFile = Join-Path $dispatchMonitor "logs\watchdog-capture-state.json"
 $persisted = Read-CaptureState $captureStateFile
@@ -1237,6 +1446,7 @@ while ($true) {
         # Runs during the boot window too (2026-10-22): it is the only path that
         # opens Chrome, and it never adds a tab next to a live one.
         try { [void](Invoke-CaptureRecoveryStep ([DateTime]::Now)) } catch { Write-Warning "$(Get-Date) Capture check failed (continuing): $_" }
+        try { Invoke-WhisperFailoverStep ([DateTime]::Now) } catch { Write-Warning "$(Get-Date) Whisper failover check failed (continuing): $_" }
         try { [void](Write-WatchdogBeat ([DateTime]::Now)) } catch { Write-Warning "$(Get-Date) Watchdog heartbeat line failed: $_" }
     }
     # 2026-10-21: one failing step must never stop the loop.
@@ -1244,17 +1454,25 @@ while ($true) {
 
     $now = Get-Date
 
-    $whisperScheduled = ($now - $lastWhisperRestart) -gt $whisperRestartInterval
-    $whisperAlive = Test-WhisperAlive
-    if ($whisperAlive) { $whisperFailStreak = 0 } else { $whisperFailStreak++ }
+    # While a remote Whisper is configured and currently serving (mode
+    # "remote"), local Whisper is never started/restarted here -- that's the
+    # whole point of the failover above. Once Invoke-WhisperFailoverStep has
+    # switched $whisperFailoverMode to "local" (remote down), this behaves
+    # exactly like a plain local desk again: scheduled restart, fail-streak
+    # restart, the works.
+    if (-not ($whisperFailoverEnabled -and $whisperFailoverMode -eq "remote")) {
+        $whisperScheduled = ($now - $lastWhisperRestart) -gt $whisperRestartInterval
+        $whisperAlive = Test-WhisperAlive
+        if ($whisperAlive) { $whisperFailStreak = 0 } else { $whisperFailStreak++ }
 
-    # Restart Whisper periodically or if confirmed dead (2+ consecutive misses)
-    if ($whisperScheduled -or $whisperFailStreak -ge 2) {
-        if (-not $whisperScheduled) {
-            Write-Host "$(Get-Date) Whisper failed $whisperFailStreak consecutive health checks; restarting..." -ForegroundColor Yellow
+        # Restart Whisper periodically or if confirmed dead (2+ consecutive misses)
+        if ($whisperScheduled -or $whisperFailStreak -ge 2) {
+            if (-not $whisperScheduled) {
+                Write-Host "$(Get-Date) Whisper failed $whisperFailStreak consecutive health checks; restarting..." -ForegroundColor Yellow
+            }
+            $whisperFailStreak = 0
+            Restart-Whisper
         }
-        $whisperFailStreak = 0
-        Restart-Whisper
     }
 
     # Restart apps if their DB-backed endpoint stops responding
