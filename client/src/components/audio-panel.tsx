@@ -491,7 +491,11 @@ export default function AudioPanel({
           if (body?.takeLock) stealCaptureLock();
           // Desk watchdog saw no audio chunks for minutes (2026-10-20): reload,
           // or move to the canonical origin (http://localhost:5000). The server
-          // sends this to ONE tab, never while any tab is lock=pending.
+          // sends this to ONE tab, never while any tab is freshly lock=pending
+          // (2026-10-23: a tab still pending past STUCK_PENDING_MS is instead
+          // offered a lock takeover -- see capture-lock.ts's own ~12s timeout
+          // and shared/capture-recover-coordinator.ts -- which clears it out of
+          // "pending" so it stops vetoing recover for the rest of the desk).
           if (!body?.recover) return;
           console.warn(`[capture] watchdog requested recovery (${body.recover})`);
           releaseLeaseNow();

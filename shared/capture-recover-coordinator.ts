@@ -18,6 +18,13 @@
 //     live tab holds the lock, ONE waiting tab (pending/standby) is told to
 //     steal the Web Lock (client: navigator.locks.request(..., {steal:true}))
 //     and the server lease can be taken from the dead holder.
+//  4. Stuck pending (2026-10-23): rule 1 means a single tab wedged at
+//     lock=pending forever would veto recover for the WHOLE desk forever too.
+//     capture-lock.ts now aborts its own hung lock request after ~12s, but as
+//     a backstop, a live tab still reporting lock=pending past STUCK_PENDING_MS
+//     is also offered a lock takeover (same as a dead holder), which moves it
+//     out of "pending" and clears rule 1's veto -- as long as no OTHER live tab
+//     genuinely holds the lock (shouldTakeLock's liveHolder check still wins).
 import { TAB_FRESH_MS } from "./capture-lease";
 
 export const RECOVER_MIN_GAP_MS = 30 * 60_000;
@@ -34,6 +41,15 @@ export const LOCK_TAKEOVER_RETRY_MS = 2 * 60_000;
 export const HOLDERLESS_GRACE_MS = 20_000;
 /** A "capturing with the lock held" tab must have produced a chunk this recently. */
 export const CAPTURING_CHUNK_FRESH_MS = 90_000;
+/**
+ * 2026-10-23: capture-lock.ts aborts a hung ifAvailable lock request after
+ * ~12s, so a live tab still reporting lock=pending this long after its first
+ * heartbeat (two 15s waiting-tab heartbeats of margin) isn't mid-handshake --
+ * it's stuck. Offer it a lock takeover instead of waiting for the much longer
+ * DEAD_HOLDER_MS window (which is about a *different* tab going silent while
+ * holding the lock, not this one being stuck pending).
+ */
+export const STUCK_PENDING_MS = 30_000;
 
 export interface CoordTab {
   tabId: string;
@@ -197,7 +213,7 @@ export class RecoverCoordinator {
     const dead = all.filter((t) => t.tabId !== me.tabId && isDeadLockHolder(t, now));
     // Act on evidence of a dead holder, a tab stuck pending for DEAD_HOLDER_MS,
     // or no live holder/capturer at all for HOLDERLESS_GRACE_MS (standby deadlock).
-    const stuckPending = me.lock === "pending" && now - me.firstSeenAt >= DEAD_HOLDER_MS;
+    const stuckPending = me.lock === "pending" && now - me.firstSeenAt >= STUCK_PENDING_MS;
     const holderless = this.holderlessSince != null && now - this.holderlessSince >= HOLDERLESS_GRACE_MS;
     if (!dead.length && !stuckPending && !holderless) return false;
     const lt = this.lockTakeover;
@@ -213,7 +229,7 @@ export class RecoverCoordinator {
       ? `dead holder(s): ${dead.map((t) => `${t.tabId} silent ${Math.round((now - lastSignalAt(t)) / 1000)}s`).join(", ")}`
       : holderless
         ? `no live lock holder or capturer for ${Math.round((now - (this.holderlessSince ?? now)) / 1000)}s (${waiting.length} waiting tab(s))`
-        : "tab pending 5+ min";
+        : `tab pending ${Math.round(STUCK_PENDING_MS / 1000)}+s`;
     this.log(`[capture] lock takeover -> tab=${me.tabId} (lock=${me.lock}); ${why}`);
     return true;
   }

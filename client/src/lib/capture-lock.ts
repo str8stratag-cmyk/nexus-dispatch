@@ -26,6 +26,17 @@ interface LockStore {
 }
 
 const LOCK_NAME = "dispatch-monitor-capture";
+/**
+ * 2026-10-23: the first lock request (ifAvailable:true) is supposed to settle
+ * at once -- the browser either grants it or calls back with null -- but a
+ * hung/broken Web Locks implementation left a tab at lock=pending forever on
+ * at least one desk, and shared/capture-recover-coordinator.ts never reloads
+ * ANY tab on a desk while a live tab reports lock=pending, so one stuck tab
+ * could veto recovery for the whole desk indefinitely. Abort the request if
+ * it hasn't settled within this long so "pending" always reaches a terminal
+ * state (see STUCK_PENDING_MS server-side for the matching rescue threshold).
+ */
+export const LOCK_REQUEST_TIMEOUT_MS = 12_000;
 
 function set(s: LockStore, next: CaptureLockState) {
   if (s.state === next) return;
@@ -38,8 +49,22 @@ function set(s: LockStore, next: CaptureLockState) {
 // take over when the holder closes, crashes, or yields.
 function request(s: LockStore, locks: LockManager, ifAvailable: boolean) {
   let acquired = false;
+  // Only the first (ifAvailable) request can leave the tab stuck at
+  // "pending" -- once standby, later queued requests are meant to wait
+  // open-ended for another tab to release the lock, not a hang.
+  const controller = ifAvailable && typeof AbortController !== "undefined" ? new AbortController() : null;
+  let timedOut = false;
+  const timer =
+    controller &&
+    setTimeout(() => {
+      if (s.state === "pending") {
+        timedOut = true;
+        console.warn(`[capture-lock] lock request did not settle within ${LOCK_REQUEST_TIMEOUT_MS}ms; aborting`);
+        controller.abort();
+      }
+    }, LOCK_REQUEST_TIMEOUT_MS);
   locks
-    .request(LOCK_NAME, { ifAvailable }, (lock) => {
+    .request(LOCK_NAME, controller ? { ifAvailable, signal: controller.signal } : { ifAvailable }, (lock) => {
       if (!lock) {
         set(s, "standby");
         return undefined;
@@ -51,10 +76,19 @@ function request(s: LockStore, locks: LockManager, ifAvailable: boolean) {
       });
     })
     .catch(() => {
-      // Never let a lock failure block capture (no Web Locks in this context).
-      if (!acquired && s.state === "pending") set(s, "held");
+      if (acquired || s.state !== "pending") return;
+      if (timedOut) {
+        // Our own timeout fired: fall back to the normal queued wait rather
+        // than assuming no coordination is possible (a real holder may exist).
+        set(s, "standby");
+      } else {
+        // Never let a genuine lock failure block capture (no Web Locks in
+        // this context, e.g. an opaque-origin iframe).
+        set(s, "held");
+      }
     })
     .finally(() => {
+      if (timer) clearTimeout(timer);
       if (acquired) {
         s.release = null;
         set(s, "standby");
