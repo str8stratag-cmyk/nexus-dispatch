@@ -223,7 +223,15 @@ const ADDRESS_HOMOPHONES: [RegExp, string | ((substring: string, ...args: string
   // number follows so real bridge talk ("bridge closure") is untouched.
   [/\bbridge\s+(\d{1,3})\b/gi, "and $1"],
   [/\bbusch(?:\s+blvd|\s+boulevard)?\b(?!\s+gardens)/gi, "Busch Blvd"],
-  [/\bsligh(?:\s+ave(?:nue)?)?\b/gi, "Sligh Ave"],
+  // Sligh Ave (2026-10-23): Whisper small.en hears "Sligh" (pronounced
+  // "sly") as Sly / Slye / Slide / Sleigh, and occasionally spells it out
+  // ("S-L-I-G-H"). "Slye" and the spelled form are never ordinary words, so
+  // they map bare; "sly", "slide" and "sleigh" are common words and only map
+  // with a street suffix. "Sly Fox Loop/Run" (real streets) take no Ave/St.
+  [/\bs[\s.-]+l[\s.-]+i[\s.-]+g[\s.-]+h\b\.?/gi, "Sligh"],
+  [/\bslye\b/gi, "Sligh"],
+  [/\b(?:sly|slide|sleigh)(?=\s+(?:st(?:reet)?|ave(?:nue)?)\b)/gi, "Sligh"],
+  [/\bsligh(?:\s+(?:ave(?:nue)?|st(?:reet)?))?\b/gi, "Sligh Ave"],
   [/\bkennedy(?:\s+blvd|\s+boulevard)?\b/gi, "Kennedy Blvd"],
   [/\bbroadway(?:\s+ave(?:nue)?)?\b/gi, "Broadway Ave"],
   [/\bbayshore(?:\s+blvd|\s+boulevard)?\b/gi, "Bayshore Blvd"],
@@ -572,6 +580,12 @@ const KNOWN_STREET_FALLBACK: [RegExp, string][] = [
   [/\bN Tampa St\b/, "N Tampa St"],
   [/\bmemorial\b/i, "Memorial Hwy"],
   [/\blois\b/i, "Lois Ave"],
+  // Rome Ave (2026-10-23): N/S Rome Ave runs Kennedy Blvd to Sulphur
+  // Springs; heard bare ("Sligh and Rome"). Not "Rome, Georgia"/"in Rome".
+  [/(?<!\bin\s)\brome\b(?!\s*,?\s*(?:georgia|italy|ga)\b)/i, "Rome Ave"],
+  // E Lotus Ave (Sulphur Springs) - crosses N 12th St, so "12th Street at
+  // Lotus" (2026-10-23, DISP-3) is a real intersection, NOT Lois Ave.
+  [/\blotus\b(?!\s+(?:blossom|circle|cir|creek|drive|dr|flower|lane|ln|path)\b)/i, "E Lotus Ave"],
   [/\bhimes\b|\bhines\b/i, "Himes Ave"],
   // Henderson (2026-09-30 call review) - must stay after "Dale Mabry" above
   // so matchKnownStreets returns [Dale Mabry, Henderson] in that order for
@@ -786,6 +800,23 @@ export function extractAddress(transcript: string): ExtractedAddress {
 
 const SPOKEN_DIGIT_HINT_RE = /\b(zero|oh|one|two|three|four|five|six|seven|eight|nine)\b/i;
 
+// "12th Street and Lois" (2026-10-23, DISP-4): the primary carries a suffix
+// but the cross street is a suffix-less known corridor, which suffix-based
+// candidate search never sees. Only a linker ("and"/"at"/"&") directly
+// before the known street counts, so a stray later mention is never paired.
+function knownCrossStreet(text: string, primary: string): { text: string } | null {
+  const primaryNorm = primary.toLowerCase();
+  for (const [pattern, canonical] of KNOWN_STREET_FALLBACK) {
+    const m = text.match(pattern);
+    if (!m || m.index === undefined) continue;
+    const key = streetKeyword(canonical);
+    if (key && primaryNorm.includes(key)) continue;
+    const before = text.slice(0, m.index);
+    if (/(?:\band|\bat|&)\s+$/i.test(before)) return { text: canonical };
+  }
+  return null;
+}
+
 function extractAddressRaw(transcript: string): ExtractedAddress {
   if (!transcript) return { address: null, crossStreet: null };
 
@@ -817,7 +848,8 @@ function extractAddressRaw(transcript: string): ExtractedAddress {
     // over the bare "West Shore" that the same tokens also produce.
     : candidates.reduce((a, b) => (b.text.length > a.text.length ? b : a));
   const cross = findCrossStreet(text, primary, candidates)
-    ?? inJoinerCross(text, primary.text);
+    ?? inJoinerCross(text, primary.text)
+    ?? knownCrossStreet(text, primary.text);
 
   return {
     address: primary.text,
