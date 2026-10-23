@@ -88,7 +88,22 @@ import {
   shouldRemind,
   expiryReminderHtml,
 } from "./driver-checkin-helpers";
-import { recordCheckin, driverEligibility, checkinRoster, getReminder, setReminder } from "./driver-checkin";
+import {
+  recordCheckin, driverEligibility, checkinRoster, getReminder, setReminder,
+  recordSeen, findSeenByUsername, seenSince, checkinsFor, claimRemoval, releaseRemoval, lastLiveFixAt,
+} from "./driver-checkin";
+import {
+  readRemovalConfig,
+  decideAutoRemoval,
+  kickMember,
+  parseRemoveCommand,
+  removeReplyText,
+  removalNoteText,
+  MISSING_RIGHTS_NOTE,
+  REMOVE_USAGE,
+  type RemovalReason,
+  type TgApi,
+} from "./driver-removal-helpers";
 
 
 const sseClients = new Set<Response>();
@@ -2154,6 +2169,8 @@ export {
 } from "./telegram-accept-helpers";
 
 export async function handleTelegramUpdate(update: any): Promise<void> {
+  // Remember who is active in the dispatch group (for check-in auto-removal and /remove @username).
+  void noteSeenMember(update).catch((err) => console.error("[driver-removal] seen tracking failed:", err?.message ?? err));
   // Driver Live Location fixes (message.location / edited_message.location).
   const point = parseLocationUpdate(update);
   if (point) {
@@ -2187,6 +2204,16 @@ export async function handleTelegramUpdate(update: any): Promise<void> {
       await handleCheckinsCommand(textMsg);
     } catch (err: any) {
       console.error("[driver-checkin] /checkins failed:", err?.message ?? err);
+    }
+    return;
+  }
+  // /remove — admin-only manual kick (ban + unban).
+  const removeCmd = textMsg ? parseRemoveCommand(textMsg.text, textMsg.reply_to_message) : null;
+  if (removeCmd) {
+    try {
+      await handleRemoveCommand(textMsg, removeCmd);
+    } catch (err: any) {
+      console.error("[driver-removal] /remove failed:", err?.message ?? err);
     }
     return;
   }
@@ -2432,6 +2459,7 @@ async function handleCheckinsCommand(msg: any): Promise<void> {
 // Daily check-in post + expiry reminders (poller desk only, DRIVER_LOCATION_GATE=1)
 // ---------------------------------------------------------------------------
 const DRIVER_CHECKIN_LAST_SENT_KEY = "driver_checkin_last_sent_date";
+const DRIVER_CHECKIN_POSTED_AT_KEY = "driver_checkin_posted_at";
 let checkinTickerStarted = false;
 let checkinTickBusy = false;
 
@@ -2459,6 +2487,7 @@ async function driverCheckinTick(now = Date.now()): Promise<void> {
   if (postDate) {
     // Persist first so a crash/retry can never double-post the same day.
     await storage.upsertSetting({ key: DRIVER_CHECKIN_LAST_SENT_KEY, value: postDate });
+    await storage.upsertSetting({ key: DRIVER_CHECKIN_POSTED_AT_KEY, value: String(now) });
     const r = await telegramApiCall(botToken, "sendMessage", {
       chat_id: chatId,
       text: dailyCheckinText(postDate, cfg.freshMs / 60_000),
@@ -2481,6 +2510,113 @@ async function driverCheckinTick(now = Date.now()): Promise<void> {
     });
     console.log(`[driver-checkin] reminder user=${row.telegramUserId} status=${row.status}`);
   }
+
+  await autoRemovalSweep(botToken, chatId, cfg, date, now);
+}
+
+function tgApi(botToken: string): TgApi {
+  return (method, params) => telegramApiCall(botToken, method, params);
+}
+
+/** DM each TELEGRAM_ADMIN_IDS user (they must have /start-ed the bot once). Best effort. */
+async function notifyAdmins(botToken: string, text: string): Promise<void> {
+  for (const id of Array.from(parseAdminIds(process.env.TELEGRAM_ADMIN_IDS))) {
+    try {
+      const r = await telegramApiCall(botToken, "sendMessage", { chat_id: id, text, disable_web_page_preview: true });
+      if (!r?.ok) console.warn(`[driver-removal] admin DM to ${id} failed: ${r?.description}`);
+    } catch (err: any) {
+      console.warn(`[driver-removal] admin DM to ${id} failed: ${err?.message ?? err}`);
+    }
+  }
+}
+
+let lastRightsWarnAt = 0;
+async function warnMissingRights(botToken: string): Promise<void> {
+  if (Date.now() - lastRightsWarnAt < 6 * 3600_000) return; // don't spam admins every minute
+  lastRightsWarnAt = Date.now();
+  await notifyAdmins(botToken, MISSING_RIGHTS_NOTE);
+}
+
+/** DRIVER_LOCATION_GATE=1 + DRIVER_AUTO_REMOVE=1: kick no-share / no-check-in drivers (once per day each). */
+async function autoRemovalSweep(botToken: string, chatId: string, cfg: ReturnType<typeof readCheckinConfig>, date: string, now: number): Promise<void> {
+  const rcfg = readRemovalConfig();
+  if (!rcfg.autoRemove) return;
+  const lastSent = (await storage.getSetting(DRIVER_CHECKIN_LAST_SENT_KEY))?.value ?? null;
+  const postedRaw = (await storage.getSetting(DRIVER_CHECKIN_POSTED_AT_KEY))?.value;
+  const postedAt = lastSent === date && postedRaw ? Number(postedRaw) : null;
+  const checkins = await checkinsFor(date);
+  // Candidates: everyone checked in today + members active in the group in the 24h before the post or since.
+  const candidates = new Map<number, string>();
+  for (const id of Array.from(checkins.keys())) candidates.set(id, `User ${id}`);
+  if (postedAt != null) for (const m of await seenSince(postedAt - 86400_000)) candidates.set(m.telegramUserId, m.driverName);
+  const admins = parseAdminIds(process.env.TELEGRAM_ADMIN_IDS);
+  const removed: Array<{ name: string; id: number; reason: RemovalReason }> = [];
+  for (const [id, seenName] of Array.from(candidates.entries())) {
+    if (admins.has(id)) continue;
+    const reason = decideAutoRemoval({
+      checkinAt: checkins.get(id) ?? null,
+      lastLiveFixAt: await lastLiveFixAt(id),
+      postedAt,
+      now,
+      freshMs: cfg.freshMs,
+      cfg: rcfg,
+    });
+    if (!reason) continue;
+    if (!(await claimRemoval(date, id, reason))) continue; // already handled today
+    const r = await kickMember(tgApi(botToken), chatId, id, admins);
+    const name = (await getLastDriverLocation(id))?.driverName ?? seenName;
+    console.log(`[driver-removal] ${JSON.stringify({ date, user: id, reason, result: r.ok ? "removed" : r.why, exempt: (r as any).exempt ?? null })}`);
+    if (r.ok) {
+      removed.push({ name, id, reason });
+    } else if (r.why === "no_rights") {
+      await releaseRemoval(date, id); // retry once rights are granted
+      await warnMissingRights(botToken);
+      break;
+    } else if (r.why === "error") {
+      await releaseRemoval(date, id);
+    }
+    // exempt: keep the claim so we don't re-check them every minute today.
+  }
+  if (removed.length) await notifyAdmins(botToken, removalNoteText(removed));
+}
+
+async function noteSeenMember(update: any): Promise<void> {
+  const src = update?.message ?? update?.edited_message ?? update?.callback_query?.message;
+  const from = update?.callback_query?.from ?? update?.message?.from ?? update?.edited_message?.from;
+  if (!src?.chat || typeof from?.id !== "number") return;
+  if (from.is_bot) return;
+  const { chatId } = await getTelegramCredentials();
+  if (!isDispatchGroupChat(String(src.chat.id), chatId)) return;
+  await recordSeen(from.id, from.username ?? null, formatTelegramAccepterName(from), false);
+}
+
+async function handleRemoveCommand(msg: any, target: ReturnType<typeof parseRemoveCommand>): Promise<void> {
+  const fromId = msg.from?.id;
+  const admins = parseAdminIds(process.env.TELEGRAM_ADMIN_IDS);
+  if (!isWhereAllowed(fromId, admins)) {
+    console.log(`[driver-removal] /remove ignored (not allowlisted) user=${fromId ?? "?"}`);
+    return;
+  }
+  const { botToken, chatId: dispatchChatId } = await getTelegramCredentials();
+  if (!botToken || !dispatchChatId || !isWhereChatAllowed(msg.chat, dispatchChatId)) return;
+  const reply = (text: string) =>
+    telegramApiCall(botToken, "sendMessage", { chat_id: msg.chat.id, text, reply_to_message_id: msg.message_id });
+  if (!target || target === "usage") return void (await reply(REMOVE_USAGE));
+  let id: number;
+  let name: string;
+  if (target.kind === "username") {
+    const seen = await findSeenByUsername(target.username);
+    if (!seen) return void (await reply(`I haven't seen @${target.username} in the group, so I don't know their user id. Reply to one of their messages with /remove instead.`));
+    id = seen.telegramUserId;
+    name = seen.driverName;
+  } else {
+    id = target.id;
+    name = target.kind === "reply" ? target.name : `User ${id}`;
+  }
+  const r = await kickMember(tgApi(botToken), dispatchChatId, id, admins);
+  console.log(`[driver-removal] ${JSON.stringify({ manual: true, by: fromId, user: id, result: r.ok ? "removed" : r.why })}`);
+  await reply(removeReplyText(name, r));
+  if (r.ok) await notifyAdmins(botToken, removalNoteText([{ name, id, reason: "manual" }]));
 }
 
 async function handleWhereCommand(msg: any, query: string): Promise<void> {

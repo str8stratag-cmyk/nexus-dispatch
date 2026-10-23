@@ -16,6 +16,10 @@ async function db() {
       d.collection("driverCheckins").createIndex({ createdAt: 1 }, { expireAfterSeconds: 60 * 86400 }),
       d.collection("driverReminders").createIndex({ date: 1, telegramUserId: 1 }, { unique: true }),
       d.collection("driverReminders").createIndex({ createdAt: 1 }, { expireAfterSeconds: 7 * 86400 }),
+      d.collection("driverSeen").createIndex({ telegramUserId: 1 }, { unique: true }),
+      d.collection("driverSeen").createIndex({ username: 1 }),
+      d.collection("driverRemovals").createIndex({ date: 1, telegramUserId: 1 }, { unique: true }),
+      d.collection("driverRemovals").createIndex({ createdAt: 1 }, { expireAfterSeconds: 30 * 86400 }),
     ]).then(() => undefined).catch((e) => { indexesReady = undefined; throw e; });
   }
   await indexesReady;
@@ -91,4 +95,63 @@ export async function setReminder(date: string, telegramUserId: number, lastAt: 
     { $set: { lastAt, forFixAt }, $setOnInsert: { createdAt: new Date() } },
     { upsert: true },
   );
+}
+
+/** Remember a group member we've seen (any message/location/button tap in the dispatch group). */
+export async function recordSeen(telegramUserId: number, username: string | null, driverName: string, isBot: boolean): Promise<void> {
+  if (!isMongoConfigured) return;
+  const d = await db();
+  await d.collection("driverSeen").updateOne(
+    { telegramUserId },
+    { $set: { username: username ? username.toLowerCase() : null, driverName, isBot, lastSeenAt: Date.now() } },
+    { upsert: true },
+  );
+}
+
+export async function findSeenByUsername(username: string): Promise<{ telegramUserId: number; driverName: string } | null> {
+  if (!isMongoConfigured) return null;
+  const d = await db();
+  const doc: any = await d.collection("driverSeen").findOne({ username: username.toLowerCase() });
+  return doc ? { telegramUserId: doc.telegramUserId, driverName: doc.driverName } : null;
+}
+
+/** Members seen in the group since `sinceMs` (excluding bots). */
+export async function seenSince(sinceMs: number): Promise<Array<{ telegramUserId: number; driverName: string }>> {
+  if (!isMongoConfigured) return [];
+  const d = await db();
+  const docs = await d.collection("driverSeen").find({ lastSeenAt: { $gte: sinceMs }, isBot: { $ne: true } }).toArray();
+  return docs.map((x: any) => ({ telegramUserId: x.telegramUserId, driverName: x.driverName }));
+}
+
+export async function checkinsFor(date: string): Promise<Map<number, number>> {
+  const out = new Map<number, number>();
+  if (!isMongoConfigured) return out;
+  const d = await db();
+  for (const c of await d.collection("driverCheckins").find({ date }).toArray()) out.set((c as any).telegramUserId, (c as any).at);
+  return out;
+}
+
+/** Claim a removal slot for (date,user). Returns false if already removed today. */
+export async function claimRemoval(date: string, telegramUserId: number, reason: string): Promise<boolean> {
+  if (!isMongoConfigured) return false;
+  const d = await db();
+  const r = await d.collection("driverRemovals").updateOne(
+    { date, telegramUserId },
+    { $setOnInsert: { date, telegramUserId, reason, at: Date.now(), createdAt: new Date() } },
+    { upsert: true },
+  );
+  return r.upsertedCount > 0;
+}
+
+export async function releaseRemoval(date: string, telegramUserId: number): Promise<void> {
+  if (!isMongoConfigured) return;
+  const d = await db();
+  await d.collection("driverRemovals").deleteOne({ date, telegramUserId });
+}
+
+export async function lastLiveFixAt(telegramUserId: number): Promise<number | null> {
+  if (!isMongoConfigured) return null;
+  const d = await db();
+  const doc: any = await d.collection("driverLocations").find({ telegramUserId, isLive: true }).sort({ at: -1 }).limit(1).next();
+  return doc?.at ?? null;
 }
