@@ -58,7 +58,8 @@ const cases: [string, string | null, string | null][] = [
   // Numbered addresses unchanged
   ["mva at 808 north linebaugh avenue", "808 north Linebaugh avenue", null],
   // Bare major roads now extract (user request)
-  ["SIGNAL 4 A HILLSBOROUGH AND ARMENIA", "Hillsborough Ave", null],
+  // Armenia (suffix-less known street) after "and" is now the cross street.
+  ["SIGNAL 4 A HILLSBOROUGH AND ARMENIA", "Hillsborough Ave", "Armenia Ave"],
   ["break on busch and 56th", "56th St", "Busch Blvd"],
   // "bushed" (2026-09-30 call review, real missed/garbled call): \bbush\b
   // alone doesn't match "bushed" - no word boundary between "bush" and "ed".
@@ -157,6 +158,30 @@ const cases: [string, string | null, string | null][] = [
   ["crash at 9000 north florida avenue", "9000 north Florida Ave", null],
   ["signal 4 at 1200 Union Street", "1200 Union Street", null],
   ["signal 4 at union street and rome avenue", "union street", "rome avenue"],
+  // 2026-10-23: Sligh Ave misheard as Sly / Slye / Slide / Sleigh / spelled out.
+  ["signal 4, Sly Avenue and Rome", "Sligh Ave", "Rome Ave"],
+  ["signal 4 at SLY AVE and Florida", "Florida Ave", "Sligh Ave"],
+  ["crash at Slye and Rome", "Sligh Ave", "Rome Ave"],
+  ["signal 4 at slye ave and rome", "Sligh Ave", "Rome Ave"],
+  ["crash on Slide Street and Rome", "Sligh Ave", "Rome Ave"],
+  ["crash on Slide Avenue", "Sligh Ave", null],
+  ["signal 4, Sleigh Avenue and Rome", "Sligh Ave", "Rome Ave"],
+  ["signal 4 at sleigh st and Rome", "Sligh Ave", "Rome Ave"],
+  ["signal 4 at Sligh Street and Rome", "Sligh Ave", "Rome Ave"],
+  ["signal 4 at S-L-I-G-H and Rome", "Sligh Ave", "Rome Ave"],
+  ["signal 4 at S. L. I. G. H. and Florida", "Florida Ave", "Sligh Ave"],
+  // Common words stay untouched without a street suffix.
+  ["he was sly about it", null, null],
+  ["the car started to slide", null, null],
+  ["Sly Fox Loop", "Sly Fox Loop", null],
+  // Rome Ave known bare; "in Rome" is not a street.
+  ["signal 4 at Rome and Columbus", "Columbus Ave", "Rome Ave"],
+  ["he was in Rome last week", null, null],
+  // 12th Street cross streets (2026-10-23 DISP-3/DISP-4 geocode failures).
+  // E Lotus Ave really crosses N 12th St (Sulphur Springs); Lotus is NOT Lois.
+  ["Signal 4 12th Street at Lotus", "12th Street", "E Lotus Ave"],
+  ["signal 4 at Lotus Drive", "Lotus Drive", null],
+  ["Signal 4 at 12th Street and Lois", "12th Street", "Lois Ave"],
   ["signal 4 at 3415 West Hillsborough Avenue", "3415 West Hillsborough Ave", null],
   ["signal 4 on hillsborough near the county line", "Hillsborough Ave", null],
   // Protected phrases must NOT extract
