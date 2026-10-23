@@ -55,6 +55,24 @@ import {
   normalizeEventStatus,
   type AcceptTapLog,
 } from "./telegram-accept-helpers";
+import {
+  parseLocationUpdate,
+  isStartShiftCommand,
+  isLocationFresh,
+  isDispatchGroupChat,
+  reminderText,
+  START_SHIFT_INSTRUCTIONS,
+} from "./driver-location-helpers";
+import {
+  parseWhereCommand,
+  parseAdminIds,
+  isWhereAllowed,
+  isWhereChatAllowed,
+  filterDrivers,
+  formatWhereReply,
+  WHERE_MAX_PINS,
+} from "./telegram-where-helpers";
+import { recordDriverLocation, recordAcceptedCall, getLastDriverLocation, driverBoard } from "./driver-location";
 
 
 const sseClients = new Set<Response>();
@@ -1223,6 +1241,15 @@ export async function registerRoutes(
     res.json({ ok: true });
   });
 
+  // Driver Live Location board: last fix per driver + accepted-call arrival status.
+  app.get("/api/drivers/board", requireAuth, async (_req, res) => {
+    try {
+      res.json(await driverBoard());
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
   // Get all dispatch events
   app.get("/api/events", async (req, res) => {
     try {
@@ -2103,6 +2130,49 @@ export {
 } from "./telegram-accept-helpers";
 
 export async function handleTelegramUpdate(update: any): Promise<void> {
+  // Driver Live Location fixes (message.location / edited_message.location).
+  const point = parseLocationUpdate(update);
+  if (point) {
+    try {
+      const { chatId: dispatchChatId } = await getTelegramCredentials();
+      if (!isDispatchGroupChat(point.chatId, dispatchChatId)) {
+        console.log(`[driver-gps] dropped fix from non-dispatch chat user=${point.telegramUserId}`);
+        return;
+      }
+      await recordDriverLocation(point);
+      console.log(`[driver-gps] fix user=${point.telegramUserId} live=${point.isLive}`);
+    } catch (err: any) {
+      console.error("[driver-gps] failed to store location:", err?.message ?? err);
+    }
+    return;
+  }
+  const textMsg = update?.message;
+  // /where [name] — admin-only (TELEGRAM_ADMIN_IDS); everyone else silently ignored.
+  const whereCmd = textMsg ? parseWhereCommand(textMsg.text) : null;
+  if (whereCmd) {
+    try {
+      await handleWhereCommand(textMsg, whereCmd.query);
+    } catch (err: any) {
+      console.error("[driver-gps] /where failed:", err?.message ?? err);
+    }
+    return;
+  }
+  // /startshift instructions.
+  if (textMsg && isStartShiftCommand(textMsg.text)) {
+    try {
+      const { botToken } = await getTelegramCredentials();
+      if (botToken && textMsg.chat?.id != null) {
+        await telegramApiCall(botToken, "sendMessage", {
+          chat_id: textMsg.chat.id,
+          text: START_SHIFT_INSTRUCTIONS,
+          reply_to_message_id: textMsg.message_id,
+        });
+      }
+    } catch (err: any) {
+      console.error("[driver-gps] /startshift failed:", err?.message ?? err);
+    }
+    return;
+  }
   if (!update?.callback_query) return;
 
   const callback = update.callback_query;
@@ -2200,6 +2270,11 @@ export async function handleTelegramUpdate(update: any): Promise<void> {
     emit("claimed");
     broadcastEvent(updated);
 
+    // Arrival tracking + "no fresh location" reminder (best effort, never blocks Accept).
+    void trackAcceptedCall(botToken, String(chatId), messageId, updated, callback.from, accepter).catch((err) =>
+      console.error("[driver-gps] accept tracking failed:", err?.message ?? err),
+    );
+
     // Edit the original dispatch message to show it's taken and remove the accept button.
     await telegramApiCall(botToken, "editMessageText", {
       chat_id: chatId,
@@ -2218,6 +2293,58 @@ export async function handleTelegramUpdate(update: any): Promise<void> {
     log.error = String(err?.message ?? err);
     emit("error");
     throw err;
+  }
+}
+
+async function trackAcceptedCall(
+  botToken: string,
+  chatId: string,
+  messageId: number,
+  event: DispatchEvent,
+  from: any,
+  accepter: string,
+): Promise<void> {
+  const uid = typeof from?.id === "number" ? from.id : null;
+  await recordAcceptedCall({
+    eventId: event.id,
+    telegramUserId: uid,
+    driverName: accepter,
+    address: event.address ?? null,
+    lat: event.lat ?? null,
+    lng: event.lng ?? null,
+    acceptedAt: Date.now(),
+  });
+  const last = uid != null ? await getLastDriverLocation(uid) : null;
+  if (!isLocationFresh(last, Date.now())) {
+    await telegramApiCall(botToken, "sendMessage", {
+      chat_id: chatId,
+      text: reminderText(accepter, event.id),
+      reply_to_message_id: messageId,
+    });
+  }
+}
+
+async function handleWhereCommand(msg: any, query: string): Promise<void> {
+  const fromId = msg.from?.id;
+  if (!isWhereAllowed(fromId, parseAdminIds(process.env.TELEGRAM_ADMIN_IDS))) {
+    console.log(`[driver-gps] /where ignored (not allowlisted) user=${fromId ?? "?"}`);
+    return;
+  }
+  const { botToken, chatId: dispatchChatId } = await getTelegramCredentials();
+  if (!botToken || !isWhereChatAllowed(msg.chat, dispatchChatId)) return;
+  const now = Date.now();
+  const { drivers } = await driverBoard(now);
+  const matches = filterDrivers(drivers, query);
+  await telegramApiCall(botToken, "sendMessage", {
+    chat_id: msg.chat.id,
+    text: formatWhereReply(matches, query, now),
+    reply_to_message_id: msg.message_id,
+    disable_web_page_preview: true,
+  });
+  if (matches.length > 0 && matches.length <= WHERE_MAX_PINS) {
+    for (const d of matches) {
+      await telegramApiCall(botToken, "sendLocation", { chat_id: msg.chat.id, latitude: d.lat, longitude: d.lon });
+    }
   }
 }
 
@@ -2279,7 +2406,7 @@ export async function setTelegramWebhook(url?: string): Promise<{ success: boole
   console.log(`[telegram] Setting webhook to ${webhookUrl}`);
   const data = await telegramApiCall(botToken, "setWebhook", {
     url: webhookUrl,
-    allowed_updates: ["callback_query"],
+    allowed_updates: ["callback_query", "message", "edited_message"],
   });
 
   if (data.ok) {
@@ -2357,7 +2484,7 @@ async function telegramPollLoop(): Promise<void> {
         data = await telegramApiCall(botToken, "getUpdates", {
           offset,
           timeout: 25,
-          allowed_updates: ["callback_query"],
+          allowed_updates: ["callback_query", "message", "edited_message"],
         });
       } catch (err: any) {
         console.error(
