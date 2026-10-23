@@ -25,13 +25,14 @@ $nexusDispatch = Join-Path (Split-Path -Parent $dispatchMonitor) "nexus-dispatch
 $deployBranch = "release"
 $appBootWaitSec = 300
 $captureNoChunkMin = 5
+$whisperRestartHours = 4
 $captureInactiveMin = 0
 $captureRelaunchChrome = $true
 $chromeCapturePolicy = $true
 $watchdogLocal = Join-Path $dispatchMonitor "watchdog.local"
 if (Test-Path $watchdogLocal) {
     foreach ($line in Get-Content $watchdogLocal) {
-        if ($line -match '^\s*(WHISPER_ROOT|NEXUS_DISPATCH|DEPLOY_BRANCH|APP_BOOT_WAIT_SEC|CAPTURE_NO_CHUNK_MIN|CAPTURE_INACTIVE_MIN|CAPTURE_RELAUNCH_CHROME|CHROME_CAPTURE_POLICY)\s*=\s*(.+?)\s*$') {
+        if ($line -match '^\s*(WHISPER_ROOT|NEXUS_DISPATCH|DEPLOY_BRANCH|APP_BOOT_WAIT_SEC|WHISPER_RESTART_HOURS|CAPTURE_NO_CHUNK_MIN|CAPTURE_INACTIVE_MIN|CAPTURE_RELAUNCH_CHROME|CHROME_CAPTURE_POLICY)\s*=\s*(.+?)\s*$') {
             switch ($Matches[1]) {
                 "WHISPER_ROOT" { $whisperRoot = $Matches[2] }
                 "NEXUS_DISPATCH" { $nexusDispatch = $Matches[2] }
@@ -40,6 +41,13 @@ if (Test-Path $watchdogLocal) {
                     # Ignore junk / tiny values rather than break the boot wait.
                     $parsedWait = 0
                     if ([int]::TryParse($Matches[2], [ref]$parsedWait) -and $parsedWait -ge 30) { $appBootWaitSec = $parsedWait }
+                }
+                "WHISPER_RESTART_HOURS" {
+                    # Scheduled (timer) Whisper restart interval. 0 = off (e.g. the
+                    # WHISP-1 GPU host, where a timed restart is a ~30s outage for
+                    # every desk). Crash/health-based restarts are unaffected.
+                    $parsedHours = 0.0
+                    if ([double]::TryParse($Matches[2], [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsedHours) -and $parsedHours -ge 0) { $whisperRestartHours = $parsedHours }
                 }
                 "CAPTURE_NO_CHUNK_MIN" {
                     $parsedMin = 0
@@ -56,7 +64,7 @@ if (Test-Path $watchdogLocal) {
     }
 }
 
-$whisperRestartInterval = [TimeSpan]::FromHours(4)
+$whisperRestartInterval = if ($whisperRestartHours -gt 0) { [TimeSpan]::FromHours($whisperRestartHours) } else { $null }
 $gitPullInterval = [TimeSpan]::FromHours(4)
 $healthCheckInterval = [TimeSpan]::FromMinutes(1)
 # Branch-drift alert (2026-10-23): a desk left on the wrong branch never gets
@@ -287,7 +295,7 @@ function Stop-LocalWhisper() {
 # starts forwarding to local instead of remote. No Chrome/capture restart is
 # needed for that switch. Once the remote has been healthy continuously for
 # ~$whisperFailoverToRemoteAfter, it switches back and stops local Whisper.
-# $whisperFailoverMinDwell (and the asymmetric 30s-to-fail-over vs.
+# $whisperFailoverMinDwell (and the asymmetric 60s-to-fail-over vs.
 # 3min-to-fail-back thresholds themselves) keep a flapping remote from
 # bouncing the desk back and forth.
 function Get-ConfiguredWhisperUrl($repoPath) {
@@ -1359,7 +1367,7 @@ $remoteWhisperUrl = Get-ConfiguredWhisperUrl $dispatchMonitor
 $localWhisperUrl = "http://127.0.0.1:8178"
 $whisperFailoverEnabled = -not (Test-WhisperUrlLocal $remoteWhisperUrl)
 $whisperFailoverCheckInterval = [TimeSpan]::FromSeconds(12)
-$whisperFailoverToLocalAfter = [TimeSpan]::FromSeconds(30)
+$whisperFailoverToLocalAfter = [TimeSpan]::FromSeconds(60)
 $whisperFailoverToRemoteAfter = [TimeSpan]::FromMinutes(3)
 $whisperFailoverMinDwell = [TimeSpan]::FromSeconds(30)
 $lastWhisperFailoverCheck = [DateTime]::MinValue
@@ -1428,7 +1436,8 @@ $lastCaptureRecover = $persisted.LastRecover
 $lastCaptureRelaunch = $persisted.LastRelaunch
 Write-Host "$(Get-Date) [capture-recover] Last recover: $(if ($lastCaptureRecover -eq [DateTime]::MinValue) { 'never' } else { $lastCaptureRecover }); last Chrome restart: $(if ($lastCaptureRelaunch -eq [DateTime]::MinValue) { 'never' } else { $lastCaptureRelaunch })." -ForegroundColor Cyan
 
-Write-Host "Watchdog running. Whisper restart every $($whisperRestartInterval.TotalHours)h, git pull of origin/$deployBranch every $($gitPullInterval.TotalHours)h." -ForegroundColor Green
+$whisperRestartDesc = if ($whisperRestartInterval) { "every $($whisperRestartInterval.TotalHours)h" } else { "scheduled OFF (health-based only)" }
+Write-Host "Watchdog running. Whisper restart $whisperRestartDesc, git pull of origin/$deployBranch every $($gitPullInterval.TotalHours)h." -ForegroundColor Green
 
 # Consecutive-failure debounce (2026-09-22): a single slow/timed-out health
 # check under CPU contention is not "dead" -- restarting on one miss forces a
@@ -1461,7 +1470,7 @@ while ($true) {
     # exactly like a plain local desk again: scheduled restart, fail-streak
     # restart, the works.
     if (-not ($whisperFailoverEnabled -and $whisperFailoverMode -eq "remote")) {
-        $whisperScheduled = ($now - $lastWhisperRestart) -gt $whisperRestartInterval
+        $whisperScheduled = ($null -ne $whisperRestartInterval) -and (($now - $lastWhisperRestart) -gt $whisperRestartInterval)
         $whisperAlive = Test-WhisperAlive
         if ($whisperAlive) { $whisperFailStreak = 0 } else { $whisperFailStreak++ }
 
