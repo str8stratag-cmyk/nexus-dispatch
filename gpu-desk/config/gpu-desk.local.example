@@ -1,0 +1,25 @@
+# GPU desk config (untracked copy: config\gpu-desk.local). KEY=VALUE.
+# Model: medium.en (this desk's default, Zach 2026-10-22) or small.en. turbo/large refused.
+WHISPER_MODEL=medium.en
+WHISPER_BEAM_SIZE=5
+WHISPER_BEST_OF=5
+WHISPER_COMPUTE_TYPES=float16,int8_float16
+# Optional fleet tuning keys (same meaning as whisper-model.local):
+# WHISPER_SAVE_AUDIO=whisper\debug-audio
+# WHISPER_SAVE_MAX=400
+# WHISPER_NSP_THRESHOLD=0.5
+# WHISPER_TRANSCRIBE_TIMEOUT=300
+# WHISPER_API_KEY is NOT read from here - set it as a machine env var (secret).
+# Fleet source name. PLACEHOLDER - Zach must pick (WHISP-1 is NOT confirmed).
+SOURCE_NAME=WHISP-1
+# Standalone system-audio capture (Chrome capture tab remains the fleet path).
+LOOPBACK_CAPTURE=off
+LOOPBACK_DEVICE=
+CHUNK_SEC=6
+# If GPU Whisper fails to come up this many starts in a row, start the fleet CPU
+# server (scripts\start-whisper.ps1: small.en cpu int8) instead. off|on
+CPU_FALLBACK=on
+CPU_FALLBACK_AFTER=3
+# Timed Whisper restart interval in hours. 0 = off (default; WHISP-1 2026-10-23:
+# a timed restart is a ~30s outage for every desk). Crash/stall restarts always run.
+RESTART_EVERY_HOURS=0

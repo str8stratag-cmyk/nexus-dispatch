@@ -1,0 +1,12 @@
+# Same server pins as dispatch-monitor whisper/requirements.txt (origin/release 70f3dfb)
+faster-whisper==1.2.1
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+python-multipart==0.0.20
+# CUDA 12 runtime libs for CTranslate2 4.x (no system CUDA Toolkit needed; only the NVIDIA driver)
+nvidia-cublas-cu12==12.*
+nvidia-cudnn-cu12==9.*
+# Optional standalone WASAPI loopback capture (loopback_capture.py)
+soundcard==0.4.3
+numpy<2.3
+requests>=2.31
