@@ -51,3 +51,6 @@ debug-audio/
 # is X" for all of them at once (that's what caused the DISP-2/DISP-3
 # mislabel). See AGENTS.md's IDENTITY note and FLEET-IDENTITY.md for the
 # fleet-wide, tracked convention instead.
+
+# Graphify local cache (rebuildable); keep graph.json/report/html in tree if desired
+graphify-out/cache/
