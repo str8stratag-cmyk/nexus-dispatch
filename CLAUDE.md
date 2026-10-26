@@ -12,6 +12,32 @@ they're incident history, not a TODO list.
 
 ---
 
+## 2026-10-26 (later) — Manual / Review / Setup rendered halfway down; Roads on by default
+
+**What was broken (on release after #90/#91):** clicking Manual or Review in
+the rail showed the page starting ~halfway down the screen (y≈500 of 900).
+Radix keeps the inactive Live `TabsContent` in the DOM with the `hidden`
+attribute, but its `flex flex-1` classes override `hidden`, so the empty Live
+panel took a flex-1 share of the height and pushed the active page down.
+Pre-existing (same classes before #90), just more visible now.
+
+**What changed (PR `fix/tab-offset-roads-default` → `main`):**
+- `pages/dispatch.tsx`: `data-[state=inactive]:hidden` on the Live
+  `TabsContent`. Display-only — AudioPanel stays mounted exactly as before.
+- `components/dispatch-map.tsx`: Esri Roads overlay on by default, Labels
+  overlay off by default (Zach: "include roads, don't care about the label";
+  Roads already carries street names). Both still toggle in the layer box.
+
+**Verified:** built + Playwright against a mock API at 1600 and 1100 wide:
+Manual/Review/Setup now start right under the header (y 92/76/92), Live map
+back to full height after switching, overlays Roads=on Labels=off.
+
+**Still open:** promote to `release` after Zach reviews. At ~1100px wide the
+#90 layout leaves the map ~330px (fixed 360 + 340 side columns, no tablet
+drawer) — separate follow-up if desks run narrow windows.
+
+---
+
 ## 2026-10-05 — Telegram Accept-button long-poll (Disp-1 only)
 
 **What was broken:** STGAPPBOT sends Accept inline buttons on DISPATCH RELAY

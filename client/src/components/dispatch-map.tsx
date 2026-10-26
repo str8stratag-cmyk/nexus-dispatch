@@ -120,7 +120,7 @@ export default function DispatchMap({ markers, selectedId = null, onSelectMarker
         maxZoom: 16,
         opacity: 0.9,
       }
-    ).addTo(map);
+    ); // off by default (Zach 2026-10-26): Roads carries street names already
 
     const roadsOverlay = L.tileLayer(
       "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
@@ -129,7 +129,7 @@ export default function DispatchMap({ markers, selectedId = null, onSelectMarker
         maxZoom: 19,
         opacity: 0.45,
       }
-    );
+    ).addTo(map); // on by default (Zach 2026-10-26)
 
     L.control.layers(
       { Dark: baseLayer },
