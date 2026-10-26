@@ -1,42 +1,21 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiRequest } from "@/lib/queryClient";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { useEffect, useMemo, useState } from "react";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { CheckCircle2, Radio, MapPin, Clock, Download, ShieldAlert } from "lucide-react";
+import { Download } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useEventActions } from "@/hooks/use-event-actions";
 import { NEEDS_REVIEW_STATUS } from "@shared/review-event";
-import { useEventsStream } from "@/hooks/use-events-stream";
+import { ago, formatAddress, severityOf, type BoardEvent, type Severity } from "@/lib/monitor-ui";
 
-interface DispatchEventRow {
-  id: number;
-  transcript: string;
-  keywords: string;
-  address: string | null;
-  crossStreet: string | null;
-  lat: number | null;
-  lng: number | null;
-  signalType: string | null;
-  description: string | null;
-  district: string;
-  source: string;
-  status: string;
-  isManual: boolean;
-  geocodedRoad: string | null;
-  locationApprox: boolean;
-  acceptedBy?: string | null;
-  /** Address recovered from surrounding audio rather than the call's own transcript. */
-  addressFromContext?: boolean;
-  createdAt: string;
-}
+// Saturday call queue (left column): stats, filter pills, search, compact
+// severity-bordered cards. Selecting a card drives the map + incident detail.
+// Status changes go through useEventActions (same PATCH as before).
 
-const ADDRESS_FROM_CONTEXT_NOTE = "Address from surrounding audio — verify.";
+type DispatchEventRow = BoardEvent & { keywords: string; source: string; status: string; isManual: boolean; locationApprox: boolean };
 
 function neutralizeCsvCell(value: unknown): string {
   const v = String(value ?? "");
@@ -118,361 +97,234 @@ function downloadFile(content: string, filename: string, mimeType: string) {
   URL.revokeObjectURL(url);
 }
 
-export default function EventLog() {
-  const queryClient = useQueryClient();
+type QueueFilter = "all" | Severity | "open";
+
+const FILTERS: Array<[QueueFilter, string]> = [
+  ["all", "All"],
+  ["crit", "Injury"],
+  ["warn", "Crash"],
+  ["info", "Tow / other"],
+  ["open", "Unaccepted"],
+];
+
+const RESOLVED_SHOWN = 10;
+
+interface EventLogProps {
+  events: BoardEvent[];
+  isLoading?: boolean;
+  selectedId: number | null;
+  onSelect: (id: number) => void;
+}
+
+function matchesQuery(e: BoardEvent, q: string): boolean {
+  if (!q) return true;
+  return [e.address, e.crossStreet, e.geocodedRoad, e.transcript, e.district, e.source, e.signalType, e.description]
+    .join(" ")
+    .toLowerCase()
+    .includes(q);
+}
+
+export default function EventLog({ events, isLoading = false, selectedId, onSelect }: EventLogProps) {
   const { toast } = useToast();
+  const { accept, pendingId } = useEventActions();
+  const [filter, setFilter] = useState<QueueFilter>("all");
+  const [query, setQuery] = useState("");
+  // Re-render every 30 s so the relative "ago" stamps stay honest.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(t);
+  }, []);
 
-  const { data: events = [], isLoading } = useQuery({
-    queryKey: ["/api/events"],
-    queryFn: async () => {
-      // Cap the poll payload — the server costs ~7ms per returned doc on
-      // Atlas M0, so the old unbounded fetch was 3.3s every 30s. SSE pushes
-      // live updates; this poll is just a slow catch-up safety net.
-      const res = await apiRequest("GET", "/api/events?limit=200");
-      return res.json() as Promise<DispatchEventRow[]>;
-    },
-    refetchInterval: 120_000,
-  });
+  const rows = events as DispatchEventRow[];
 
-  useEventsStream();
+  const stats = useMemo(() => {
+    const hourAgo = now - 60 * 60_000;
+    return {
+      active: rows.filter((e) => e.status === "active").length,
+      review: rows.filter((e) => e.status === NEEDS_REVIEW_STATUS).length,
+      lastHour: rows.filter((e) => new Date(e.createdAt).getTime() > hourAgo).length,
+    };
+  }, [rows, now]);
 
-  const acceptMutation = useMutation({
-    mutationFn: async (id: number) => {
-      return apiRequest("PATCH", `/api/events/${id}/status`, { status: "accepted" });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/events"] });
-    },
-  });
-
-  const resolveMutation = useMutation({
-    mutationFn: async (id: number) => {
-      return apiRequest("PATCH", `/api/events/${id}/status`, { status: "resolved" });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/events"] });
-    },
-  });
-
-  const promoteMutation = useMutation({
-    mutationFn: async (id: number) => {
-      return apiRequest("PATCH", `/api/events/${id}/status`, { status: "active" });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/events"] });
-    },
-  });
-
-  // Keyword calls the address gate rejected (shared/review-event.ts): shown so
-  // a dispatcher can listen back, never auto-dispatched or sent to Telegram.
-  const reviewEvents = events.filter((e) => e.status === NEEDS_REVIEW_STATUS);
-  const activeEvents = events.filter((e) => e.status === "active");
-  const acceptedEvents = events.filter((e) => e.status === "accepted");
-  const resolvedEvents = events.filter((e) => e.status === "resolved");
+  const { open, resolved } = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const byFilter = (e: DispatchEventRow) => {
+      if (filter === "all") return true;
+      if (filter === "open") return e.status === "active" || e.status === NEEDS_REVIEW_STATUS;
+      return severityOf(e.signalType) === filter;
+    };
+    const newestFirst = (a: DispatchEventRow, b: DispatchEventRow) =>
+      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    const visible = rows.filter((e) => byFilter(e) && matchesQuery(e, q));
+    return {
+      open: visible.filter((e) => e.status !== "resolved").sort(newestFirst),
+      resolved: filter === "open" ? [] : visible.filter((e) => e.status === "resolved").sort(newestFirst).slice(0, RESOLVED_SHOWN),
+    };
+  }, [rows, filter, query]);
 
   const handleExportCSV = () => {
-    if (events.length === 0) {
+    if (rows.length === 0) {
       toast({ title: "No events to export", variant: "destructive" });
       return;
     }
-    const csv = eventsToCSV(events);
+    const csv = eventsToCSV(rows);
     const date = new Date().toISOString().split("T")[0];
     downloadFile(csv, `dispatch-history-${date}.csv`, "text/csv");
-    toast({ title: "Export Complete", description: `${events.length} events exported to CSV` });
+    toast({ title: "Export Complete", description: `${rows.length} events exported to CSV` });
   };
 
   const handleExportJSON = () => {
-    if (events.length === 0) {
+    if (rows.length === 0) {
       toast({ title: "No events to export", variant: "destructive" });
       return;
     }
-    const json = eventsToJSON(events);
+    const json = eventsToJSON(rows);
     const date = new Date().toISOString().split("T")[0];
     downloadFile(json, `dispatch-history-${date}.json`, "application/json");
-    toast({ title: "Export Complete", description: `${events.length} events exported to JSON` });
+    toast({ title: "Export Complete", description: `${rows.length} events exported to JSON` });
+  };
+
+  const renderCard = (e: DispatchEventRow) => {
+    const sev = severityOf(e.signalType);
+    const isReview = e.status === NEEDS_REVIEW_STATUS;
+    const cls = [
+      "sat-card",
+      `sev-${sev}`,
+      e.status === "accepted" ? "accepted" : "",
+      e.status === "resolved" ? "resolved" : "",
+      isReview ? "review" : "",
+      selectedId === e.id ? "sel" : "",
+    ].join(" ");
+    const reconciled = e.isManual && e.source !== "Manual Dispatch" && e.description?.startsWith("Reconciled from");
+    return (
+      <div
+        key={e.id}
+        role="button"
+        tabIndex={0}
+        aria-pressed={selectedId === e.id}
+        className={cls}
+        onClick={() => onSelect(e.id)}
+        onKeyDown={(ev) => {
+          if (ev.key === "Enter" || ev.key === " ") {
+            ev.preventDefault();
+            onSelect(e.id);
+          }
+        }}
+        data-testid={
+          isReview ? `review-event-${e.id}` : e.status === "accepted" ? `accepted-event-${e.id}` : `event-${e.id}`
+        }
+      >
+        <div className="sat-r1">
+          <span className="sat-sig">{e.signalType || "Unknown"}</span>
+          <span className="sat-ago" title={new Date(e.createdAt).toLocaleString()}>
+            {ago(e.createdAt, now)}
+          </span>
+        </div>
+        <div className="sat-addr">{formatAddress(e)}</div>
+        <div className="sat-meta">
+          <span>{e.district}</span>
+          <span>{e.source}</span>
+          {e.isManual && e.source === "Manual Dispatch" && <span className="sat-tag">manual</span>}
+          {reconciled && <span className="sat-tag">reconciled</span>}
+          {isReview && <span className="sat-tag verify">needs review</span>}
+          {e.addressFromContext && <span className="sat-tag verify">verify address</span>}
+          {e.locationApprox && <span className="sat-tag verify">approx location</span>}
+          {e.status === "accepted" && (
+            <span className="sat-tag ok">✓ {e.acceptedBy || "accepted"}</span>
+          )}
+          {e.status === "resolved" && <span className="sat-tag">resolved</span>}
+          {e.status === "active" && (
+            <button
+              type="button"
+              className="sat-quick"
+              disabled={pendingId === e.id}
+              onClick={(ev) => {
+                ev.stopPropagation();
+                accept(e.id);
+              }}
+              onKeyDown={(ev) => ev.stopPropagation()}
+              data-testid={`accept-event-${e.id}`}
+              title="Accept this call"
+            >
+              ACCEPT
+            </button>
+          )}
+        </div>
+      </div>
+    );
   };
 
   return (
-    <Card className="h-full flex flex-col" data-testid="event-log">
-      <CardHeader className="pb-2">
-        <CardTitle className="flex items-center justify-between text-sm">
-          <span className="flex items-center gap-2">
-            <Radio className="h-4 w-4 text-primary" />
-            Dispatch Events
-          </span>
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5">
-              <Badge variant="outline" className="text-xs text-emerald-600 border-emerald-600/30 bg-emerald-600/10">
-                {activeEvents.length} active
-              </Badge>
-              {reviewEvents.length > 0 && (
-                <Badge variant="outline" className="text-xs text-amber-500 border-amber-500/30 bg-amber-500/10" data-testid="review-count">
-                  {reviewEvents.length} review
-                </Badge>
-              )}
-              {acceptedEvents.length > 0 && (
-                <Badge variant="outline" className="text-xs text-red-600 border-red-600/30 bg-red-600/10">
-                  {acceptedEvents.length} accepted
-                </Badge>
-              )}
-            </div>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-7 w-7 p-0"
-                  data-testid="export-button"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={handleExportCSV} data-testid="export-csv">
-                  <Download className="h-3 w-3 mr-2" />
-                  Export as CSV
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={handleExportJSON} data-testid="export-json">
-                  <Download className="h-3 w-3 mr-2" />
-                  Export as JSON
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+    <aside className="sat-queue" data-testid="event-log" aria-label="Call queue">
+      <div className="sat-qhead">
+        <div className="sat-stats">
+          <div className="sat-stat">
+            <b>{stats.active}</b>
+            <span>Active</span>
           </div>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="flex-1 overflow-y-auto space-y-2 p-2">
-        {isLoading && (
-          <div className="text-xs text-muted-foreground text-center p-4">Loading events...</div>
+          <div className={`sat-stat ${stats.review > 0 ? "warn" : ""}`} data-testid="review-count">
+            <b>{stats.review}</b>
+            <span>Review</span>
+          </div>
+          <div className="sat-stat">
+            <b>{stats.lastHour}</b>
+            <span>Last hr</span>
+          </div>
+        </div>
+        <div className="sat-filters" role="group" aria-label="Filter calls">
+          {FILTERS.map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              className={`sat-f ${filter === key ? "on" : ""}`}
+              aria-pressed={filter === key}
+              onClick={() => setFilter(key)}
+              data-testid={`queue-filter-${key}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="sat-searchrow">
+          <input
+            className="sat-search"
+            type="search"
+            value={query}
+            onChange={(ev) => setQuery(ev.target.value)}
+            placeholder="Search address, transcript, district…"
+            aria-label="Search calls"
+            data-testid="queue-search"
+          />
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button type="button" className="sat-iconbtn" style={{ height: 34, width: 34 }} title="Export history" data-testid="export-button">
+                <Download />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={handleExportCSV} data-testid="export-csv">
+                <Download className="h-3 w-3 mr-2" />
+                Export as CSV
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={handleExportJSON} data-testid="export-json">
+                <Download className="h-3 w-3 mr-2" />
+                Export as JSON
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+      <div className="sat-list">
+        {isLoading && <div className="sat-empty">Loading events…</div>}
+        {!isLoading && rows.length === 0 && <div className="sat-empty">No dispatch events yet</div>}
+        {!isLoading && rows.length > 0 && open.length === 0 && resolved.length === 0 && (
+          <div className="sat-empty">No matching incidents</div>
         )}
-        {!isLoading && events.length === 0 && (
-          <div className="text-xs text-muted-foreground text-center p-4 italic">
-            No dispatch events yet
-          </div>
-        )}
-        {reviewEvents.map((event) => (
-          <div
-            key={event.id}
-            className="rounded-r-lg border border-l-[3px] border-amber-900/30 border-l-amber-500 bg-amber-950/10 p-3 space-y-2"
-            data-testid={`review-event-${event.id}`}
-          >
-            <div className="flex items-center justify-between">
-              <Badge variant="outline" className="text-[10px] text-amber-400 border-amber-500/50">
-                {event.signalType || "Unknown"} · needs review
-              </Badge>
-              <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
-                <Clock className="h-2.5 w-2.5" />
-                {new Date(event.createdAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}
-              </div>
-            </div>
-            <div className="text-[11px] font-semibold text-amber-400">
-              ⚠️ Unresolved address — not auto-dispatched. {event.description}
-            </div>
-            {event.transcript && (
-              <div className="line-clamp-3 border-l border-border/70 pl-2 text-[11px] leading-relaxed text-muted-foreground">
-                {event.transcript}
-              </div>
-            )}
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-mono text-muted-foreground">
-                {event.district} • {event.source}
-              </span>
-              <div className="flex items-center gap-1">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 px-2 text-[10px] text-amber-500"
-                  onClick={() => promoteMutation.mutate(event.id)}
-                  data-testid={`promote-event-${event.id}`}
-                >
-                  <ShieldAlert className="h-3 w-3 mr-1" /> Make active
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 px-2 text-[10px]"
-                  onClick={() => resolveMutation.mutate(event.id)}
-                  data-testid={`dismiss-event-${event.id}`}
-                >
-                  <CheckCircle2 className="h-3 w-3 mr-1" /> Dismiss
-                </Button>
-              </div>
-            </div>
-          </div>
-        ))}
-        {activeEvents.map((event) => (
-          <div
-            key={event.id}
-            className="group rounded-r-lg border border-l-[3px] border-emerald-900/30 border-l-emerald-500 bg-emerald-950/10 p-3 space-y-2 transition-all hover:translate-x-1 hover:bg-emerald-950/20 hover:shadow-md"
-            data-testid={`event-${event.id}`}
-          >
-            <div className="flex items-center justify-between">
-              <Badge variant="default" className="text-[10px] bg-emerald-600/90 hover:bg-emerald-600">
-                {event.signalType || "Unknown"}
-              </Badge>
-              <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
-                <Clock className="h-2.5 w-2.5" />
-                {new Date(event.createdAt).toLocaleTimeString("en-US", {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  hour12: false,
-                })}
-              </div>
-            </div>
-            {event.address && (
-              <div className="flex items-center gap-1 text-xs font-mono text-foreground">
-                <MapPin className="h-3 w-3 text-primary shrink-0" />
-                {event.crossStreet ? `${event.address} & ${event.crossStreet}` : event.address}
-              </div>
-            )}
-            {event.addressFromContext && (
-              <div className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-[11px] font-bold text-amber-400">
-                ⚠️ {ADDRESS_FROM_CONTEXT_NOTE}
-              </div>
-            )}
-            {event.locationApprox && (
-              <div className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-amber-400">
-                ⚠️ Approximate location — single cross street named, may need to search exact location. Read dispatch for context.
-              </div>
-            )}
-            {event.geocodedRoad && (
-              <div className="text-[11px] text-amber-500">
-                🛣️ Road x-ref: {event.geocodedRoad}
-              </div>
-            )}
-            {event.description && (
-              <div className="text-xs text-muted-foreground">{event.description}</div>
-            )}
-            {event.transcript && (
-              <div className="line-clamp-2 border-l border-border/70 pl-2 text-[11px] leading-relaxed text-muted-foreground">
-                {event.transcript}
-              </div>
-            )}
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-mono text-muted-foreground">
-                {event.district} • {event.source}
-                {event.isManual && (event.source === "Manual Dispatch" ? " • Manual" : event.description?.startsWith("Reconciled from") ? " • Reconciled" : null)}
-              </span>
-              <div className="flex items-center gap-1">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 px-2 text-[10px] text-emerald-600 hover:text-emerald-500 hover:bg-emerald-950/20"
-                  onClick={() => acceptMutation.mutate(event.id)}
-                  data-testid={`accept-event-${event.id}`}
-                >
-                  <ShieldAlert className="h-3 w-3 mr-1" /> Accept
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 px-2 text-[10px]"
-                  onClick={() => resolveMutation.mutate(event.id)}
-                  data-testid={`resolve-event-${event.id}`}
-                >
-                  <CheckCircle2 className="h-3 w-3 mr-1" /> Resolve
-                </Button>
-              </div>
-            </div>
-          </div>
-        ))}
-        {acceptedEvents.map((event) => (
-          <div
-            key={event.id}
-            className="rounded-r-lg border border-l-[3px] border-red-900/40 border-l-red-500 bg-red-950/10 p-3 space-y-2 opacity-90"
-            data-testid={`accepted-event-${event.id}`}
-          >
-            <div className="flex items-center justify-between">
-              <Badge variant="default" className="text-[10px] bg-red-600/90 hover:bg-red-600">
-                {event.signalType || "Unknown"}
-              </Badge>
-              <div className="flex items-center gap-1 text-[10px] text-red-400 font-semibold uppercase tracking-wider">
-                <ShieldAlert className="h-3 w-3" />
-                Accepted
-                {event.acceptedBy ? (
-                  <span className="normal-case tracking-normal font-medium text-red-300/80">
-                    · {event.acceptedBy}
-                  </span>
-                ) : null}
-              </div>
-            </div>
-            {event.address && (
-              <div className="flex items-center gap-1 text-xs font-mono text-foreground">
-                <MapPin className="h-3 w-3 text-red-400 shrink-0" />
-                {event.crossStreet ? `${event.address} & ${event.crossStreet}` : event.address}
-              </div>
-            )}
-            {event.addressFromContext && (
-              <div className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-[11px] font-bold text-amber-400">
-                ⚠️ {ADDRESS_FROM_CONTEXT_NOTE}
-              </div>
-            )}
-            {event.locationApprox && (
-              <div className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-amber-400">
-                ⚠️ Approximate location — single cross street named, may need to search exact location. Read dispatch for context.
-              </div>
-            )}
-            {event.geocodedRoad && (
-              <div className="text-[11px] text-amber-500">
-                🛣️ Road x-ref: {event.geocodedRoad}
-              </div>
-            )}
-            {event.description && (
-              <div className="text-xs text-muted-foreground">{event.description}</div>
-            )}
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-mono text-muted-foreground">
-                {event.district} • {event.source}
-                {event.isManual && (event.source === "Manual Dispatch" ? " • Manual" : event.description?.startsWith("Reconciled from") ? " • Reconciled" : null)}
-              </span>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-6 px-2 text-[10px]"
-                onClick={() => resolveMutation.mutate(event.id)}
-                data-testid={`resolve-accepted-event-${event.id}`}
-              >
-                <CheckCircle2 className="h-3 w-3 mr-1" /> Resolve
-              </Button>
-            </div>
-          </div>
-        ))}
-        {resolvedEvents.slice(0, 10).map((event) => (
-          <div
-            key={event.id}
-            className="rounded-r-lg border border-l-[3px] border-border/40 border-l-muted-foreground/50 bg-muted/20 p-3 space-y-1 opacity-60"
-          >
-            <div className="flex items-center justify-between">
-              <Badge variant="outline" className="text-[10px]">
-                {event.signalType || "Unknown"}
-              </Badge>
-              <span className="text-[10px] text-muted-foreground">
-                Resolved • {new Date(event.createdAt).toLocaleTimeString("en-US", {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  hour12: false,
-                })}
-              </span>
-            </div>
-            {event.address && (
-              <div className="flex items-center gap-1 text-xs font-mono text-muted-foreground">
-                <MapPin className="h-3 w-3 shrink-0" />
-                {event.address}
-              </div>
-            )}
-            {event.addressFromContext && (
-              <div className="text-[10px] font-bold text-amber-500">
-                ⚠️ {ADDRESS_FROM_CONTEXT_NOTE}
-              </div>
-            )}
-            {event.locationApprox && (
-              <div className="text-[10px] font-bold uppercase tracking-wide text-amber-500">
-                ⚠️ Approximate location — single cross street named. Read dispatch for context.
-              </div>
-            )}
-          </div>
-        ))}
-      </CardContent>
-    </Card>
+        {open.map(renderCard)}
+        {resolved.length > 0 && <div className="sat-divider">Recently resolved</div>}
+        {resolved.map(renderCard)}
+      </div>
+    </aside>
   );
 }

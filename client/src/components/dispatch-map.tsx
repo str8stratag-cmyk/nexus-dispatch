@@ -1,6 +1,11 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import { formatAddress, severityOf } from "@/lib/monitor-ui";
+
+// Tampa / Hillsborough home view (unchanged from the pre-Saturday board).
+const HOME_CENTER: L.LatLngExpression = [27.9506, -82.4572];
+const HOME_ZOOM = 11;
 
 interface DispatchMarker {
   id: number;
@@ -19,77 +24,43 @@ interface DispatchMarker {
 
 interface DispatchMapProps {
   markers: DispatchMarker[];
+  selectedId?: number | null;
+  onSelect?: (id: number) => void;
+  /** Bump `n` to pan/zoom to event `id` (queue or transcript click). */
+  focus?: { id: number; n: number } | null;
 }
 
-// v2: Build popup DOM safely to avoid XSS from DB values.
-function buildPopupContent(marker: DispatchMarker): HTMLElement {
+// Hover label built with textContent (DB values are untrusted — no HTML).
+function buildTooltipContent(marker: DispatchMarker): HTMLElement {
   const container = document.createElement("div");
-  container.style.minWidth = "220px";
-  container.style.fontFamily = "var(--font-sans, ui-sans-serif, system-ui, sans-serif)";
-
+  container.style.fontFamily = "var(--sat-mono, ui-monospace, monospace)";
+  container.style.fontSize = "11px";
   const signal = document.createElement("div");
   signal.style.fontWeight = "700";
-  signal.style.color = "hsl(38 92% 55%)";
-  signal.style.marginBottom = "4px";
-  signal.textContent = marker.signalType || "Unknown Signal";
+  signal.textContent = marker.signalType || "Unknown signal";
   container.appendChild(signal);
-
-  const meta = document.createElement("div");
-  meta.style.fontSize = "12px";
-  meta.style.color = "hsl(220 6% 65%)";
-  meta.style.marginBottom = "8px";
-  meta.textContent = `${marker.district} • ${new Date(marker.createdAt).toLocaleTimeString()}`;
-  container.appendChild(meta);
-
   const address = document.createElement("div");
-  address.style.fontWeight = "600";
-  address.style.marginBottom = "4px";
-  address.textContent = marker.crossStreet
-    ? `${marker.address} & ${marker.crossStreet}`
-    : marker.address || "Address unknown";
+  address.textContent = formatAddress(marker);
   container.appendChild(address);
-
-  if (marker.geocodedRoad) {
-    const roadRef = document.createElement("div");
-    roadRef.style.fontSize = "11px";
-    roadRef.style.color = "hsl(38 92% 55%)";
-    roadRef.style.marginBottom = "8px";
-    roadRef.textContent = `🛣️ Road x-ref: ${marker.geocodedRoad}`;
-    container.appendChild(roadRef);
-  }
-
-  if (marker.description) {
-    const desc = document.createElement("div");
-    desc.style.marginBottom = "8px";
-    desc.textContent = marker.description;
-    container.appendChild(desc);
-  }
-
-  const transcript = document.createElement("div");
-  transcript.style.fontSize = "12px";
-  transcript.style.color = "hsl(220 6% 55%)";
-  transcript.style.borderTop = "1px solid hsl(220 9% 17%)";
-  transcript.style.paddingTop = "6px";
-  transcript.style.marginTop = "6px";
-  transcript.textContent = marker.transcript || "No transcript";
-  container.appendChild(transcript);
-
   return container;
 }
 
-export default function DispatchMap({ markers }: DispatchMapProps) {
+export default function DispatchMap({ markers, selectedId = null, onSelect, focus = null }: DispatchMapProps) {
   const mapRef = useRef<L.Map | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const markerLayerRef = useRef<L.LayerGroup | null>(null);
   const hasFittedMarkersRef = useRef(false);
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
+  const [showPins, setShowPins] = useState(true);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
     const map = L.map(containerRef.current, {
-      center: [27.9506, -82.4572], // Tampa, FL
-      zoom: 11,
-      zoomControl: true,
+      center: HOME_CENTER, // Tampa, FL
+      zoom: HOME_ZOOM,
+      zoomControl: false, // re-added bottom-left (Saturday layout)
       attributionControl: true,
     });
 
@@ -130,6 +101,8 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
       { collapsed: false, position: "topright" }
     ).addTo(map);
 
+    L.control.zoom({ position: "bottomleft" }).addTo(map);
+
     // Hillsborough County, FL boundary for cross-reference context.
     const countyBounds: L.LatLngExpression[] = [
       [27.5706, -82.8237],
@@ -138,13 +111,13 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
       [28.1734, -82.8237],
     ];
     L.polygon(countyBounds, {
-      color: "hsl(38 92% 55%)",
+      color: "#f5a524",
       weight: 2,
-      fillColor: "hsl(38 92% 55%)",
+      fillColor: "#f5a524",
       fillOpacity: 0.05,
       dashArray: "6, 8",
     })
-      .bindPopup("Hillsborough County service area")
+      .bindTooltip("Hillsborough County service area", { sticky: true })
       .addTo(map);
 
     markerLayerRef.current = L.layerGroup().addTo(map);
@@ -181,39 +154,35 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
 
     markerLayerRef.current.clearLayers();
 
-    markers.forEach((marker) => {
-      if (!marker.lat || !marker.lng) return;
-
-      // Accepted calls are dimmed; active calls stay red/alert.
-      const isAccepted = marker.status === "accepted";
-      const hue = isAccepted ? 220 : 0;
-      const bg = isAccepted ? "hsl(220 20% 35%)" : "hsl(0 72% 48%)";
-      const shadow = isAccepted ? "hsl(220 20% 35% / 0.4)" : "hsl(0 72% 48% / 0.6)";
-      const emoji = isAccepted ? "🔒" : "🚨";
-
-      // Custom alert icon
-      const icon = L.divIcon({
-        className: "dispatch-marker",
-        html: `<div style="
-          width: 28px;
-          height: 28px;
-          border-radius: 50%;
-          background: ${bg};
-          border: 3px solid hsl(0 0% 100%);
-          box-shadow: 0 0 12px ${shadow};
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 14px;
-        ">${emoji}</div>`,
-        iconSize: [28, 28],
-        iconAnchor: [14, 14],
+    if (showPins) {
+      markers.forEach((marker) => {
+        if (!marker.lat || !marker.lng) return;
+        const sev = severityOf(marker.signalType);
+        const isSelected = marker.id === selectedId;
+        const cls = [
+          "sat-pin",
+          sev,
+          marker.status === "accepted" ? "accepted" : "",
+          marker.status === "resolved" ? "resolved" : "",
+          isSelected ? "sel" : "",
+        ].join(" ");
+        const icon = L.divIcon({
+          className: "dispatch-marker",
+          html: `<div class="${cls}"></div>`,
+          iconSize: [18, 18],
+          iconAnchor: [9, 9],
+        });
+        L.marker([marker.lat, marker.lng], {
+          icon,
+          zIndexOffset: isSelected ? 1000 : sev === "crit" ? 500 : 0,
+          keyboard: true,
+          title: marker.signalType || "Incident",
+        })
+          .bindTooltip(buildTooltipContent(marker), { direction: "top", offset: [0, -10] })
+          .on("click", () => onSelectRef.current?.(marker.id))
+          .addTo(markerLayerRef.current!);
       });
-
-      L.marker([marker.lat, marker.lng], { icon })
-        .bindPopup(buildPopupContent(marker))
-        .addTo(markerLayerRef.current!);
-    });
+    }
 
     const validMarkers = markers.filter((m): m is typeof m & { lat: number; lng: number } =>
       Number.isFinite(m.lat) && Number.isFinite(m.lng)
@@ -225,7 +194,33 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
       );
       hasFittedMarkersRef.current = true;
     }
-  }, [markers]);
+  }, [markers, selectedId, showPins]);
+
+  // Pan to a call selected from the queue / transcripts. Map clicks select
+  // without moving the view (same as the Saturday prototype).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !focus) return;
+    const m = markers.find((x) => x.id === focus.id);
+    if (!m || !Number.isFinite(m.lat) || !Number.isFinite(m.lng)) return;
+    try {
+      map.invalidateSize({ animate: false });
+      map.setView([m.lat as number, m.lng as number], Math.max(map.getZoom(), 14), { animate: true });
+    } catch {
+      /* map may be mid-teardown */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus]);
+
+  const fitAll = () => {
+    const map = mapRef.current;
+    if (!map) return;
+    const pts = markers
+      .filter((m) => Number.isFinite(m.lat) && Number.isFinite(m.lng) && m.status !== "resolved")
+      .map((m) => [m.lat as number, m.lng as number] as L.LatLngTuple);
+    if (pts.length) map.fitBounds(L.latLngBounds(pts), { padding: [60, 60], maxZoom: 14 });
+  };
+  const goHome = () => mapRef.current?.setView(HOME_CENTER, HOME_ZOOM);
 
   // Invalidate size when tab becomes visible
   useEffect(() => {
@@ -244,11 +239,24 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
   // (see dispatch.tsx map pane). Inline minHeight avoids a grey 0-height Leaflet
   // pane if flex sizing races on first paint.
   return (
+    <>
+    <div className="sat-maptools" role="toolbar" aria-label="Map tools">
+      <button type="button" className={showPins ? "on" : ""} aria-pressed={showPins} onClick={() => setShowPins((v) => !v)} data-testid="map-tool-incidents">
+        Incidents
+      </button>
+      <button type="button" onClick={fitAll} data-testid="map-tool-fit">
+        Fit all
+      </button>
+      <button type="button" onClick={goHome} data-testid="map-tool-home">
+        Tampa
+      </button>
+    </div>
     <div
       ref={containerRef}
-      className="absolute inset-0 h-full w-full min-h-[200px] bg-[#1a1a2e]"
+      className="absolute inset-0 h-full w-full min-h-[200px] bg-[var(--sat-map-bg)]"
       style={{ zIndex: 0 }}
       data-testid="dispatch-map"
     />
+    </>
   );
 }

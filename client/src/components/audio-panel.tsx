@@ -17,7 +17,7 @@ import { LEASE_RENEW_MS, decideTabAction, mayRunCapture, minuteLevel, type TabSn
 import { useDispatchBuffer } from "@/hooks/use-dispatch-buffer";
 import { isTrueRepeat } from "@/lib/dispatch-buffer-core";
 import { useKeywords } from "@/hooks/use-keywords";
-import RmsMeter from "./rms-meter";
+import RmsMeter, { StripMeter } from "./rms-meter";
 import TranscriptFeed from "./transcript-feed";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -63,6 +63,18 @@ interface AudioPanelProps {
   showTranscriptFeed?: boolean;
   /** Fires whenever the live transcript list changes (oldest→newest). */
   onTranscriptEntriesChange?: (entries: TranscriptEntry[]) => void;
+  /** "strip" = Saturday bottom bar (desk RMS + controls + ticker; notices
+   *  float above it). Presentation only — capture behavior is identical. */
+  layout?: "auto" | "strip";
+  /** Read-only capture status for header chips (fires on change only). */
+  onCaptureStateChange?: (state: CaptureUiState) => void;
+}
+
+export interface CaptureUiState {
+  capturing: boolean;
+  autoCapture: boolean;
+  standby: boolean;
+  error: string | null;
 }
 
 const DISPATCH_COOLDOWN_MS = 15000;
@@ -85,7 +97,12 @@ export default function AudioPanel({
   onDispatchDetected,
   showTranscriptFeed = true,
   onTranscriptEntriesChange,
+  layout = "auto",
+  onCaptureStateChange,
 }: AudioPanelProps) {
+  const isStrip = layout === "strip";
+  // Stacked controls only in the legacy standalone layout.
+  const stacked = showTranscriptFeed && !isStrip;
   const [selectedDevice, setSelectedDeviceState] = useState<string>(() => localStorage.getItem("dispatch.audioDevice") || "");
   const setSelectedDevice = useCallback((value: string) => {
     localStorage.setItem("dispatch.audioDevice", value);
@@ -586,7 +603,7 @@ export default function AudioPanel({
 
   const deviceSelect = (
     <Select value={selectedDevice} onValueChange={setSelectedDevice}>
-      <SelectTrigger className={`text-xs ${showTranscriptFeed ? "" : "h-8 min-w-[9rem] max-w-[14rem]"}`} data-testid="device-select">
+      <SelectTrigger className={`text-xs ${stacked ? "" : "h-8 min-w-[9rem] max-w-[14rem]"}`} data-testid="device-select">
         <SelectValue placeholder="Select microphone..." />
       </SelectTrigger>
       <SelectContent>
@@ -604,7 +621,7 @@ export default function AudioPanel({
 
   const districtSelect = (
     <Select value={district} onValueChange={onDistrictChange}>
-      <SelectTrigger className={`text-xs ${showTranscriptFeed ? "" : "h-8 w-[7.5rem]"}`} data-testid="district-select">
+      <SelectTrigger className={`text-xs ${stacked ? "" : "h-8 w-[7.5rem]"}`} data-testid="district-select">
         <SelectValue placeholder="District..." />
       </SelectTrigger>
       <SelectContent>
@@ -621,7 +638,7 @@ export default function AudioPanel({
       value={sourceName}
       onChange={(e) => onSourceChange(e.target.value)}
       placeholder="Source name..."
-      className={`flex w-full rounded-md border border-input bg-transparent px-3 py-1 text-xs font-mono ${showTranscriptFeed ? "h-9" : "h-8 max-w-[10rem]"}`}
+      className={`flex w-full rounded-md border border-input bg-transparent px-3 py-1 text-xs font-mono ${stacked ? "h-9" : "h-8 max-w-[10rem]"}`}
       data-testid="source-input"
     />
   );
@@ -630,8 +647,8 @@ export default function AudioPanel({
     <Button
       onClick={isCapturing ? handleStop : handleStart}
       variant={isCapturing ? "destructive" : "default"}
-      className={showTranscriptFeed ? "w-full" : "h-8 shrink-0 px-3"}
-      size={showTranscriptFeed ? "default" : "sm"}
+      className={stacked ? "w-full" : "h-8 shrink-0 px-3"}
+      size={stacked ? "default" : "sm"}
       data-testid="capture-toggle"
     >
       {isCapturing ? (
@@ -647,6 +664,113 @@ export default function AudioPanel({
       )}
     </Button>
   );
+
+  const standby = autoCapture && (lockState === "standby" || leaseState === "denied") && !isCapturing;
+
+  // Header chips read this; only fires when a value actually changes.
+  useEffect(() => {
+    onCaptureStateChange?.({ capturing: isCapturing, autoCapture, standby, error: error ?? null });
+  }, [isCapturing, autoCapture, standby, error, onCaptureStateChange]);
+
+  // In the strip, "Auto-Dispatch Sent" is a transient notice (it would
+  // otherwise sit over the map forever); the stacked layout keeps it.
+  const [showLastDispatch, setShowLastDispatch] = useState(false);
+  useEffect(() => {
+    if (!lastDispatch) return;
+    setShowLastDispatch(true);
+    const t = window.setTimeout(() => setShowLastDispatch(false), 20_000);
+    return () => window.clearTimeout(t);
+  }, [lastDispatch]);
+
+  if (isStrip) {
+    const latest = transcriptEntries[transcriptEntries.length - 1];
+    const deskLabel = sourceName || district || "—";
+    const dotClass = isCapturing ? "pulse" : standby ? "warn" : error ? "crit" : "idle";
+    return (
+      <footer className="sat-strip" data-testid="audio-panel" aria-label="Capture">
+        <div className="sat-feedrow" data-testid="audio-panel-compact-strip">
+          <span className={`sat-dot ${dotClass}`} aria-hidden />
+          <span className="src" title={`${deskLabel} · ${district}`}>{deskLabel}</span>
+          <StripMeter rms={rms} active={isCapturing} label={`${deskLabel} audio level`} />
+        </div>
+        <div className="sat-controls">
+          {deviceSelect}
+          {districtSelect}
+          {sourceInput}
+          {captureButton}
+        </div>
+        <div className="sat-ticker" data-testid="strip-ticker">
+          {latest ? (
+            <>
+              <b>{new Date(latest.timestamp).toLocaleTimeString("en-US", { hour12: false })}</b>
+              {latest.text}
+            </>
+          ) : isCapturing ? (
+            "Listening…"
+          ) : (
+            "Capture idle"
+          )}
+        </div>
+
+        <div className="sat-notices" aria-live="polite">
+          {isInIframe && (
+            <div className="sat-notice crit" data-testid="iframe-warning">
+              <strong>Microphone access requires a new tab.</strong> This preview blocks the mic.
+              <Button
+                onClick={() => window.open(window.location.href, "_blank")}
+                size="sm"
+                className="mt-2 h-7 w-full text-xs"
+                data-testid="open-new-tab"
+              >
+                <ExternalLink className="h-3 w-3 mr-1" />
+                Open App in New Tab
+              </Button>
+            </div>
+          )}
+          {isPending && (
+            <div className="sat-notice" data-testid="dispatch-pending">
+              ⏳ Keyword detected. Waiting for address/details...
+            </div>
+          )}
+          {!isCapturing && !autoCapture && (
+            <div className="sat-notice" data-testid="auto-capture-off">
+              Auto-capture is OFF because Stop was pressed. Press Start Capture to resume; it then restarts by itself after updates and reloads.
+            </div>
+          )}
+          {standby && (
+            <div className="sat-notice info" data-testid="capture-standby">
+              Standby: another Dispatch Monitor tab on this desk is capturing. This tab takes over automatically if that one closes.
+            </div>
+          )}
+          {supervisorNote && autoCapture && (
+            <div className="sat-notice" data-testid="auto-start-note">
+              {supervisorNote}
+            </div>
+          )}
+          {error && (
+            <div className="sat-notice crit" data-testid="capture-error">
+              {error}
+            </div>
+          )}
+          {!supported && (
+            <div className="sat-notice">
+              Local Whisper capture requires a browser with MediaRecorder support, such as Chrome or Edge.
+            </div>
+          )}
+          {lastDispatch && showLastDispatch && (
+            <div className="sat-notice ok" data-testid="last-dispatch">
+              <strong>Auto-Dispatch Sent</strong> · {lastDispatch.keywords.map((k) => k.signalType).join(", ")}
+              {lastDispatch.address && (
+                <div className="sat-mono" style={{ color: "var(--sat-muted)", fontSize: 11 }}>
+                  {lastDispatch.crossStreet ? `${lastDispatch.address} & ${lastDispatch.crossStreet}` : lastDispatch.address}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </footer>
+    );
+  }
 
   return (
     <div className={`flex flex-col ${showTranscriptFeed ? "h-full gap-3" : "h-auto gap-1"}`} data-testid="audio-panel">

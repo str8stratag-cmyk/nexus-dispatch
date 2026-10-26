@@ -1,0 +1,399 @@
+/*
+ * Saturday monitor shell — ported from the Polk UI prototype
+ * (dispatch-monitor-polk/ui/index.html, Fri 2026-10-24) into the live
+ * Hillsborough / Tampa React board. Visual chrome only: capture, Whisper,
+ * heartbeat and lease logic are untouched.
+ *
+ * Tokens follow the app's existing theme switch (`.dark` on <html>, light =
+ * no class) so the header theme toggle keeps working.
+ */
+
+:root {
+  --sat-bg: #eef1f5;
+  --sat-panel: #ffffff;
+  --sat-panel-2: #f3f5f9;
+  --sat-line: #d5dce6;
+  --sat-text: #151b25;
+  --sat-muted: #5d6b7e;
+  --sat-accent: #c77d00;
+  --sat-accent-ink: #ffffff;
+  --sat-ok: #1f9d68;
+  --sat-warn: #c77d00;
+  --sat-crit: #e03e3e;
+  --sat-info: #2f7fd6;
+  --sat-radius: 10px;
+  --sat-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --sat-map-bg: #dfe5ec;
+}
+
+.dark {
+  --sat-bg: #0b0f14;
+  --sat-panel: #121821;
+  --sat-panel-2: #182130;
+  --sat-line: #243044;
+  --sat-text: #e6edf6;
+  --sat-muted: #8696ab;
+  --sat-accent: #f5a524;
+  --sat-accent-ink: #1a1203;
+  --sat-ok: #3ecf8e;
+  --sat-warn: #f5a524;
+  --sat-crit: #ff5d5d;
+  --sat-info: #5aa9ff;
+  --sat-map-bg: #0f1620;
+}
+
+/* ---------- shell ---------- */
+.sat-app {
+  display: grid;
+  height: 100vh;
+  height: 100dvh;
+  background: var(--sat-bg);
+  color: var(--sat-text);
+  font-size: 14px;
+  line-height: 1.4;
+  grid-template-columns: 64px 360px minmax(0, 1fr) 340px;
+  grid-template-rows: 52px minmax(0, 1fr) 64px;
+  grid-template-areas:
+    "rail top top top"
+    "rail queue map detail"
+    "rail strip strip strip";
+}
+.sat-app.sat-other {
+  grid-template-areas:
+    "rail top top top"
+    "rail view view view"
+    "rail strip strip strip";
+}
+.sat-app button { cursor: pointer; }
+.sat-mono { font-family: var(--sat-mono); }
+
+/* ---------- rail ---------- */
+.sat-rail {
+  grid-area: rail;
+  background: var(--sat-panel);
+  border-right: 1px solid var(--sat-line);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 0;
+  gap: 6px;
+  z-index: 20;
+}
+.sat-logo {
+  width: 38px; height: 38px; border-radius: 10px;
+  background: var(--sat-accent); color: var(--sat-accent-ink);
+  display: grid; place-items: center; font-weight: 800; margin-bottom: 10px;
+  letter-spacing: -0.02em;
+}
+.sat-rail-btn {
+  width: 48px; height: 48px; border-radius: 10px; border: 0;
+  background: transparent; color: var(--sat-muted);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  font-size: 10px; line-height: 1;
+}
+.sat-rail-btn svg { width: 20px; height: 20px; }
+.sat-rail-btn:hover, .sat-rail-btn.on { background: var(--sat-panel-2); color: var(--sat-text); }
+.sat-rail-btn.on { box-shadow: inset 3px 0 0 var(--sat-accent); }
+.sat-rail-btn:focus-visible { outline: 2px solid var(--sat-accent); outline-offset: 1px; }
+.sat-rail-sp { flex: 1; }
+.sat-rail-badge {
+  position: absolute; top: 4px; right: 4px; min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px; background: var(--sat-warn); color: var(--sat-accent-ink);
+  font: 700 9px/16px var(--sat-mono); text-align: center;
+}
+
+/* ---------- top ---------- */
+.sat-top {
+  grid-area: top;
+  display: flex; align-items: center; gap: 14px; padding: 0 16px; min-width: 0;
+  border-bottom: 1px solid var(--sat-line); background: var(--sat-panel);
+}
+.sat-top h1 { font-size: 15px; font-weight: 700; margin: 0; letter-spacing: .02em; white-space: nowrap; }
+.sat-top h1 small {
+  display: block; font: 500 10px var(--sat-mono); color: var(--sat-muted);
+  letter-spacing: .12em; text-transform: uppercase;
+}
+.sat-chips { display: flex; gap: 8px; margin-left: auto; flex-wrap: nowrap; overflow: hidden; min-width: 0; }
+.sat-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
+  border: 1px solid var(--sat-line); border-radius: 999px;
+  font: 600 11px var(--sat-mono); color: var(--sat-muted); white-space: nowrap; text-transform: uppercase;
+}
+.sat-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--sat-ok); flex-shrink: 0; }
+.sat-dot.warn { background: var(--sat-warn); }
+.sat-dot.crit { background: var(--sat-crit); }
+.sat-dot.idle { background: var(--sat-muted); }
+.sat-chip.live .sat-dot, .sat-dot.pulse { animation: sat-pulse 1.6s infinite; }
+@keyframes sat-pulse { 50% { opacity: .25; } }
+.sat-clock { font: 600 13px var(--sat-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sat-iconbtn {
+  border: 1px solid var(--sat-line); background: var(--sat-panel-2); color: var(--sat-text);
+  border-radius: 8px; width: 32px; height: 32px; display: grid; place-items: center; flex-shrink: 0;
+}
+.sat-iconbtn:hover { border-color: var(--sat-accent); }
+.sat-iconbtn svg { width: 16px; height: 16px; }
+.sat-phone-toggle { display: none; }
+.sat-feed-toggle { display: none; }
+
+/* ---------- queue ---------- */
+.sat-queue {
+  grid-area: queue; border-right: 1px solid var(--sat-line); background: var(--sat-panel);
+  display: flex; flex-direction: column; min-height: 0; min-width: 0;
+}
+.sat-qhead { padding: 12px 12px 8px; border-bottom: 1px solid var(--sat-line); }
+.sat-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
+.sat-stat { background: var(--sat-panel-2); border-radius: 8px; padding: 8px 10px; }
+.sat-stat b { display: block; font: 700 20px var(--sat-mono); font-variant-numeric: tabular-nums; }
+.sat-stat span { font-size: 10px; color: var(--sat-muted); text-transform: uppercase; letter-spacing: .08em; }
+.sat-stat.warn b { color: var(--sat-warn); }
+.sat-filters { display: flex; gap: 6px; flex-wrap: wrap; }
+.sat-f {
+  border: 1px solid var(--sat-line); background: transparent; border-radius: 999px;
+  padding: 3px 10px; font-size: 12px; color: var(--sat-muted);
+}
+.sat-f:hover { color: var(--sat-text); }
+.sat-f.on { background: var(--sat-accent); border-color: var(--sat-accent); color: var(--sat-accent-ink); font-weight: 700; }
+.sat-searchrow { display: flex; gap: 6px; margin-top: 8px; }
+.sat-search {
+  flex: 1; min-width: 0; background: var(--sat-panel-2); border: 1px solid var(--sat-line); border-radius: 8px;
+  padding: 7px 10px; color: var(--sat-text); font: inherit; font-size: 13px;
+}
+.sat-search:focus { outline: none; border-color: var(--sat-accent); }
+.sat-list { overflow-y: auto; flex: 1; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.sat-divider {
+  font: 600 10px var(--sat-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--sat-muted);
+  padding: 6px 2px 0;
+}
+
+.sat-card {
+  position: relative; text-align: left; background: var(--sat-panel-2);
+  border: 1px solid var(--sat-line); border-left: 4px solid var(--sat-info);
+  border-radius: var(--sat-radius); padding: 10px 12px; width: 100%; color: var(--sat-text);
+}
+.sat-card:hover { border-color: color-mix(in srgb, var(--sat-accent) 45%, var(--sat-line)); }
+.sat-card.sev-crit { border-left-color: var(--sat-crit); }
+.sat-card.sev-warn { border-left-color: var(--sat-warn); }
+.sat-card.sel { outline: 2px solid var(--sat-accent); outline-offset: -1px; }
+.sat-card.accepted { opacity: .6; }
+.sat-card.resolved { opacity: .45; border-left-color: var(--sat-muted); }
+.sat-card.review { border-style: dashed; border-left-style: solid; border-left-color: var(--sat-warn); }
+.sat-card:focus-visible { outline: 2px solid var(--sat-accent); }
+.sat-r1 { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.sat-sig {
+  font: 700 11px var(--sat-mono); letter-spacing: .06em; padding: 2px 7px; border-radius: 5px; white-space: nowrap;
+  background: color-mix(in srgb, var(--sat-info) 20%, transparent); color: var(--sat-info);
+}
+.sev-crit .sat-sig, .sat-sig.sev-crit { background: color-mix(in srgb, var(--sat-crit) 20%, transparent); color: var(--sat-crit); }
+.sev-warn .sat-sig, .sat-sig.sev-warn { background: color-mix(in srgb, var(--sat-warn) 20%, transparent); color: var(--sat-warn); }
+.sat-ago { font: 11px var(--sat-mono); color: var(--sat-muted); white-space: nowrap; }
+.sat-addr { font-weight: 650; margin: 6px 0 2px; overflow-wrap: anywhere; }
+.sat-meta { font-size: 12px; color: var(--sat-muted); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.sat-tag {
+  font-size: 10px; border: 1px solid var(--sat-line); border-radius: 4px; padding: 0 5px; color: var(--sat-muted);
+  white-space: nowrap;
+}
+.sat-tag.verify { color: var(--sat-warn); border-color: var(--sat-warn); }
+.sat-tag.ok { color: var(--sat-ok); border-color: color-mix(in srgb, var(--sat-ok) 60%, transparent); }
+.sat-quick {
+  margin-left: auto; border: 1px solid var(--sat-accent); color: var(--sat-accent); background: transparent;
+  border-radius: 6px; padding: 1px 8px; font: 700 11px var(--sat-mono); letter-spacing: .04em;
+}
+.sat-quick:hover { background: var(--sat-accent); color: var(--sat-accent-ink); }
+.sat-quick:disabled { opacity: .5; cursor: default; }
+
+/* ---------- map ---------- */
+.sat-mapwrap { grid-area: map; position: relative; min-width: 0; min-height: 0; background: var(--sat-map-bg); }
+.sat-maptools { position: absolute; z-index: 500; top: 12px; left: 12px; display: flex; gap: 6px; }
+.sat-maptools button {
+  background: var(--sat-panel); color: var(--sat-text); border: 1px solid var(--sat-line);
+  border-radius: 8px; padding: 6px 10px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.25);
+}
+.sat-maptools button:hover { border-color: var(--sat-accent); }
+.sat-maptools button.on { background: var(--sat-accent); color: var(--sat-accent-ink); border-color: var(--sat-accent); font-weight: 700; }
+.sat-pin {
+  width: 18px; height: 18px; border-radius: 50%; border: 3px solid #fff;
+  background: var(--sat-info); box-shadow: 0 0 0 0 rgba(255,93,93,.7);
+  transition: transform .15s;
+}
+.sat-pin.crit { background: var(--sat-crit); animation: sat-ring 1.8s infinite; }
+.sat-pin.warn { background: var(--sat-warn); }
+.sat-pin.accepted { opacity: .55; animation: none; }
+.sat-pin.resolved { background: var(--sat-muted); opacity: .45; animation: none; }
+.sat-pin.sel { transform: scale(1.35); border-color: var(--sat-accent); }
+@keyframes sat-ring {
+  70% { box-shadow: 0 0 0 16px rgba(255,93,93,0); }
+  100% { box-shadow: 0 0 0 0 rgba(255,93,93,0); }
+}
+/* Esri layers control: match the panel chrome instead of Leaflet's white box. */
+.sat-mapwrap .leaflet-control-layers {
+  background: var(--sat-panel); color: var(--sat-text); border: 1px solid var(--sat-line) !important;
+  border-radius: 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.25);
+}
+.sat-mapwrap .leaflet-control-layers-separator { border-top-color: var(--sat-line); }
+.sat-mapwrap .leaflet-bar a {
+  background: var(--sat-panel); color: var(--sat-text); border-bottom-color: var(--sat-line);
+}
+.sat-mapwrap .leaflet-bar { border: 1px solid var(--sat-line) !important; }
+.sat-mapwrap .leaflet-popup-content-wrapper, .sat-mapwrap .leaflet-popup-tip {
+  background: var(--sat-panel); color: var(--sat-text);
+}
+.sat-mapwrap .leaflet-control-attribution { background: color-mix(in srgb, var(--sat-panel) 80%, transparent); color: var(--sat-muted); }
+.sat-mapwrap .leaflet-control-attribution a { color: var(--sat-muted); }
+
+/* ---------- detail ---------- */
+.sat-detail {
+  grid-area: detail; border-left: 1px solid var(--sat-line); background: var(--sat-panel);
+  display: flex; flex-direction: column; min-height: 0; min-width: 0;
+}
+.sat-feed { flex: 1 1 50%; min-height: 160px; display: flex; flex-direction: column; border-bottom: 1px solid var(--sat-line); }
+.sat-inc { flex: 0 1 auto; max-height: 58%; overflow-y: auto; padding: 14px; }
+.sat-fhead {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 14px;
+  font: 600 10px var(--sat-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--sat-muted);
+}
+.sat-fhead button {
+  font: 600 11px var(--sat-mono); letter-spacing: 0; text-transform: none;
+  border: 1px solid var(--sat-line); background: var(--sat-panel-2); border-radius: 6px; padding: 2px 8px; color: var(--sat-muted);
+}
+.sat-fhead button.on { background: var(--sat-accent); color: var(--sat-accent-ink); border-color: var(--sat-accent); }
+.sat-flist { overflow-y: auto; flex: 1; padding: 0 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+.sat-tx {
+  background: var(--sat-panel-2); border: 1px solid var(--sat-line); border-left: 3px solid var(--sat-line);
+  border-radius: 8px; padding: 7px 10px; font: 12px/1.45 var(--sat-mono); animation: sat-txin .35s;
+  text-align: left; width: 100%; overflow-wrap: anywhere;
+}
+.sat-tx.hit { border-left-color: var(--sat-info); }
+.sat-tx.hit.crit { border-left-color: var(--sat-crit); }
+.sat-tx.hit.warn { border-left-color: var(--sat-warn); }
+.sat-tx.chatter { opacity: .65; }
+.sat-tx.interim { opacity: .5; font-style: italic; }
+.sat-tx .t { color: var(--sat-muted); font-size: 10px; display: flex; justify-content: space-between; gap: 8px; margin-bottom: 2px; }
+.sat-tx mark, .sat-detail mark {
+  background: color-mix(in srgb, var(--sat-accent) 35%, transparent); color: inherit; border-radius: 3px; padding: 0 2px;
+}
+@keyframes sat-txin { from { opacity: 0; transform: translateY(-8px); } }
+@media (prefers-reduced-motion: reduce) {
+  .sat-tx, .sat-pin.crit, .sat-chip.live .sat-dot, .sat-dot.pulse { animation: none; }
+}
+.sat-detail h2 { margin: 0 0 2px; font-size: 17px; font-weight: 700; overflow-wrap: anywhere; }
+.sat-sub { color: var(--sat-muted); font-size: 12px; margin-bottom: 12px; }
+.sat-empty { color: var(--sat-muted); text-align: center; padding: 24px 12px; font-size: 12px; }
+.sat-blk {
+  background: var(--sat-panel-2); border: 1px solid var(--sat-line); border-radius: var(--sat-radius);
+  padding: 10px 12px; margin-bottom: 10px; font-size: 13px;
+}
+.sat-blk.verify { border-color: var(--sat-warn); }
+.sat-blk h3 {
+  margin: 0 0 6px; font: 600 10px var(--sat-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--sat-muted);
+}
+.sat-blk.verify h3 { color: var(--sat-warn); }
+.sat-transcript { font: 13px/1.5 var(--sat-mono); overflow-wrap: anywhere; }
+.sat-kv { display: grid; grid-template-columns: 100px 1fr; gap: 4px 8px; font-size: 13px; margin: 0; }
+.sat-kv dt { color: var(--sat-muted); }
+.sat-kv dd { margin: 0; overflow-wrap: anywhere; }
+.sat-actions { display: flex; gap: 8px; position: sticky; bottom: -14px; padding: 8px 0 0; background: var(--sat-panel); }
+.sat-btn {
+  flex: 1; border: 1px solid var(--sat-line); background: var(--sat-panel-2); color: var(--sat-text);
+  border-radius: 8px; padding: 9px; font-weight: 600; font-size: 13px;
+}
+.sat-btn:hover { border-color: var(--sat-accent); }
+.sat-btn.primary { background: var(--sat-accent); color: var(--sat-accent-ink); border-color: var(--sat-accent); }
+.sat-btn:disabled { opacity: .5; cursor: default; }
+
+/* ---------- strip ---------- */
+.sat-strip {
+  grid-area: strip; position: relative; z-index: 30;
+  border-top: 1px solid var(--sat-line); background: var(--sat-panel);
+  display: flex; align-items: center; gap: 14px; padding: 0 16px; min-width: 0;
+}
+.sat-feedrow { display: flex; align-items: center; gap: 8px; font: 600 11px var(--sat-mono); color: var(--sat-muted); flex-shrink: 0; }
+.sat-feedrow .src { color: var(--sat-text); max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sat-rms {
+  position: relative; width: 150px; height: 10px; border-radius: 5px;
+  background: var(--sat-panel-2); border: 1px solid var(--sat-line); overflow: hidden; flex-shrink: 0;
+}
+.sat-rms i {
+  position: absolute; inset: 0 auto 0 0; width: 0;
+  background: linear-gradient(90deg, var(--sat-ok) 0 60%, var(--sat-warn) 60% 85%, var(--sat-crit) 85%);
+  background-size: 150px 100%; transition: width .12s;
+}
+.sat-rms b { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--sat-text); opacity: .85; left: 0; transition: left .5s; }
+.sat-db { width: 52px; text-align: right; color: var(--sat-text); font-variant-numeric: tabular-nums; }
+.sat-controls { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.sat-ticker {
+  flex: 1; min-width: 0; font: 12px var(--sat-mono); color: var(--sat-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sat-ticker b { color: var(--sat-text); font-weight: 600; margin-right: 6px; }
+.sat-ticker mark { background: color-mix(in srgb, var(--sat-accent) 35%, transparent); color: var(--sat-text); border-radius: 3px; padding: 0 2px; }
+/* Capture notices (standby / auto-capture off / errors) float above the strip
+   so they stay visible without breaking the 64px chrome. */
+.sat-notices {
+  position: absolute; right: calc(340px + 16px); bottom: calc(100% + 8px); width: min(440px, calc(100vw - 32px));
+  display: flex; flex-direction: column; gap: 6px; pointer-events: none;
+}
+.sat-notices > * { pointer-events: auto; box-shadow: 0 8px 30px rgba(0,0,0,.35); }
+.sat-notice {
+  background: var(--sat-panel); border: 1px solid var(--sat-line); border-left: 5px solid var(--sat-warn);
+  border-radius: 8px; padding: 8px 12px; font-size: 12px; color: var(--sat-text);
+}
+.sat-notice.crit { border-left-color: var(--sat-crit); }
+.sat-notice.info { border-left-color: var(--sat-info); }
+.sat-notice.ok { border-left-color: var(--sat-ok); }
+
+/* ---------- non-monitor views (Manual / Review / Setup) ---------- */
+.sat-view { grid-area: view; min-height: 0; overflow-y: auto; background: var(--sat-bg); padding: 12px 0; }
+
+/* ---------- responsive ---------- */
+@media (max-width: 1400px) {
+  .sat-rms { width: 110px; }
+  .sat-rms i { background-size: 110px 100%; }
+}
+/* Tablet: detail becomes a right drawer opened by selecting a call. */
+@media (max-width: 1180px) {
+  .sat-app { grid-template-columns: 64px 320px minmax(0, 1fr); grid-template-areas: "rail top top" "rail queue map" "rail strip strip"; }
+  .sat-app.sat-other { grid-template-areas: "rail top top" "rail view view" "rail strip strip"; }
+  .sat-detail {
+    position: fixed; right: 0; top: 52px; bottom: 64px; width: 340px; z-index: 900;
+    box-shadow: -10px 0 30px rgba(0,0,0,.4); transform: translateX(100%); transition: transform .2s;
+  }
+  .sat-detail.open { transform: none; }
+  .sat-chips .sat-chip:nth-child(n+3) { display: none; }
+  .sat-rms { width: 90px; }
+  .sat-rms i { background-size: 90px 100%; }
+  .sat-ticker { display: none; }
+  .sat-feed-toggle { display: grid !important; }
+  .sat-notices { right: 16px; }
+}
+/* Phone: rail moves to the bottom, queue and map become tabs. */
+@media (max-width: 760px) {
+  .sat-app, .sat-app.sat-other {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 52px minmax(0, 1fr) auto 56px;
+    grid-template-areas: "top" "main" "strip" "rail";
+  }
+  .sat-app.sat-other .sat-view { grid-area: main; }
+  .sat-rail { flex-direction: row; justify-content: space-around; border-right: 0; border-top: 1px solid var(--sat-line); padding: 0; }
+  .sat-logo, .sat-rail-sp { display: none; }
+  .sat-rail-btn.on { box-shadow: inset 0 3px 0 var(--sat-accent); }
+  .sat-queue, .sat-mapwrap { grid-area: main; }
+  .sat-mapwrap { display: none; }
+  .sat-app.show-map .sat-mapwrap { display: block; }
+  .sat-app.show-map .sat-queue { display: none; }
+  .sat-detail { width: 100%; top: 52px; bottom: 56px; }
+  .sat-chips { display: none; }
+  .sat-phone-toggle { display: flex; margin-left: auto; border: 1px solid var(--sat-line); border-radius: 8px; overflow: hidden; }
+  .sat-phone-toggle button { border: 0; background: transparent; color: var(--sat-muted); padding: 5px 10px; font-size: 12px; }
+  .sat-phone-toggle button.on { background: var(--sat-accent); color: var(--sat-accent-ink); font-weight: 700; }
+  .sat-top { gap: 8px; padding: 0 12px; }
+  .sat-top h1 { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
+  .sat-top h1 small { display: none; }
+  .sat-phone-toggle { flex-shrink: 0; }
+  .sat-clock { display: none; }
+  .sat-strip { flex-wrap: wrap; padding: 8px 12px; gap: 8px; }
+  .sat-controls { flex-wrap: wrap; flex-shrink: 1; }
+  .sat-notices { right: 12px; }
+}
+
+/* shadcn Select/Input default to w-full; in the strip they size to content. */
+.sat-strip .sat-controls > * { width: auto; }

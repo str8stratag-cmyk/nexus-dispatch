@@ -12,6 +12,44 @@ they're incident history, not a TODO list.
 
 ---
 
+## 2026-10-26 — Saturday UI parity for the Hillsborough monitor board (client only)
+
+**Ask (Zach, via Geek Squad brief):** live board on release `7178847` still
+looked "off" vs the Saturday Polk prototype
+(`dispatch-monitor-polk/ui/index.html`). Port that look into the React client
+for Hillsborough / Tampa without touching capture.
+
+**What changed (branch `feat/saturday-ui-parity-hillsborough`, PR → `main`):**
+- `pages/dispatch.tsx`: Saturday grid — 64px rail / 52px top / queue 360 /
+  **map `minmax(0,1fr)`** / detail 340 / 64px bottom strip. Rail replaces the
+  centered TabsList. Selection state links queue ↔ map ↔ detail.
+- `event-log.tsx` → Saturday queue (stats, filter pills, search, severity
+  cards, compact Accept). CSV/JSON export kept as-is.
+- New `incident-detail.tsx` (Accept/Resolve/Make active/Dismiss — same PATCH
+  calls, now in `hooks/use-event-actions.ts`), `monitor-chrome.tsx` (rail, top
+  bar chips from existing `/api/health`), `lib/monitor-ui.ts` (severity map),
+  `styles/monitor.css` (Saturday tokens + responsive drawer/tabs).
+- `transcript-feed.tsx`: `.tx` chrome + Detections-only; escaping kept.
+- `dispatch-map.tsx`: severity pins, Incidents / Fit all / Tampa tools, zoom
+  bottom-left. Esri keyless layers, county outline, invalidateSize guards kept.
+- `audio-panel.tsx`: new `layout="strip"` render branch + read-only
+  `onCaptureStateChange`. Capture/supervisor/lease/heartbeat code untouched.
+- `index.css`: shadcn dark/light tokens nudged to the Saturday hexes.
+
+**Behavior notes worth knowing:**
+- The capture strip now stays mounted on every rail view. Before, Radix
+  `TabsContent` unmounted AudioPanel when switching to Manual/Quarantine/
+  Settings, so capture stopped until the supervisor restarted it on return.
+- One `/api/events/stream` EventSource per tab now (page + EventLog each
+  opened one before).
+- Saturday's "Audio" waveform block was left out: it was synthetic bars.
+
+**Not done here:** no promote to `release`; QA screenshots were taken
+against a mock API (Esri tiles blocked in the cloud sandbox) — do a visual
+pass on a desk before promoting.
+
+---
+
 ## 2026-10-05 — Telegram Accept-button long-poll (Disp-1 only)
 
 **What was broken:** STGAPPBOT sends Accept inline buttons on DISPATCH RELAY

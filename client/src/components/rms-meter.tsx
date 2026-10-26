@@ -1,3 +1,5 @@
+import { useRef } from "react";
+
 interface RmsMeterProps {
   rms: number;
   active: boolean;
@@ -62,5 +64,41 @@ export default function RmsMeter({ rms, active, compact = false }: RmsMeterProps
         <span>0dB</span>
       </div>
     </div>
+  );
+}
+
+/**
+ * Saturday bottom-strip meter: gradient bar, decaying peak tick, dB readout.
+ * Same `rms` value the other meters use (no capture-side change); the peak
+ * hold is display-only.
+ */
+export function StripMeter({ rms, active, label }: { rms: number; active: boolean; label: string }) {
+  // Same scaling as RmsMeter so all meters agree.
+  const level = active ? Math.min(1, Math.max(0, rms * 3)) : 0;
+  const peakRef = useRef({ value: 0, at: 0 });
+  const now = performance.now();
+  const decayed = Math.max(0, peakRef.current.value - ((now - peakRef.current.at) / 1000) * 0.25);
+  if (level >= decayed) {
+    peakRef.current = { value: level, at: now };
+  } else {
+    peakRef.current = { value: decayed, at: now };
+  }
+  const db = active && rms > 0 ? Math.max(-60, 20 * Math.log10(rms)) : null;
+  return (
+    <>
+      <div
+        className="sat-rms"
+        role="meter"
+        aria-label={label}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(level * 100)}
+        data-testid="rms-meter"
+      >
+        <i style={{ width: `${level * 100}%` }} />
+        <b style={{ left: `calc(${peakRef.current.value * 100}% - 2px)`, opacity: active ? 0.85 : 0 }} />
+      </div>
+      <span className="sat-db">{db === null ? (active ? "-∞ dB" : "idle") : `${db.toFixed(0)} dB`}</span>
+    </>
   );
 }

@@ -9,35 +9,35 @@
   --opaque-button-border-intensity: -8;
   --elevate-1: rgba(0, 0, 0, 0.03);
   --elevate-2: rgba(0, 0, 0, 0.08);
-  --background: 210 16% 96%;
-  --foreground: 220 13% 12%;
-  --border: 220 11% 82%;
-  --card: 210 14% 98%;
-  --card-foreground: 220 13% 12%;
-  --card-border: 220 11% 85%;
+  --background: 214 26% 95%;
+  --foreground: 218 28% 11%;
+  --border: 215 25% 87%;
+  --card: 0 0% 100%;
+  --card-foreground: 218 28% 11%;
+  --card-border: 215 25% 87%;
   --sidebar: 210 16% 94%;
   --sidebar-foreground: 220 13% 12%;
   --sidebar-border: 220 11% 80%;
-  --sidebar-primary: 38 92% 45%;
+  --sidebar-primary: 38 100% 39%;
   --sidebar-primary-foreground: 0 0% 100%;
   --sidebar-accent: 220 11% 88%;
   --sidebar-accent-foreground: 220 13% 12%;
-  --sidebar-ring: 38 92% 45%;
-  --popover: 210 14% 97%;
+  --sidebar-ring: 38 100% 39%;
+  --popover: 0 0% 100%;
   --popover-foreground: 220 13% 12%;
-  --popover-border: 220 11% 82%;
-  --primary: 38 92% 45%;
+  --popover-border: 215 25% 87%;
+  --primary: 38 100% 39%;
   --primary-foreground: 0 0% 100%;
-  --secondary: 220 11% 90%;
+  --secondary: 220 33% 96%;
   --secondary-foreground: 220 13% 12%;
-  --muted: 220 11% 91%;
-  --muted-foreground: 220 8% 40%;
+  --muted: 220 33% 96%;
+  --muted-foreground: 215 15% 43%;
   --accent: 38 60% 90%;
   --accent-foreground: 220 13% 12%;
   --destructive: 0 72% 45%;
   --destructive-foreground: 0 0% 100%;
   --input: 220 11% 75%;
-  --ring: 38 92% 45%;
+  --ring: 38 100% 39%;
   --chart-1: 38 92% 45%;
   --chart-2: 142 56% 40%;
   --chart-3: 0 72% 45%;
@@ -46,7 +46,7 @@
   --font-sans: Geist, Inter, sans-serif;
   --font-serif: Georgia, serif;
   --font-mono: "JetBrains Mono", "Fira Code", monospace;
-  --radius: 0.5rem;
+  --radius: 0.625rem;
   --shadow-2xs: 0px 2px 0px 0px hsl(0 0% 0% / 0);
   --shadow-xs: 0px 2px 0px 0px hsl(0 0% 0% / 0);
   --shadow-sm: 0px 2px 0px 0px hsl(0 0% 0% / 0), 0px 1px 2px -1px hsl(0 0% 0% / 0);
@@ -80,35 +80,35 @@
   --opaque-button-border-intensity: 9;
   --elevate-1: rgba(255, 255, 255, 0.04);
   --elevate-2: rgba(255, 255, 255, 0.09);
-  --background: 220 13% 6%;
-  --foreground: 40 5% 93%;
-  --border: 220 9% 17%;
-  --card: 220 11% 9%;
-  --card-foreground: 40 5% 93%;
-  --card-border: 220 9% 14%;
-  --sidebar: 220 13% 8%;
-  --sidebar-foreground: 40 5% 93%;
-  --sidebar-border: 220 9% 15%;
-  --sidebar-primary: 38 92% 50%;
-  --sidebar-primary-foreground: 0 0% 100%;
-  --sidebar-accent: 220 9% 16%;
+  --background: 213 29% 6%;
+  --foreground: 214 47% 93%;
+  --border: 218 31% 20%;
+  --card: 216 29% 10%;
+  --card-foreground: 214 47% 93%;
+  --card-border: 218 31% 20%;
+  --sidebar: 216 29% 10%;
+  --sidebar-foreground: 214 47% 93%;
+  --sidebar-border: 218 31% 20%;
+  --sidebar-primary: 37 91% 55%;
+  --sidebar-primary-foreground: 41 79% 6%;
+  --sidebar-accent: 218 33% 14%;
   --sidebar-accent-foreground: 40 5% 93%;
-  --sidebar-ring: 38 92% 50%;
-  --popover: 220 11% 10%;
-  --popover-foreground: 40 5% 93%;
-  --popover-border: 220 9% 17%;
-  --primary: 38 92% 50%;
-  --primary-foreground: 0 0% 100%;
-  --secondary: 220 9% 16%;
-  --secondary-foreground: 40 5% 93%;
-  --muted: 220 9% 15%;
-  --muted-foreground: 220 6% 55%;
+  --sidebar-ring: 37 91% 55%;
+  --popover: 217 31% 11%;
+  --popover-foreground: 214 47% 93%;
+  --popover-border: 218 31% 20%;
+  --primary: 37 91% 55%;
+  --primary-foreground: 41 79% 6%;
+  --secondary: 218 33% 14%;
+  --secondary-foreground: 214 47% 93%;
+  --muted: 218 33% 14%;
+  --muted-foreground: 214 18% 60%;
   --accent: 38 40% 14%;
   --accent-foreground: 38 92% 65%;
-  --destructive: 0 72% 48%;
+  --destructive: 0 100% 68%;
   --destructive-foreground: 0 0% 100%;
-  --input: 220 9% 22%;
-  --ring: 38 92% 50%;
+  --input: 218 31% 20%;
+  --ring: 37 91% 55%;
   --chart-1: 38 92% 55%;
   --chart-2: 142 56% 50%;
   --chart-3: 0 72% 50%;
@@ -226,16 +226,16 @@
 }
 
 ::-webkit-scrollbar-track {
-  background: hsl(220 13% 6%);
+  background: hsl(var(--background));
 }
 
 ::-webkit-scrollbar-thumb {
-  background: hsl(220 9% 18%);
+  background: hsl(var(--border));
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: hsl(220 9% 24%);
+  background: hsl(var(--muted-foreground) / 0.5);
 }
 
 /* Pulsing animation for live indicator */
