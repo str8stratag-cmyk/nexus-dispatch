@@ -247,7 +247,7 @@ export default function DispatchPage() {
             left calls (~320–360), smaller center map, wider right transcripts
             (newest-first). Map is Hillsborough County / Tampa. */}
         <TabsContent value="monitor" className="flex-1 min-h-0 mt-2 lg:mt-0 flex flex-col">
-          <div className="shrink-0 border-b border-border bg-card p-3">
+          <div className="shrink-0 border-b border-border bg-card px-2 py-1.5">
             <AudioPanel
               district={district}
               sourceName={sourceName}
@@ -265,14 +265,16 @@ export default function DispatchPage() {
               <EventLog />
             </section>
 
-            {/* Center: Hillsborough County / Tampa map (smaller fr) */}
-            <section className="min-h-[280px] overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none" aria-label="Hillsborough County dispatch map">
-              <div className="flex h-8 items-center border-b border-border bg-muted/30 px-3">
+            {/* Center: Hillsborough County / Tampa map (smaller fr).
+                flex + relative host so Leaflet gets a real non-zero height after
+                the 3-pane grid lays out (calc(100%-2rem) alone collapsed on lg). */}
+            <section className="flex min-h-[280px] flex-col overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:h-full lg:rounded-none lg:border-0 lg:shadow-none" aria-label="Hillsborough County dispatch map">
+              <div className="flex h-7 shrink-0 items-center border-b border-border bg-muted/30 px-3">
                 <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
                   Hillsborough · Tampa map
                 </span>
               </div>
-              <div className="h-[calc(100%-2rem)] min-h-[240px]">
+              <div className="relative min-h-[240px] flex-1 lg:min-h-0">
                 <DispatchMap markers={mapMarkers} />
               </div>
             </section>
