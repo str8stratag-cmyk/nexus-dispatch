@@ -48,6 +48,9 @@ const STOP_WORDS = new Set([
   // hadn't, so it fused "amd" into the street name instead of splitting on
   // it (found 2026-09-22).
   "at", "and", "amd", "near", "by", "of", "on", "to", "the", "a", "an", "in", "with",
+  // "anyone down 4636 ..." (2026-10-26): Mabry is a STREET_SUFFIXES name-suffix, so
+  // buildStreetCandidate walked into leading chatter without these stops.
+  "anyone", "down",
   "from", "for", "is", "are", "was", "were", "be", "been", "being", "have", "has",
   "had", "do", "does", "did", "will", "would", "could", "should", "may", "might",
   "must", "can", "shall", "we", "you", "they", "he", "she", "it", "i", "me", "my",
@@ -71,7 +74,7 @@ const STOP_WORDS = new Set([
 const CANDIDATE_BLOCKLIST = new Set(["busch gardens", "great way", "left turn lane", "right turn lane", "turn lane", "the left turn lane", "the right turn lane"]);
 
 // Conjunctions/prepositions that often precede a cross street.
-const CROSS_LINKERS = new Set(["and", "amd", "at", "in", "near", "by", "/", "between", "intersection", "corner"]);
+const CROSS_LINKERS = new Set(["and", "amd", "at", "in", "near", "by", "&", "/", "between", "intersection", "corner"]);
 
 // Common Whisper mishearings for Hillsborough County street/neighborhood names.
 // These are corrected BEFORE street extraction so "mcdull and mlk" becomes
@@ -223,7 +226,18 @@ const ADDRESS_HOMOPHONES: [RegExp, string | ((substring: string, ...args: string
   // number follows so real bridge talk ("bridge closure") is untouched.
   [/\bbridge\s+(\d{1,3})\b/gi, "and $1"],
   [/\bbusch(?:\s+blvd|\s+boulevard)?\b(?!\s+gardens)/gi, "Busch Blvd"],
-  [/\bsligh(?:\s+ave(?:nue)?)?\b/gi, "Sligh Ave"],
+  // Sligh Ave (2026-10-23): Whisper small.en hears "Sligh" (pronounced
+  // "sly") as Sly / Slye / Slide / Sleigh, and occasionally spells it out
+  // ("S-L-I-G-H"). "Slye" and the spelled form are never ordinary words, so
+  // they map bare; "sly", "slide" and "sleigh" are common words and only map
+  // with a street suffix. "Sly Fox Loop/Run" (real streets) take no Ave/St.
+  [/\bs[\s.-]+l[\s.-]+i[\s.-]+g[\s.-]+h\b\.?/gi, "Sligh"],
+  [/\bslye\b/gi, "Sligh"],
+  [/\b(?:sly|slide|sleigh)(?=\s+(?:st(?:reet)?|ave(?:nue)?)\b)/gi, "Sligh"],
+  // "West Lye Avenue" / "on the slide" (2026-10-26 P0) — before canonicalize.
+  [/\blye(?=\s+(?:ave(?:nue)?|st(?:reet)?)\b)/gi, "Sligh"],
+  [/\bon\s+the\s+slide\b/gi, "on Sligh Ave"],
+  [/\bsligh(?:\s+(?:ave(?:nue)?|st(?:reet)?))?\b/gi, "Sligh Ave"],
   [/\bkennedy(?:\s+blvd|\s+boulevard)?\b/gi, "Kennedy Blvd"],
   [/\bbroadway(?:\s+ave(?:nue)?)?\b/gi, "Broadway Ave"],
   [/\bbayshore(?:\s+blvd|\s+boulevard)?\b/gi, "Bayshore Blvd"],
@@ -260,6 +274,36 @@ const ADDRESS_HOMOPHONES: [RegExp, string | ((substring: string, ...args: string
   [/(?<=\bE Kay St\s+(?:and|&|at)\s+)(?:north\s+tampa|(?:n\.?\s+)?tampa\s+st(?:reet)?)(?:\s+st(?:reet)?)?\b/gi, "N Tampa St"],
   [/\b(?:north\s+tampa|(?:n\.?\s+)?tampa\s+st(?:reet)?)(?:\s+st(?:reet)?)?\b(?=\s+(?:and|&|at)\s+east\s+(?:bay|kay)\b)/gi, "N Tampa St"],
   [/(?<=\bN Tampa St\s+(?:and|&|at)\s+)east\s+(?:bay|kay)(?:\s+st(?:reet)?)?\b/gi, "E Kay St"],
+  // --- 2026-10-26 P0 quarantine / mishearing aliases (CoS) ---
+  // "Bruce B. Allison, flower" -> Bruce B Downs & Fowler (DISP-5 Signal 4).
+  // Allison only after Bruce B/Be/Bee; flower only after Bruce B Downs.
+  [/\bbruce\s+(?:b|be|bee)\.?\s+allison\b/gi, "Bruce B Downs Blvd"],
+  [/\bbruce\s+b\s+downs(?:\s+blvd)?(?:\s+and)?,?\s+flower\b/gi, "Bruce B Downs Blvd and Fowler Ave"],
+  // "4636 North Hill Mayberry" -> 4636 N Dale Mabry (DISP-2).
+  [/\b(?:north\s+)?hill\s+mayberry\b/gi, "N Dale Mabry"],
+  [/\bhill\s+maybury\b/gi, "Dale Mabry"],
+  // "41206 cast" -> 41206 Cass St (house-number gated; bare "cast" is a verb).
+  [/\b(\d{3,5})\s+cast\b/gi, "$1 Cass St"],
+  // Sligh: "West Lye Avenue" / "on the slide" (beyond existing Sly/Slide/Slye/Sleigh).
+  // "Haines in Louisiana" / "Hinesap, Louisiana" -> Himes & Louisiana.
+  // Bare Haines is a real Tampa street — only rewrite when paired with Louisiana.
+  [/\bhaines\s+(?:in|and|&|at)\s+louisiana\b/gi, "Himes Ave and Louisiana Ave"],
+  [/\bhinesap,?\s*(?:and\s+|at\s+|in\s+)?louisiana\b/gi, "Himes Ave and Louisiana Ave"],
+  [/\bhinesap\b/gi, "Himes Ave"],
+  // "7701 West Courtney-Campbell-Costway" -> Courtney Campbell Causeway.
+  [/\bcourtney[-\s]+campbell[-\s]+costway\b/gi, "Courtney Campbell Causeway"],
+  [/\bcourtney\s+campbell\s+costway\b/gi, "Courtney Campbell Causeway"],
+  [/\bcostway\b/gi, "Causeway"],
+  // Swan & Sterling (DISP-2): real intersection is West Swann Ave & S Sterling Ave.
+  [/\bswan\s+(?:and|&|at)\s+sterling\b/gi, "Swann Ave and Sterling Ave"],
+  [/\bsterling\s+(?:and|&|at)\s+swan\b/gi, "Sterling Ave and Swann Ave"],
+  // Setka & Marks (DISP-3 Zone 3): OSM confirms East Sitka St & Marks/N Marks St.
+  // "Setka" is not a Tampa street; treat as Sitka mishearing.
+  [/\bsetka\b/gi, "Sitka"],
+  // Cross Creek & Villa (DISP-5): "Cross Creek and Villa" = Cross Creek Blvd &
+  // Villa Creek Dr (not a street named Villa Creek as the primary alone).
+  [/\bcross\s+creek\s+(?:and|&|at)\s+villa(?!\s+creek)\b/gi, "Cross Creek Blvd and Villa Creek Dr"],
+  [/\bvilla(?!\s+creek)\s+(?:and|&|at)\s+cross\s+creek\b/gi, "Villa Creek Dr and Cross Creek Blvd"],
 ];
 
 interface Token {
@@ -368,6 +412,15 @@ function buildStreetCandidate(tokens: Token[], suffixIndex: number): StreetCandi
     // guarded a SECOND digit (hasNumber &&); a lone leading one with a
     // comma slipped through the same way.
     if (/^\d,$/.test(token.text)) break;
+    // "signal 4 Himes Ave" (2026-10-26): a lone Signal/District/Zone digit
+    // with no comma still must not become a house number when the previous
+    // token names the code. Fused "signal 4 NISSAN..." has no "signal" as
+    // the immediate previous token of a later street suffix walk, so those
+    // stay unchanged.
+    if (isStandaloneDispatchNumber(token.text)) {
+      const prev = i > 0 ? cleanWord(tokens[i - 1].text) : "";
+      if (prev === "signal" || prev === "sig" || prev === "district" || prev === "zone" || prev === "code") break;
+    }
     // Still never absorb a SECOND standalone digit after a street number
     // (pre-existing guard, kept alongside the comma rule above).
     if (hasNumber && isStandaloneDispatchNumber(token.text)) break;
@@ -572,6 +625,31 @@ const KNOWN_STREET_FALLBACK: [RegExp, string][] = [
   [/\bN Tampa St\b/, "N Tampa St"],
   [/\bmemorial\b/i, "Memorial Hwy"],
   [/\blois\b/i, "Lois Ave"],
+  // Rome Ave (2026-10-23): N/S Rome Ave runs Kennedy Blvd to Sulphur
+  // Springs; heard bare ("Sligh and Rome"). Not "Rome, Georgia"/"in Rome".
+  [/(?<!\bin\s)\brome\b(?!\s*,?\s*(?:georgia|italy|ga)\b)/i, "Rome Ave"],
+  // E Lotus Ave (Sulphur Springs) - crosses N 12th St, so "12th Street at
+  // Lotus" (2026-10-23, DISP-3) is a real intersection, NOT Lois Ave.
+  [/\blotus\b(?!\s+(?:blossom|circle|cir|creek|drive|dr|flower|lane|ln|path)\b)/i, "E Lotus Ave"],
+  // 2026-10-26 P0: intersections that geocoded wrong / failed with correct streets.
+  [/\bbruce\s+b\s+downs\b|\bbruce\s+(?:be|bee)\s+allison\b/i, "Bruce B Downs Blvd"],
+  [/\bswann\b/i, "Swann Ave"],
+  [/\bsterling\b(?!\s+(?:commerce|forest|glen|manor|palms|point|road|rd|silver|spur|street|st)\b)/i, "Sterling Ave"],
+  [/\bsitka\b/i, "Sitka St"],
+  [/\bmarks\b(?!\s+(?:drive|dr|men|town)\b)/i, "Marks St"],
+  [/\bcass\b(?!\s+(?:road|rd|andra|ell|els|ia|ino|is|ius|on|well)\b)/i, "Cass St"],
+  [/\bcross\s+creek\b/i, "Cross Creek Blvd"],
+  [/\bvilla\s+creek\b/i, "Villa Creek Dr"],
+  [/\bchelsea\b(?!\s+(?:court|ct|downs|drive|dr|greens|lane|ln|loop|manor|place|pl|woods)\b)/i, "Chelsea St"],
+  [/\bgrady\b(?!\s+sweat\b)/i, "Grady Ave"],
+  [/\blouisiana\b/i, "Louisiana Ave"],
+  [/\bcourtney\s+campbell\b/i, "Courtney Campbell Causeway"],
+  [/\b11th\b/i, "11th St"],
+  [/\b9th\b/i, "9th St"],
+  [/\b16th\b/i, "16th St"],
+  [/\b4th\b/i, "4th St"],
+  [/\b13th\b/i, "13th St"],
+  [/\b22nd\b/i, "22nd St"],
   [/\bhimes\b|\bhines\b/i, "Himes Ave"],
   // Henderson (2026-09-30 call review) - must stay after "Dale Mabry" above
   // so matchKnownStreets returns [Dale Mabry, Henderson] in that order for
@@ -673,7 +751,7 @@ export function applyAddressHomophones(text: string): string {
 // detected — dispatchers name them bare ("on Hillsborough", "at Busch and
 // 56th") and those calls used to be dropped entirely. Tested AFTER homophone
 // correction so mishearings (gandhi -> Gandy) still count.
-export const MAJOR_ROAD_RE = /\b(Florida Ave|Nebraska Ave|Hillsborough Ave|Fowler Ave|Fletcher Ave|Waters Ave|Himes Ave|Dale Mabry|Columbus Ave|Memorial Highway|50th St|56th St|30th St|Busch Blvd|Sligh Ave|Kennedy Blvd|Martin Luther King Jr Blvd|Cypress|Broadway Ave|Bayshore Blvd|Gandy Blvd|West Shore Blvd|Selmon Expy|Henderson Blvd|Armenia Ave|Broad St)\b/i;
+export const MAJOR_ROAD_RE = /\b(Florida Ave|Nebraska Ave|Hillsborough Ave|Fowler Ave|Fletcher Ave|Waters Ave|Himes Ave|Dale Mabry|Columbus Ave|Memorial Highway|50th St|56th St|30th St|Busch Blvd|Sligh Ave|Kennedy Blvd|Martin Luther King Jr Blvd|Cypress|Broadway Ave|Bayshore Blvd|Gandy Blvd|West Shore Blvd|Selmon Expy|Henderson Blvd|Armenia Ave|Broad St|Bruce B Downs Blvd|Swann Ave|Courtney Campbell Causeway|Louisiana Ave|Cass St)\b/i;
 
 export function containsMajorRoad(transcript: string): boolean {
   if (!transcript) return false;
@@ -691,6 +769,7 @@ export const IN_JOINER_STREETS: Record<string, string> = {
   macdill: "MacDill Ave",
   himes: "Himes Ave",
   armenia: "Armenia Ave",
+  louisiana: "Louisiana Avenue",
 };
 // Corridors that lie entirely south of Kennedy/Florida: crossings take "S".
 const SOUTH_ONLY_PRIMARY = /^gandy\b/i;
@@ -786,6 +865,23 @@ export function extractAddress(transcript: string): ExtractedAddress {
 
 const SPOKEN_DIGIT_HINT_RE = /\b(zero|oh|one|two|three|four|five|six|seven|eight|nine)\b/i;
 
+// "12th Street and Lois" (2026-10-23, DISP-4): the primary carries a suffix
+// but the cross street is a suffix-less known corridor, which suffix-based
+// candidate search never sees. Only a linker ("and"/"at"/"&") directly
+// before the known street counts, so a stray later mention is never paired.
+function knownCrossStreet(text: string, primary: string): { text: string } | null {
+  const primaryNorm = primary.toLowerCase();
+  for (const [pattern, canonical] of KNOWN_STREET_FALLBACK) {
+    const m = text.match(pattern);
+    if (!m || m.index === undefined) continue;
+    const key = streetKeyword(canonical);
+    if (key && primaryNorm.includes(key)) continue;
+    const before = text.slice(0, m.index);
+    if (/(?:\band|\bat|&)\s+$/i.test(before)) return { text: canonical };
+  }
+  return null;
+}
+
 function extractAddressRaw(transcript: string): ExtractedAddress {
   if (!transcript) return { address: null, crossStreet: null };
 
@@ -817,7 +913,8 @@ function extractAddressRaw(transcript: string): ExtractedAddress {
     // over the bare "West Shore" that the same tokens also produce.
     : candidates.reduce((a, b) => (b.text.length > a.text.length ? b : a));
   const cross = findCrossStreet(text, primary, candidates)
-    ?? inJoinerCross(text, primary.text);
+    ?? inJoinerCross(text, primary.text)
+    ?? knownCrossStreet(text, primary.text);
 
   return {
     address: primary.text,

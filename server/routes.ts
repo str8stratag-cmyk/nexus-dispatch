@@ -433,6 +433,37 @@ const KNOWN_ROAD_CANONICAL: [RegExp, string][] = [
   // but OSM has "Amberly" — the substring validation then rejects a real match.
   [/\bamberl?ey(?:\s+dr(?:ive)?)?\b/gi, "Amberly Dr"],
   [/\belmer(?:\s+st(?:reet)?)?\b/gi, "Elmer St"],
+  // --- 2026-10-26 P0 geocode / alias sync with shared/extract-address.ts ---
+  [/\bbruce\s+(?:b|be|bee)\.?\s+allison\b/gi, "Bruce B Downs Blvd"],
+  [/\b(?:north\s+)?hill\s+mayberry\b/gi, "N Dale Mabry Hwy"],
+  [/\b(\d{3,5})\s+cast\b/gi, "$1 Cass St"],
+  [/\bcass(?:\s+st(?:reet)?)?\b/gi, "Cass St"],
+  [/\blye(?=\s+(?:ave(?:nue)?|st(?:reet)?)\b)/gi, "Sligh"],
+  [/\bon\s+the\s+slide\b/gi, "Sligh Ave"],
+  [/\bhaines\s+(?:in|and|&|at)\s+louisiana\b/gi, "Himes Ave & Louisiana Ave"],
+  [/\bhinesap\b/gi, "Himes Ave"],
+  [/\blouisiana(?:\s+ave(?:nue)?)?\b/gi, "Louisiana Ave"],
+  [/\bcourtney[-\s]+campbell[-\s]+(?:causeway|costway)\b/gi, "Courtney Campbell Causeway"],
+  [/\bcostway\b/gi, "Causeway"],
+  // Swan only when paired with Sterling, or already spelled Swann — bare
+  // "Swan Road" (a different Tampa street) must not become Swann Ave.
+  [/\bswan\s+(?:and|&|at)\s+sterling\b/gi, "Swann Ave & Sterling Ave"],
+  [/\bsterling\s+(?:and|&|at)\s+swan\b/gi, "Sterling Ave & Swann Ave"],
+  [/\bswann(?:\s+ave(?:nue)?)?\b/gi, "Swann Ave"],
+  [/\bsterling(?:\s+ave(?:nue)?)?\b/gi, "Sterling Ave"],
+  [/\bsetka\b/gi, "Sitka St"],
+  [/\bsitka(?:\s+st(?:reet)?)?\b/gi, "Sitka St"],
+  [/\bmarks(?:\s+st(?:reet)?)?\b/gi, "Marks St"],
+  [/\bcross\s+creek(?:\s+blvd|\s+boulevard)?\b/gi, "Cross Creek Blvd"],
+  [/\bvilla\s+creek(?:\s+dr(?:ive)?)?\b/gi, "Villa Creek Dr"],
+  [/\bcross\s+creek\s+(?:and|&|at)\s+villa(?!\s+creek)\b/gi, "Cross Creek Blvd & Villa Creek Dr"],
+  [/\bchelsea(?:\s+st(?:reet)?)?\b/gi, "Chelsea St"],
+  [/\b11th(?:\s+st(?:reet)?)?\b/gi, "11th St"],
+  [/\b9th(?:\s+st(?:reet)?)?\b/gi, "9th St"],
+  [/\b16th(?:\s+st(?:reet)?|\s+ave(?:nue)?)?\b/gi, "16th St"],
+  [/\b4th(?:\s+st(?:reet)?|\s+ave(?:nue)?)?\b/gi, "4th St"],
+  // Lotus: keep suffix-optional but do not steal Lotus Drive/Path/etc.
+  [/\blotus(?!\s+(?:blossom|circle|cir|creek|drive|dr|flower|lane|ln|path)\b)(?:\s+ave(?:nue)?)?\b/gi, "E Lotus Ave"],
 ];
 
 // Joiners that separate the two roads of an intersection. Directionals act

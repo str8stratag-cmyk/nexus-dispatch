@@ -58,7 +58,8 @@ const cases: [string, string | null, string | null][] = [
   // Numbered addresses unchanged
   ["mva at 808 north linebaugh avenue", "808 north Linebaugh avenue", null],
   // Bare major roads now extract (user request)
-  ["SIGNAL 4 A HILLSBOROUGH AND ARMENIA", "Hillsborough Ave", null],
+  // Armenia (suffix-less known street) after "and" is now the cross street.
+  ["SIGNAL 4 A HILLSBOROUGH AND ARMENIA", "Hillsborough Ave", "Armenia Ave"],
   ["break on busch and 56th", "56th St", "Busch Blvd"],
   // "bushed" (2026-09-30 call review, real missed/garbled call): \bbush\b
   // alone doesn't match "bushed" - no word boundary between "bush" and "ed".
@@ -157,6 +158,48 @@ const cases: [string, string | null, string | null][] = [
   ["crash at 9000 north florida avenue", "9000 north Florida Ave", null],
   ["signal 4 at 1200 Union Street", "1200 Union Street", null],
   ["signal 4 at union street and rome avenue", "union street", "rome avenue"],
+  // 2026-10-23: Sligh Ave misheard as Sly / Slye / Slide / Sleigh / spelled out.
+  ["signal 4, Sly Avenue and Rome", "Sligh Ave", "Rome Ave"],
+  ["signal 4 at SLY AVE and Florida", "Florida Ave", "Sligh Ave"],
+  ["crash at Slye and Rome", "Sligh Ave", "Rome Ave"],
+  ["signal 4 at slye ave and rome", "Sligh Ave", "Rome Ave"],
+  ["crash on Slide Street and Rome", "Sligh Ave", "Rome Ave"],
+  ["crash on Slide Avenue", "Sligh Ave", null],
+  ["signal 4, Sleigh Avenue and Rome", "Sligh Ave", "Rome Ave"],
+  ["signal 4 at sleigh st and Rome", "Sligh Ave", "Rome Ave"],
+  ["signal 4 at Sligh Street and Rome", "Sligh Ave", "Rome Ave"],
+  ["signal 4 at S-L-I-G-H and Rome", "Sligh Ave", "Rome Ave"],
+  ["signal 4 at S. L. I. G. H. and Florida", "Florida Ave", "Sligh Ave"],
+  // Common words stay untouched without a street suffix.
+  ["he was sly about it", null, null],
+  ["the car started to slide", null, null],
+  ["Sly Fox Loop", "Sly Fox Loop", null],
+  // Rome Ave known bare; "in Rome" is not a street.
+  ["signal 4 at Rome and Columbus", "Columbus Ave", "Rome Ave"],
+  ["he was in Rome last week", null, null],
+  // 12th Street cross streets (2026-10-23 DISP-3/DISP-4 geocode failures).
+  // E Lotus Ave really crosses N 12th St (Sulphur Springs); Lotus is NOT Lois.
+  ["Signal 4 12th Street at Lotus", "12th Street", "E Lotus Ave"],
+  ["signal 4 at Lotus Drive", "Lotus Drive", null],
+  ["Signal 4 at 12th Street and Lois", "12th Street", "Lois Ave"],
+  // 2026-10-26 P0 CoS street aliases / quarantine mishearings
+  ["Signal 4 with injuries. Bruce B. Allison, flower.", "Bruce B Downs Blvd", "Fowler Ave"],
+  ["signal 4 at bruce be allison and flower", "Bruce B Downs Blvd", "Fowler Ave"],
+  ["anyone down 4636 North Hill Mayberry, signal 4 crash notification.", "4636 N Dale Mabry", null],
+  ["signal 4 at 41206 cast", "41206 Cass St", null],
+  ["signal 4 at West Lye Avenue", "West Sligh Ave", null],
+  ["signal 16 on the slide", "Sligh Ave", null],
+  ["signal 4 at Haines in Louisiana", "Louisiana Ave", "Himes Ave"],
+  ["signal 4 Hinesap, Louisiana", "Louisiana Ave", "Himes Ave"],
+  ["signal 16 at 7701 West Courtney-Campbell-Costway", "7701 West Courtney Campbell Causeway", null],
+  ["Signal 4, no injuries, Swan and Sterling", "Sterling Ave", "Swann Ave"],
+  ["Cover the signal for the injuries. It's going to be at Setka Street and Marks Street.", "Sitka Street", "Marks Street"],
+  ["signal 16 at Cross Creek and Villa", "Cross Creek Blvd", "Villa Creek Dr"],
+  ["signal 4 at 11th and Lotus", "E Lotus Ave", "11th St"],
+  ["signal 4 at 4th and Chelsea", "Chelsea St", "4th St"],
+  ["signal 4 at 9th and 16th", "9th St", "16th St"],
+  // Teller: no Tampa OSM/dictionary hit (2026-10-26) — note for Zach; Grady alone extracts.
+  ["signal 16 at South Grady and Teller", "Grady Ave", null],
   ["signal 4 at 3415 West Hillsborough Avenue", "3415 West Hillsborough Ave", null],
   ["signal 4 on hillsborough near the county line", "Hillsborough Ave", null],
   // Protected phrases must NOT extract
@@ -165,7 +208,9 @@ const cases: [string, string | null, string | null][] = [
   ["Busch Gardens traffic on the interstate", null, null],
   ["memorial parkway exit closed", "Memorial Parkway", null],
   // Known limitation: "ran off road" triggers the ROAD suffix (pre-existing)
-  ["signal 4 NISSAN MURANO RAN OFF ROAD INTO TRESS AT ON RAMP OF 275 AND DALE MABRY", "4 NISSAN MURANO RAN OFF ROAD", "Dale Mabry"],
+  // 2026-10-26: Signal-digit guard no longer absorbs the "4" into the junk
+  // ROAD candidate (previous known limitation returned "4 NISSAN...").
+  ["signal 4 NISSAN MURANO RAN OFF ROAD INTO TRESS AT ON RAMP OF 275 AND DALE MABRY", "NISSAN MURANO RAN OFF ROAD", "Dale Mabry"],
 ];
 
 let fail = 0;
@@ -194,7 +239,7 @@ const roadCases: [string, boolean][] = [
   ["It's not Florida tag, but I can't see what the state is.", false],
   ["I hope our commander, Hillsborough County Sheriff's office.", false],
   ["signal 4 at florida and fowler", true],
-  ["signal 4 at bruce viana", false], // not in MAJOR_ROAD_RE; extraction still works
+  ["signal 4 at bruce viana", true], // Bruce B Downs Blvd now in MAJOR_ROAD_RE (2026-10-26)
   ["they did it in broad daylight", false],
   ["officer dale may be late to the briefing", false],
 ];
