@@ -1,6 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+
+const HOME_CENTER: L.LatLngTuple = [27.9506, -82.4572]; // Tampa, FL
+const HOME_ZOOM = 11;
 
 interface DispatchMarker {
   id: number;
@@ -19,6 +22,9 @@ interface DispatchMarker {
 
 interface DispatchMapProps {
   markers: DispatchMarker[];
+  /** Currently selected call (from the queue/detail panel) — pans + scales its pin. */
+  selectedId?: number | null;
+  onSelectMarker?: (id: number) => void;
 }
 
 // v2: Build popup DOM safely to avoid XSS from DB values.
@@ -77,18 +83,19 @@ function buildPopupContent(marker: DispatchMarker): HTMLElement {
   return container;
 }
 
-export default function DispatchMap({ markers }: DispatchMapProps) {
+export default function DispatchMap({ markers, selectedId = null, onSelectMarker }: DispatchMapProps) {
   const mapRef = useRef<L.Map | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const markerLayerRef = useRef<L.LayerGroup | null>(null);
   const hasFittedMarkersRef = useRef(false);
+  const [showIncidents, setShowIncidents] = useState(true);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
     const map = L.map(containerRef.current, {
-      center: [27.9506, -82.4572], // Tampa, FL
-      zoom: 11,
+      center: HOME_CENTER,
+      zoom: HOME_ZOOM,
       zoomControl: true,
       attributionControl: true,
     });
@@ -186,32 +193,36 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
 
       // Accepted calls are dimmed; active calls stay red/alert.
       const isAccepted = marker.status === "accepted";
-      const hue = isAccepted ? 220 : 0;
+      const isSelected = selectedId === marker.id;
       const bg = isAccepted ? "hsl(220 20% 35%)" : "hsl(0 72% 48%)";
       const shadow = isAccepted ? "hsl(220 20% 35% / 0.4)" : "hsl(0 72% 48% / 0.6)";
       const emoji = isAccepted ? "🔒" : "🚨";
+      const size = isSelected ? 36 : 28;
+      const borderColor = isSelected ? "hsl(38 92% 55%)" : "hsl(0 0% 100%)";
 
       // Custom alert icon
       const icon = L.divIcon({
         className: "dispatch-marker",
         html: `<div style="
-          width: 28px;
-          height: 28px;
+          width: ${size}px;
+          height: ${size}px;
           border-radius: 50%;
           background: ${bg};
-          border: 3px solid hsl(0 0% 100%);
+          border: 3px solid ${borderColor};
           box-shadow: 0 0 12px ${shadow};
           display: flex;
           align-items: center;
           justify-content: center;
-          font-size: 14px;
+          font-size: ${isSelected ? 16 : 14}px;
+          transition: width .15s, height .15s;
         ">${emoji}</div>`,
-        iconSize: [28, 28],
-        iconAnchor: [14, 14],
+        iconSize: [size, size],
+        iconAnchor: [size / 2, size / 2],
       });
 
       L.marker([marker.lat, marker.lng], { icon })
         .bindPopup(buildPopupContent(marker))
+        .on("click", () => onSelectMarker?.(marker.id))
         .addTo(markerLayerRef.current!);
     });
 
@@ -225,7 +236,18 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
       );
       hasFittedMarkersRef.current = true;
     }
-  }, [markers]);
+  }, [markers, selectedId, onSelectMarker]);
+
+  // Pan/zoom to the selected call (queue card or incident detail selection).
+  useEffect(() => {
+    if (!mapRef.current || selectedId == null) return;
+    const marker = markers.find((m) => m.id === selectedId);
+    if (!marker || !Number.isFinite(marker.lat) || !Number.isFinite(marker.lng)) return;
+    mapRef.current.invalidateSize();
+    mapRef.current.setView([marker.lat as number, marker.lng as number], Math.max(mapRef.current.getZoom(), 14), {
+      animate: true,
+    });
+  }, [selectedId, markers]);
 
   // Invalidate size when tab becomes visible
   useEffect(() => {
@@ -240,15 +262,74 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
     return () => observer.disconnect();
   }, []);
 
-  // absolute inset fill: parent must be position:relative with non-zero height
-  // (see dispatch.tsx map pane). Inline minHeight avoids a grey 0-height Leaflet
-  // pane if flex sizing races on first paint.
+  // "Incidents" overlay toggle — show/hide the marker layer without touching
+  // the base/label/road Esri layers from #88/#89.
+  useEffect(() => {
+    if (!mapRef.current || !markerLayerRef.current) return;
+    if (showIncidents) {
+      if (!mapRef.current.hasLayer(markerLayerRef.current)) markerLayerRef.current.addTo(mapRef.current);
+    } else {
+      mapRef.current.removeLayer(markerLayerRef.current);
+    }
+  }, [showIncidents]);
+
+  const handleFitAll = () => {
+    if (!mapRef.current) return;
+    const validMarkers = markers.filter((m): m is typeof m & { lat: number; lng: number } =>
+      Number.isFinite(m.lat) && Number.isFinite(m.lng)
+    );
+    if (!validMarkers.length) return;
+    mapRef.current.fitBounds(
+      L.latLngBounds(validMarkers.map((m) => [m.lat, m.lng])),
+      { padding: [40, 40], maxZoom: 14 }
+    );
+  };
+
+  const handleHome = () => {
+    mapRef.current?.setView(HOME_CENTER, HOME_ZOOM, { animate: true });
+  };
+
   return (
-    <div
-      ref={containerRef}
-      className="absolute inset-0 h-full w-full min-h-[200px] bg-[#1a1a2e]"
-      style={{ zIndex: 0 }}
-      data-testid="dispatch-map"
-    />
+    <>
+      {/* absolute inset fill: parent must be position:relative with non-zero
+          height (see dispatch.tsx map pane). Inline minHeight avoids a grey
+          0-height Leaflet pane if flex sizing races on first paint. */}
+      <div
+        ref={containerRef}
+        className="absolute inset-0 h-full w-full min-h-[200px] bg-[#1a1a2e]"
+        style={{ zIndex: 0 }}
+        data-testid="dispatch-map"
+      />
+      <div className="absolute left-3 top-3 z-[500] flex gap-1.5" data-testid="map-tools">
+        <button
+          type="button"
+          onClick={() => setShowIncidents((v) => !v)}
+          className={`rounded-md border px-2.5 py-1.5 text-xs font-medium shadow-sm ${
+            showIncidents
+              ? "border-primary bg-primary text-primary-foreground"
+              : "border-border bg-card text-foreground"
+          }`}
+          data-testid="map-tool-incidents"
+        >
+          Incidents
+        </button>
+        <button
+          type="button"
+          onClick={handleFitAll}
+          className="rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground shadow-sm"
+          data-testid="map-tool-fit"
+        >
+          Fit all
+        </button>
+        <button
+          type="button"
+          onClick={handleHome}
+          className="rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground shadow-sm"
+          data-testid="map-tool-home"
+        >
+          Tampa
+        </button>
+      </div>
+    </>
   );
 }

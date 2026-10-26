@@ -666,11 +666,14 @@ export default function AudioPanel({
           {captureButton}
         </>
       ) : (
-        /* Dense single-row strip for 3-pane Hillsborough board — frees vertical space for map/calls/transcripts */
-        <div className="flex flex-wrap items-center gap-1.5" data-testid="audio-panel-compact-strip">
-          {deviceSelect}
-          {districtSelect}
-          {sourceInput}
+        /* Dense single-row bottom strip (Saturday UI parity) — frees vertical
+           space for the queue/map/detail grid above. */
+        <div className="flex flex-wrap items-center gap-2" data-testid="audio-panel-compact-strip">
+          <div className="flex items-center gap-1.5 shrink-0">
+            {deviceSelect}
+            {districtSelect}
+            {sourceInput}
+          </div>
           <div className="min-w-0 flex-1 basis-[10rem]">
             <RmsMeter rms={rms} active={isCapturing} compact />
           </div>
@@ -776,15 +779,11 @@ export default function AudioPanel({
         </div>
       )}
 
-      {/* Transcript Feed (optional — 3-pane layout hosts it in the right column) */}
+      {/* Transcript Feed (optional — 3-pane layout hosts it in the right column).
+          TranscriptFeed renders its own header/toggle, so no wrapper label here. */}
       {showTranscriptFeed && (
-        <div className="flex-1 min-h-0 rounded-md border border-border bg-card overflow-hidden flex flex-col">
-          <div className="px-3 py-2 border-b border-border bg-muted/30">
-            <span className="text-xs font-mono text-muted-foreground">LIVE TRANSCRIPT</span>
-          </div>
-          <div className="flex-1 min-h-0">
-            <TranscriptFeed entries={transcriptEntries} />
-          </div>
+        <div className="flex-1 min-h-0 rounded-md border border-border bg-card overflow-hidden">
+          <TranscriptFeed entries={transcriptEntries} />
         </div>
       )}
     </div>
