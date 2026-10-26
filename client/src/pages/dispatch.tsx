@@ -13,7 +13,24 @@ import TranscriptFeed, { type TranscriptEntry } from "@/components/transcript-fe
 import ManualDispatch from "@/components/manual-dispatch";
 import SettingsPanel from "@/components/settings-panel";
 import QuarantinePanel from "@/components/quarantine-panel";
+import NavRail from "@/components/nav-rail";
+import StatusChips from "@/components/status-chips";
+import IncidentDetail from "@/components/incident-detail";
 import { useEventsStream } from "@/hooks/use-events-stream";
+
+// Mono HH:MM:SS clock — Saturday UI parity top-bar chrome, purely cosmetic.
+function HeaderClock() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(new Date()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  return (
+    <span className="hidden font-mono text-xs font-semibold text-muted-foreground sm:inline" data-testid="header-clock">
+      {now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+    </span>
+  );
+}
 
 // Per-machine defaults from the server hostname: DISP-2 → District 2, source
 // "DISP-2". A manually entered district/source (persisted in localStorage)
@@ -31,10 +48,13 @@ export default function DispatchPage() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
+  const [activeTab, setActiveTab] = useState("monitor");
   const [district, setDistrictState] = useState(() => localStorage.getItem("dispatch.district") || "District 1");
   const [sourceName, setSourceNameState] = useState(() => localStorage.getItem("dispatch.source") || "");
   const [districts, setDistricts] = useState<string[]>(["District 1", "District 2", "District 3", "District 4", "District 5", "District 6", "District 7"]);
   const [transcriptEntries, setTranscriptEntries] = useState<TranscriptEntry[]>([]);
+  // Selected call — shared by the queue, map, and incident detail panel.
+  const [selectedId, setSelectedId] = useState<number | null>(null);
 
   // Manual entries persist across restarts and always win over the
   // machine-derived defaults below.
@@ -100,8 +120,9 @@ export default function DispatchPage() {
 
   useEventsStream();
 
-  // Same query key as EventLog — react-query dedupes. Used only for map pins
-  // (Hillsborough / Tampa area; DispatchMap already centers on Tampa).
+  // Same query key + queryFn as EventLog — react-query dedupes to one
+  // request. Used for map pins and the incident detail panel (selection by
+  // id), both Hillsborough / Tampa area; DispatchMap already centers on Tampa.
   const { data: mapEvents = [] } = useQuery({
     queryKey: ["/api/events"],
     queryFn: async () => {
@@ -116,9 +137,13 @@ export default function DispatchPage() {
         signalType: string | null;
         description: string | null;
         district: string;
+        source: string;
         transcript: string;
         createdAt: string;
-        status?: string;
+        status: string;
+        acceptedBy?: string | null;
+        addressFromContext?: boolean;
+        locationApprox?: boolean;
       }>>;
     },
     refetchInterval: 120_000,
@@ -127,6 +152,7 @@ export default function DispatchPage() {
   const mapMarkers = mapEvents.filter(
     (e) => Number.isFinite(e.lat) && Number.isFinite(e.lng)
   );
+  const selectedEvent = mapEvents.find((e) => e.id === selectedId) ?? null;
 
   const dispatchMutation = useMutation({
     mutationFn: async (data: any) => {
@@ -167,87 +193,99 @@ export default function DispatchPage() {
   }, [dispatchMutation]);
 
   return (
-    <div className="h-screen flex flex-col bg-background text-foreground">
-      <Tabs defaultValue="monitor" className="flex-1 flex flex-col min-h-0">
-      {/* Header */}
-      <header className="relative flex items-center justify-between border-b border-border bg-card/80 px-4 py-2.5 shrink-0">
-        <div className="flex items-center gap-2">
-          <Radio className="h-5 w-5 text-primary animate-pulse-live" />
+    <div className="h-screen flex bg-background text-foreground">
+      {/* Left icon rail (Saturday UI parity) — persistent nav across all tabs,
+          replaces the desktop centered TabsList below. */}
+      <NavRail active={activeTab} onChange={setActiveTab} />
+
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-1 min-h-0 flex-col">
+        {/* Top bar */}
+        <header className="flex items-center gap-3 border-b border-border bg-card/80 px-4 py-2.5 shrink-0">
+          <Radio className="h-5 w-5 text-primary animate-pulse-live lg:hidden" />
           <div>
-            <h1 className="text-base font-bold tracking-tight">DISPATCH MONITOR</h1>
+            <h1 className="text-[15px] font-bold tracking-tight">DISPATCH MONITOR</h1>
             <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground hidden sm:inline">
-              Hillsborough · Tampa · Traffic Accident Detection
+              Hillsborough County, FL · Traffic incident detection
             </span>
           </div>
-          <span className="ml-2 hidden items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-emerald-500 sm:inline-flex">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse-live" />
-            Live
-          </span>
-        </div>
-        <TabsList className="absolute left-1/2 hidden h-auto w-auto -translate-x-1/2 grid-cols-5 gap-1 rounded-lg bg-muted/50 p-1 lg:grid">
-          <TabsTrigger value="monitor" className="px-4 py-2 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground" data-testid="tab-monitor">
-            <Radio className="mr-1 h-3 w-3" /> Live Monitor
-          </TabsTrigger>
-          <TabsTrigger value="manual" className="px-4 py-2 text-xs" data-testid="tab-manual">
-            <Send className="mr-1 h-3 w-3" /> Manual Dispatch
-          </TabsTrigger>
-          <TabsTrigger value="quarantine" className="px-4 py-2 text-xs" data-testid="tab-quarantine">
-            <ShieldAlert className="mr-1 h-3 w-3" /> Quarantine
-          </TabsTrigger>
-          <TabsTrigger value="settings" className="px-4 py-2 text-xs" data-testid="tab-settings">
-            <Settings className="mr-1 h-3 w-3" /> Settings
-          </TabsTrigger>
-        </TabsList>
-        <div className="flex items-center gap-2">
-          {typeof window !== "undefined" && window.self !== window.top && (
+          <div className="ml-auto flex items-center gap-2">
+            <StatusChips />
+            <HeaderClock />
+            {typeof window !== "undefined" && window.self !== window.top && (
+              <Button
+                onClick={() => window.open(window.location.href, "_blank")}
+                variant="outline"
+                size="sm"
+                className="text-xs h-8"
+                data-testid="header-open-tab"
+              >
+                <ExternalLink className="h-3 w-3 mr-1" />
+                Open in New Tab
+              </Button>
+            )}
             <Button
-              onClick={() => window.open(window.location.href, "_blank")}
-              variant="outline"
-              size="sm"
-              className="text-xs h-8"
-              data-testid="header-open-tab"
+              onClick={toggleTheme}
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              data-testid="theme-toggle"
             >
-              <ExternalLink className="h-3 w-3 mr-1" />
-              Open in New Tab
+              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </Button>
-          )}
-          <Button
-            onClick={toggleTheme}
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8"
-            data-testid="theme-toggle"
-          >
-          {theme === "dark" ? (
-            <Sun className="h-4 w-4" />
-          ) : (
-            <Moon className="h-4 w-4" />
-          )}
-          </Button>
-        </div>
-      </header>
+          </div>
+        </header>
 
-        <TabsList className="mx-auto mt-2 grid w-full max-w-md grid-cols-5 lg:hidden">
+        {/* Mobile nav (rail is lg+ only) */}
+        <TabsList className="mx-auto mt-2 grid w-full max-w-md grid-cols-4 lg:hidden">
           <TabsTrigger value="monitor" className="text-xs" data-testid="tab-monitor">
-            <Radio className="h-3 w-3 mr-1" /> Live Monitor
+            <Radio className="h-3 w-3 mr-1" /> Live
           </TabsTrigger>
           <TabsTrigger value="manual" className="text-xs" data-testid="tab-manual">
             <Send className="h-3 w-3 mr-1" /> Manual
           </TabsTrigger>
           <TabsTrigger value="quarantine" className="text-xs" data-testid="tab-quarantine">
-            <ShieldAlert className="h-3 w-3 mr-1" /> Quarantine
+            <ShieldAlert className="h-3 w-3 mr-1" /> Review
           </TabsTrigger>
           <TabsTrigger value="settings" className="text-xs" data-testid="tab-settings">
-            <Settings className="h-3 w-3 mr-1" /> Settings
+            <Settings className="h-3 w-3 mr-1" /> Setup
           </TabsTrigger>
         </TabsList>
 
-        {/* Live Monitor Tab — 3-pane Hillsborough / Tampa board:
-            top capture strip (Web Audio / heartbeat unchanged), then
-            left calls (~320–360), smaller center map, wider right transcripts
-            (newest-first). Map is Hillsborough County / Tampa. */}
+        {/* Live Monitor Tab — Saturday UI parity: queue (fixed) | map (hero,
+            fills remaining width) | detail (fixed), with capture chrome
+            relocated to a bottom strip. Hillsborough County / Tampa. */}
         <TabsContent value="monitor" className="flex-1 min-h-0 mt-2 lg:mt-0 flex flex-col">
-          <div className="shrink-0 border-b border-border bg-card px-2 py-1.5">
+          <div className="min-h-0 flex-1 grid grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[360px_minmax(0,1fr)_340px] lg:gap-px lg:overflow-hidden lg:bg-border lg:p-0">
+            {/* Left: call queue (API newest-first) */}
+            <section className="min-h-[360px] overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
+              <EventLog selectedId={selectedId} onSelect={setSelectedId} />
+            </section>
+
+            {/* Center: Hillsborough County / Tampa map — hero, fills the
+                remaining width (minmax(0,1fr)). flex + relative host so
+                Leaflet gets a real non-zero height after the grid lays out. */}
+            <section className="relative flex min-h-[280px] flex-col overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:h-full lg:rounded-none lg:border-0 lg:shadow-none" aria-label="Hillsborough County dispatch map">
+              <DispatchMap markers={mapMarkers} selectedId={selectedId} onSelectMarker={setSelectedId} />
+            </section>
+
+            {/* Right: live transcripts (top) + selected incident (bottom) */}
+            <section className="min-h-[360px] flex flex-col overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
+              <div className={selectedId != null ? "min-h-0 flex-1 basis-1/2" : "min-h-0 flex-1"}>
+                <TranscriptFeed entries={transcriptEntries} />
+              </div>
+              {selectedId != null && (
+                <div className="min-h-0 flex-1 basis-1/2 border-t border-border">
+                  <IncidentDetail event={selectedEvent} onClose={() => setSelectedId(null)} />
+                </div>
+              )}
+            </section>
+          </div>
+
+          {/* Bottom strip: capture chrome (Saturday UI parity). Same
+              AudioPanel instance/props as before — only its position moved,
+              so useAudioCapture / heartbeat / lease / supervisor mount
+              lifecycle is unchanged (still tied to this TabsContent only). */}
+          <div className="shrink-0 border-t border-border bg-card px-3 py-1.5">
             <AudioPanel
               district={district}
               sourceName={sourceName}
@@ -258,38 +296,6 @@ export default function DispatchPage() {
               showTranscriptFeed={false}
               onTranscriptEntriesChange={setTranscriptEntries}
             />
-          </div>
-          <div className="min-h-0 flex-1 grid grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[minmax(300px,360px)_minmax(220px,0.9fr)_minmax(380px,1.2fr)] lg:gap-px lg:overflow-hidden lg:bg-border lg:p-0">
-            {/* Left: calls / dispatch events (API newest-first) */}
-            <section className="min-h-[360px] overflow-hidden rounded-lg border border-border bg-card p-3 shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
-              <EventLog />
-            </section>
-
-            {/* Center: Hillsborough County / Tampa map (smaller fr).
-                flex + relative host so Leaflet gets a real non-zero height after
-                the 3-pane grid lays out (calc(100%-2rem) alone collapsed on lg). */}
-            <section className="flex min-h-[280px] flex-col overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:h-full lg:rounded-none lg:border-0 lg:shadow-none" aria-label="Hillsborough County dispatch map">
-              <div className="flex h-7 shrink-0 items-center border-b border-border bg-muted/30 px-3">
-                <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-                  Hillsborough · Tampa map
-                </span>
-              </div>
-              <div className="relative min-h-[240px] flex-1 lg:min-h-0">
-                <DispatchMap markers={mapMarkers} />
-              </div>
-            </section>
-
-            {/* Right: live transcripts · newest first (wider) */}
-            <section className="min-h-[360px] flex flex-col overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
-              <div className="flex h-8 shrink-0 items-center border-b border-border bg-muted/30 px-3">
-                <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
-                  Live transcripts · newest first
-                </span>
-              </div>
-              <div className="min-h-0 flex-1">
-                <TranscriptFeed entries={transcriptEntries} />
-              </div>
-            </section>
           </div>
         </TabsContent>
 
