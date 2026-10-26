@@ -125,7 +125,24 @@ EXTRA_HOMOPHONE_FIXES: list[tuple[re.Pattern[str], str]] = [
     # only rewritten after South/North or before Ave/Avenue.
     (re.compile(r"\b(south|north)\s+(?:mc\s*dowell|mc\s*dill|mac\s*dill)\b", re.IGNORECASE), r"\1 MacDill"),
     (re.compile(r"\b(?:mc\s*dowell|mc\s*dill|mac\s+dill)(\s+(?:avenue|ave)\b)", re.IGNORECASE), r"MacDill\1"),
+    # --- 2026-10-26 P0 quarantine mishearings ---
+    (re.compile(r"\bbruce\s+(?:b|be|bee)\.?\s+allison\b", re.IGNORECASE), "Bruce B Downs"),
+    (re.compile(r"\bbruce\s+b\s+downs,?\s+flower\b", re.IGNORECASE), "Bruce B Downs and Fowler"),
+    (re.compile(r"\b(?:north\s+)?hill\s+mayberry\b", re.IGNORECASE), "North Dale Mabry"),
+    (re.compile(r"\b(\d{3,5})\s+cast\b", re.IGNORECASE), r"\1 Cass Street"),
+    (re.compile(r"\blye(?=\s+(?:avenue|ave|street|st)\b)", re.IGNORECASE), "Sligh"),
+    (re.compile(r"\bon\s+the\s+slide\b", re.IGNORECASE), "on Sligh Avenue"),
+    (re.compile(r"\b(?:slye|(?:sly|slide|sleigh)(?=\s+(?:street|st|avenue|ave)\b))\b", re.IGNORECASE), "Sligh"),
+    (re.compile(r"\bhaines\s+(?:in|and|&|at)\s+louisiana\b", re.IGNORECASE), "Himes and Louisiana"),
+    (re.compile(r"\bhinesap,?\s*(?:and\s+|at\s+|in\s+)?louisiana\b", re.IGNORECASE), "Himes and Louisiana"),
+    (re.compile(r"\bhinesap\b", re.IGNORECASE), "Himes"),
+    (re.compile(r"\bcourtney[-\s]+campbell[-\s]+costway\b", re.IGNORECASE), "Courtney Campbell Causeway"),
+    (re.compile(r"\bcostway\b", re.IGNORECASE), "Causeway"),
+    (re.compile(r"\bswan\s+(?:and|&|at)\s+sterling\b", re.IGNORECASE), "Swann and Sterling"),
+    (re.compile(r"\bsetka\b", re.IGNORECASE), "Sitka"),
+    (re.compile(r"\bcross\s+creek\s+(?:and|&|at)\s+villa(?!\s+creek)\b", re.IGNORECASE), "Cross Creek and Villa Creek"),
 ]
+
 
 
 # Whole-chunk hallucination blocklist (WHISPER_BLOCKLIST=1). Only an entire
