@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { detectKeywords } from "@/lib/constants";
 import { useKeywords } from "@/hooks/use-keywords";
 
-interface TranscriptEntry {
+export interface TranscriptEntry {
   id: string;
   text: string;
   isFinal: boolean;
@@ -35,9 +35,11 @@ export default function TranscriptFeed({ entries }: TranscriptFeedProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const { keywords: keywordList } = useKeywords();
 
+  // Newest-first: keep the viewport pinned to the top when new items arrive
+  // (older entries flow downward). Do not scroll-to-bottom.
   useEffect(() => {
     if (containerRef.current) {
-      containerRef.current.scrollTop = containerRef.current.scrollHeight;
+      containerRef.current.scrollTop = 0;
     }
   }, [entries]);
 
@@ -52,7 +54,8 @@ export default function TranscriptFeed({ entries }: TranscriptFeedProps) {
           Waiting for transcription...
         </div>
       )}
-      {entries.map((entry) => {
+      {/* Array is oldest→newest from AudioPanel; reverse for newest-on-top UI. */}
+      {[...entries].reverse().map((entry) => {
         const keywords = detectKeywords(entry.text, keywordList);
         const hasKeywords = keywords.length > 0;
 

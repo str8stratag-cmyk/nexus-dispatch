@@ -58,6 +58,11 @@ interface AudioPanelProps {
   onSourceChange: (source: string) => void;
   districts: string[];
   onDispatchDetected: (event: DetectedEvent) => void;
+  /** When false, mic/capture UI stays but the live transcript pane is omitted
+   *  (parent can render TranscriptFeed elsewhere). Default true. */
+  showTranscriptFeed?: boolean;
+  /** Fires whenever the live transcript list changes (oldest→newest). */
+  onTranscriptEntriesChange?: (entries: TranscriptEntry[]) => void;
 }
 
 const DISPATCH_COOLDOWN_MS = 15000;
@@ -78,6 +83,8 @@ export default function AudioPanel({
   onSourceChange,
   districts,
   onDispatchDetected,
+  showTranscriptFeed = true,
+  onTranscriptEntriesChange,
 }: AudioPanelProps) {
   const [selectedDevice, setSelectedDeviceState] = useState<string>(() => localStorage.getItem("dispatch.audioDevice") || "");
   const setSelectedDevice = useCallback((value: string) => {
@@ -86,6 +93,12 @@ export default function AudioPanel({
   }, []);
   const [transcriptEntries, setTranscriptEntries] = useState<TranscriptEntry[]>([]);
   const [lastDispatch, setLastDispatch] = useState<DetectedEvent | null>(null);
+
+  // Keep an external right-pane TranscriptFeed in sync without moving capture
+  // state out of this panel (capture/heartbeat/supervisor stay untouched).
+  useEffect(() => {
+    onTranscriptEntriesChange?.(transcriptEntries);
+  }, [transcriptEntries, onTranscriptEntriesChange]);
   const entryIdRef = useRef(0);
   // Last dispatch, for the cooldown: only a TRUE repeat (same address + same
   // incident class within DISPATCH_COOLDOWN_MS) is suppressed.
@@ -572,7 +585,7 @@ export default function AudioPanel({
   }, [flush, stop, setAutoCapture, resetSupervisor]);
 
   return (
-    <div className="flex flex-col h-full gap-3" data-testid="audio-panel">
+    <div className={`flex flex-col gap-3 ${showTranscriptFeed ? "h-full" : "h-auto"}`} data-testid="audio-panel">
       {/* Device Selection */}
       <div className="space-y-2">
         <div className="flex items-center gap-2">
@@ -738,15 +751,17 @@ export default function AudioPanel({
         </div>
       )}
 
-      {/* Transcript Feed */}
-      <div className="flex-1 min-h-0 rounded-md border border-border bg-card overflow-hidden flex flex-col">
-        <div className="px-3 py-2 border-b border-border bg-muted/30">
-          <span className="text-xs font-mono text-muted-foreground">LIVE TRANSCRIPT</span>
+      {/* Transcript Feed (optional — 3-pane layout hosts it in the right column) */}
+      {showTranscriptFeed && (
+        <div className="flex-1 min-h-0 rounded-md border border-border bg-card overflow-hidden flex flex-col">
+          <div className="px-3 py-2 border-b border-border bg-muted/30">
+            <span className="text-xs font-mono text-muted-foreground">LIVE TRANSCRIPT</span>
+          </div>
+          <div className="flex-1 min-h-0">
+            <TranscriptFeed entries={transcriptEntries} />
+          </div>
         </div>
-        <div className="flex-1 min-h-0">
-          <TranscriptFeed entries={transcriptEntries} />
-        </div>
-      </div>
+      )}
     </div>
   );
 }
