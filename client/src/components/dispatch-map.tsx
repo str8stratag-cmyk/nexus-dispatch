@@ -93,23 +93,40 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
       attributionControl: true,
     });
 
-    const baseLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-      subdomains: "abcd",
-      maxZoom: 20,
-    }).addTo(map);
+    // Carto dark_all now returns watermark tiles ("API KEY REQUIRED" /
+    // carto.com/basemaps/apikey). Use keyless Esri canvas — no Vite secrets.
+    // OSM volunteer tiles are often blocked (418) from desk browsers; Esri
+    // World Street Map is the roads/detail overlay instead.
+    const baseLayer = L.tileLayer(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+      {
+        attribution:
+          'Tiles &copy; <a href="https://www.esri.com/">Esri</a> &mdash; Esri, HERE, Garmin, FAO, NOAA, USGS',
+        maxZoom: 16,
+      }
+    ).addTo(map);
 
-    // Roads overlay for cross-referencing dispatch locations against real road names.
-    const roadsOverlay = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-      subdomains: "abc",
-      maxZoom: 20,
-      opacity: 0.35,
-    });
+    const labelsOverlay = L.tileLayer(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
+      {
+        attribution: 'Labels &copy; Esri',
+        maxZoom: 16,
+        opacity: 0.9,
+      }
+    ).addTo(map);
+
+    const roadsOverlay = L.tileLayer(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+      {
+        attribution: 'Streets &copy; Esri',
+        maxZoom: 19,
+        opacity: 0.45,
+      }
+    );
 
     L.control.layers(
-      { "Dark": baseLayer },
-      { "Roads": roadsOverlay },
+      { Dark: baseLayer },
+      { Labels: labelsOverlay, Roads: roadsOverlay },
       { collapsed: false, position: "topright" }
     ).addTo(map);
 
