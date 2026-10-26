@@ -254,7 +254,11 @@ export default function DispatchPage() {
         {/* Live Monitor Tab — Saturday UI parity: queue (fixed) | map (hero,
             fills remaining width) | detail (fixed), with capture chrome
             relocated to a bottom strip. Hillsborough County / Tampa. */}
-        <TabsContent value="monitor" className="flex-1 min-h-0 mt-2 lg:mt-0 flex flex-col">
+        {/* data-[state=inactive]:hidden: Radix leaves the inactive panel in the
+            DOM with the `hidden` attribute, but `flex` overrides that, so this
+            panel kept taking a flex-1 share and pushed Manual / Review /
+            Setup halfway down the screen (2026-10-26). */}
+        <TabsContent value="monitor" className="flex-1 min-h-0 mt-2 lg:mt-0 flex flex-col data-[state=inactive]:hidden">
           <div className="min-h-0 flex-1 grid grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[360px_minmax(0,1fr)_340px] lg:gap-px lg:overflow-hidden lg:bg-border lg:p-0">
             {/* Left: call queue (API newest-first) */}
             <section className="min-h-[360px] overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
