@@ -8,6 +8,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Sun, Moon, Radio, Send, Settings, ExternalLink, ShieldAlert } from "lucide-react";
 import AudioPanel, { type DetectedEvent } from "@/components/audio-panel";
 import EventLog from "@/components/event-log";
+import DispatchMap from "@/components/dispatch-map";
+import TranscriptFeed, { type TranscriptEntry } from "@/components/transcript-feed";
 import ManualDispatch from "@/components/manual-dispatch";
 import SettingsPanel from "@/components/settings-panel";
 import QuarantinePanel from "@/components/quarantine-panel";
@@ -32,6 +34,7 @@ export default function DispatchPage() {
   const [district, setDistrictState] = useState(() => localStorage.getItem("dispatch.district") || "District 1");
   const [sourceName, setSourceNameState] = useState(() => localStorage.getItem("dispatch.source") || "");
   const [districts, setDistricts] = useState<string[]>(["District 1", "District 2", "District 3", "District 4", "District 5", "District 6", "District 7"]);
+  const [transcriptEntries, setTranscriptEntries] = useState<TranscriptEntry[]>([]);
 
   // Manual entries persist across restarts and always win over the
   // machine-derived defaults below.
@@ -97,6 +100,34 @@ export default function DispatchPage() {
 
   useEventsStream();
 
+  // Same query key as EventLog — react-query dedupes. Used only for map pins
+  // (Hillsborough / Tampa area; DispatchMap already centers on Tampa).
+  const { data: mapEvents = [] } = useQuery({
+    queryKey: ["/api/events"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/events?limit=200");
+      return res.json() as Promise<Array<{
+        id: number;
+        lat: number | null;
+        lng: number | null;
+        address: string | null;
+        crossStreet: string | null;
+        geocodedRoad: string | null;
+        signalType: string | null;
+        description: string | null;
+        district: string;
+        transcript: string;
+        createdAt: string;
+        status?: string;
+      }>>;
+    },
+    refetchInterval: 120_000,
+  });
+
+  const mapMarkers = mapEvents.filter(
+    (e) => Number.isFinite(e.lat) && Number.isFinite(e.lng)
+  );
+
   const dispatchMutation = useMutation({
     mutationFn: async (data: any) => {
       return apiRequest("POST", "/api/dispatch", data);
@@ -145,7 +176,7 @@ export default function DispatchPage() {
           <div>
             <h1 className="text-base font-bold tracking-tight">DISPATCH MONITOR</h1>
             <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground hidden sm:inline">
-              Traffic Accident Detection System
+              Hillsborough · Tampa · Traffic Accident Detection
             </span>
           </div>
           <span className="ml-2 hidden items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-emerald-500 sm:inline-flex">
@@ -211,22 +242,51 @@ export default function DispatchPage() {
           </TabsTrigger>
         </TabsList>
 
-        {/* Live Monitor Tab */}
-        <TabsContent value="monitor" className="flex-1 min-h-0 mt-2 lg:mt-0">
-          <div className="h-full grid grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[320px_minmax(0,1fr)] lg:gap-px lg:overflow-hidden lg:bg-border lg:p-0">
-            <div className="min-h-[520px] flex flex-col rounded-lg border border-border bg-card p-3 shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
-              <AudioPanel
-                district={district}
-                sourceName={sourceName}
-                onDistrictChange={setDistrict}
-                onSourceChange={setSourceName}
-                districts={districts}
-                onDispatchDetected={handleDispatchDetected}
-              />
-            </div>
-
-            <section className="min-h-[360px] rounded-lg border border-border bg-card p-3 shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
+        {/* Live Monitor Tab — 3-pane Hillsborough / Tampa board:
+            top capture strip (Web Audio / heartbeat unchanged), then
+            left calls (~320–360), smaller center map, wider right transcripts
+            (newest-first). Map is Hillsborough County / Tampa. */}
+        <TabsContent value="monitor" className="flex-1 min-h-0 mt-2 lg:mt-0 flex flex-col">
+          <div className="shrink-0 border-b border-border bg-card p-3">
+            <AudioPanel
+              district={district}
+              sourceName={sourceName}
+              onDistrictChange={setDistrict}
+              onSourceChange={setSourceName}
+              districts={districts}
+              onDispatchDetected={handleDispatchDetected}
+              showTranscriptFeed={false}
+              onTranscriptEntriesChange={setTranscriptEntries}
+            />
+          </div>
+          <div className="min-h-0 flex-1 grid grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[minmax(300px,360px)_minmax(220px,0.9fr)_minmax(380px,1.2fr)] lg:gap-px lg:overflow-hidden lg:bg-border lg:p-0">
+            {/* Left: calls / dispatch events (API newest-first) */}
+            <section className="min-h-[360px] overflow-hidden rounded-lg border border-border bg-card p-3 shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
               <EventLog />
+            </section>
+
+            {/* Center: Hillsborough County / Tampa map (smaller fr) */}
+            <section className="min-h-[280px] overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none" aria-label="Hillsborough County dispatch map">
+              <div className="flex h-8 items-center border-b border-border bg-muted/30 px-3">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
+                  Hillsborough · Tampa map
+                </span>
+              </div>
+              <div className="h-[calc(100%-2rem)] min-h-[240px]">
+                <DispatchMap markers={mapMarkers} />
+              </div>
+            </section>
+
+            {/* Right: live transcripts · newest first (wider) */}
+            <section className="min-h-[360px] flex flex-col overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
+              <div className="flex h-8 shrink-0 items-center border-b border-border bg-muted/30 px-3">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
+                  Live transcripts · newest first
+                </span>
+              </div>
+              <div className="min-h-0 flex-1">
+                <TranscriptFeed entries={transcriptEntries} />
+              </div>
             </section>
           </div>
         </TabsContent>
