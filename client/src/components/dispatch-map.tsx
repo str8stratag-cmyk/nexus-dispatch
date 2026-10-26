@@ -133,10 +133,27 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
     markerLayerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
 
-    // Fix for container not having proper size initially
-    setTimeout(() => map.invalidateSize(), 100);
+    // 3-pane board often mounts the map before the center column has its final
+    // height; invalidate repeatedly until layout settles (ResizeObserver below
+    // covers later resizes).
+    const invalidate = () => {
+      try {
+        map.invalidateSize({ animate: false });
+      } catch {
+        /* map may already be removed */
+      }
+    };
+    invalidate();
+    const raf = requestAnimationFrame(invalidate);
+    const t1 = window.setTimeout(invalidate, 50);
+    const t2 = window.setTimeout(invalidate, 250);
+    const t3 = window.setTimeout(invalidate, 1000);
 
     return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+      window.clearTimeout(t3);
       map.remove();
       mapRef.current = null;
     };
@@ -206,5 +223,15 @@ export default function DispatchMap({ markers }: DispatchMapProps) {
     return () => observer.disconnect();
   }, []);
 
-  return <div ref={containerRef} className="h-full w-full" data-testid="dispatch-map" />;
+  // absolute inset fill: parent must be position:relative with non-zero height
+  // (see dispatch.tsx map pane). Inline minHeight avoids a grey 0-height Leaflet
+  // pane if flex sizing races on first paint.
+  return (
+    <div
+      ref={containerRef}
+      className="absolute inset-0 h-full w-full min-h-[200px] bg-[#1a1a2e]"
+      style={{ zIndex: 0 }}
+      data-testid="dispatch-map"
+    />
+  );
 }

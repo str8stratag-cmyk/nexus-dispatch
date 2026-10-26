@@ -584,49 +584,99 @@ export default function AudioPanel({
     flush().finally(() => stop());
   }, [flush, stop, setAutoCapture, resetSupervisor]);
 
-  return (
-    <div className={`flex flex-col gap-3 ${showTranscriptFeed ? "h-full" : "h-auto"}`} data-testid="audio-panel">
-      {/* Device Selection */}
-      <div className="space-y-2">
-        <div className="flex items-center gap-2">
-          <Select value={selectedDevice} onValueChange={setSelectedDevice}>
-            <SelectTrigger className="text-xs" data-testid="device-select">
-              <SelectValue placeholder="Select microphone..." />
-            </SelectTrigger>
-            <SelectContent>
-              {devices.length === 0 && (
-                <SelectItem value="default">Default Microphone</SelectItem>
-              )}
-              {devices.map((device) => (
-                <SelectItem key={device.deviceId} value={device.deviceId}>
-                  {device.label || `Microphone ${device.deviceId.slice(0, 8)}`}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+  const deviceSelect = (
+    <Select value={selectedDevice} onValueChange={setSelectedDevice}>
+      <SelectTrigger className={`text-xs ${showTranscriptFeed ? "" : "h-8 min-w-[9rem] max-w-[14rem]"}`} data-testid="device-select">
+        <SelectValue placeholder="Select microphone..." />
+      </SelectTrigger>
+      <SelectContent>
+        {devices.length === 0 && (
+          <SelectItem value="default">Default Microphone</SelectItem>
+        )}
+        {devices.map((device) => (
+          <SelectItem key={device.deviceId} value={device.deviceId}>
+            {device.label || `Microphone ${device.deviceId.slice(0, 8)}`}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
 
-        <div className="grid grid-cols-2 gap-2">
-          <Select value={district} onValueChange={onDistrictChange}>
-            <SelectTrigger className="text-xs" data-testid="district-select">
-              <SelectValue placeholder="District..." />
-            </SelectTrigger>
-            <SelectContent>
-              {districts.map((d) => (
-                <SelectItem key={d} value={d}>{d}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <input
-            type="text"
-            value={sourceName}
-            onChange={(e) => onSourceChange(e.target.value)}
-            placeholder="Source name..."
-            className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-xs font-mono"
-            data-testid="source-input"
-          />
+  const districtSelect = (
+    <Select value={district} onValueChange={onDistrictChange}>
+      <SelectTrigger className={`text-xs ${showTranscriptFeed ? "" : "h-8 w-[7.5rem]"}`} data-testid="district-select">
+        <SelectValue placeholder="District..." />
+      </SelectTrigger>
+      <SelectContent>
+        {districts.map((d) => (
+          <SelectItem key={d} value={d}>{d}</SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+
+  const sourceInput = (
+    <input
+      type="text"
+      value={sourceName}
+      onChange={(e) => onSourceChange(e.target.value)}
+      placeholder="Source name..."
+      className={`flex w-full rounded-md border border-input bg-transparent px-3 py-1 text-xs font-mono ${showTranscriptFeed ? "h-9" : "h-8 max-w-[10rem]"}`}
+      data-testid="source-input"
+    />
+  );
+
+  const captureButton = (
+    <Button
+      onClick={isCapturing ? handleStop : handleStart}
+      variant={isCapturing ? "destructive" : "default"}
+      className={showTranscriptFeed ? "w-full" : "h-8 shrink-0 px-3"}
+      size={showTranscriptFeed ? "default" : "sm"}
+      data-testid="capture-toggle"
+    >
+      {isCapturing ? (
+        <>
+          <MicOff className="h-4 w-4 mr-2" />
+          Stop Capture
+        </>
+      ) : (
+        <>
+          <Mic className="h-4 w-4 mr-2" />
+          Start Capture
+        </>
+      )}
+    </Button>
+  );
+
+  return (
+    <div className={`flex flex-col ${showTranscriptFeed ? "h-full gap-3" : "h-auto gap-1"}`} data-testid="audio-panel">
+      {showTranscriptFeed ? (
+        <>
+          {/* Device Selection (stacked — standalone / legacy layout) */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">{deviceSelect}</div>
+            <div className="grid grid-cols-2 gap-2">
+              {districtSelect}
+              {sourceInput}
+            </div>
+          </div>
+          <div className="rounded-md border border-border bg-card p-3">
+            <RmsMeter rms={rms} active={isCapturing} />
+          </div>
+          {captureButton}
+        </>
+      ) : (
+        /* Dense single-row strip for 3-pane Hillsborough board — frees vertical space for map/calls/transcripts */
+        <div className="flex flex-wrap items-center gap-1.5" data-testid="audio-panel-compact-strip">
+          {deviceSelect}
+          {districtSelect}
+          {sourceInput}
+          <div className="min-w-0 flex-1 basis-[10rem]">
+            <RmsMeter rms={rms} active={isCapturing} compact />
+          </div>
+          {captureButton}
         </div>
-      </div>
+      )}
 
       {/* Open in New Tab banner if inside iframe */}
       {isInIframe && (
@@ -649,31 +699,6 @@ export default function AudioPanel({
           </Button>
         </div>
       )}
-
-      {/* RMS Meter */}
-      <div className="rounded-md border border-border bg-card p-3">
-        <RmsMeter rms={rms} active={isCapturing} />
-      </div>
-
-      {/* Start/Stop Button */}
-      <Button
-        onClick={isCapturing ? handleStop : handleStart}
-        variant={isCapturing ? "destructive" : "default"}
-        className="w-full"
-        data-testid="capture-toggle"
-      >
-        {isCapturing ? (
-          <>
-            <MicOff className="h-4 w-4 mr-2" />
-            Stop Capture
-          </>
-        ) : (
-          <>
-            <Mic className="h-4 w-4 mr-2" />
-            Start Capture
-          </>
-        )}
-      </Button>
 
       {isPending && (
         <div className="text-xs text-yellow-600 animate-pulse p-2 rounded bg-yellow-950/30 border border-yellow-900/40" data-testid="dispatch-pending">
