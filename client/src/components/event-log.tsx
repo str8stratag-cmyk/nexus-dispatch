@@ -40,6 +40,10 @@ interface EventLogProps {
   /** Currently selected call (controlled by the parent board so map + detail stay in sync). */
   selectedId?: number | null;
   onSelect?: (id: number) => void;
+  /** Accepted / resolved calls are hidden from the queue (and map) unless
+   *  this is on. Owned by the page so the map follows the same switch. */
+  showHandled?: boolean;
+  onShowHandledChange?: (show: boolean) => void;
 }
 
 type QueueFilter = "all" | "crit" | "warn" | "info" | "open";
@@ -156,7 +160,7 @@ function SeverityPill({ sev, label }: { sev: Severity; label: string }) {
   );
 }
 
-export default function EventLog({ selectedId = null, onSelect }: EventLogProps) {
+export default function EventLog({ selectedId = null, onSelect, showHandled = false, onShowHandledChange }: EventLogProps) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [filter, setFilter] = useState<QueueFilter>("all");
@@ -224,8 +228,12 @@ export default function EventLog({ selectedId = null, onSelect }: EventLogProps)
   // a dispatcher can listen back, never auto-dispatched or sent to Telegram.
   const reviewEvents = visible.filter((e) => e.status === NEEDS_REVIEW_STATUS);
   const activeEvents = visible.filter((e) => e.status === "active");
-  const acceptedEvents = visible.filter((e) => e.status === "accepted");
-  const resolvedEvents = visible.filter((e) => e.status === "resolved");
+  // Handled calls drop off the board by default so they don't clutter the
+  // queue or the map (Zach, 2026-10-27); the "Show handled" pill brings them back.
+  const acceptedEvents = showHandled ? visible.filter((e) => e.status === "accepted") : [];
+  const resolvedEvents = showHandled ? visible.filter((e) => e.status === "resolved") : [];
+  const handledCount = events.filter((e) => e.status === "accepted" || e.status === "resolved").length;
+  const shownCount = reviewEvents.length + activeEvents.length + acceptedEvents.length + resolvedEvents.length;
 
   const handleExportCSV = () => {
     if (events.length === 0) {
@@ -311,6 +319,22 @@ export default function EventLog({ selectedId = null, onSelect }: EventLogProps)
               {label}
             </button>
           ))}
+          {onShowHandledChange && (
+            <button
+              type="button"
+              onClick={() => onShowHandledChange(!showHandled)}
+              aria-pressed={showHandled}
+              title="Accepted and resolved calls are hidden from the queue and map unless this is on"
+              className={`ml-auto rounded-full border px-2 py-0.5 text-[11px] transition-colors ${
+                showHandled
+                  ? "border-primary text-primary"
+                  : "border-dashed border-border text-muted-foreground hover:text-foreground"
+              }`}
+              data-testid="queue-show-handled"
+            >
+              {showHandled ? "Hide" : "Show"} handled ({handledCount})
+            </button>
+          )}
         </div>
         <div className="relative">
           <Search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
@@ -334,11 +358,16 @@ export default function EventLog({ selectedId = null, onSelect }: EventLogProps)
             No dispatch events yet
           </div>
         )}
-        {!isLoading && events.length > 0 && visible.length === 0 && (
+        {!isLoading && events.length > 0 && shownCount === 0 && (visible.length > 0 ? (
+          <div className="text-xs text-muted-foreground text-center p-4 italic">
+            No open calls — accepted / resolved are hidden
+          </div>
+        ) : (
+
           <div className="text-xs text-muted-foreground text-center p-4 italic">
             No calls match the current filter/search
           </div>
-        )}
+        ))}
         {reviewEvents.map((event) => {
           const sev = signalSeverity(event.signalType);
           return (

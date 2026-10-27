@@ -12,6 +12,30 @@ they're incident history, not a TODO list.
 
 ---
 
+## 2026-10-27 — Accepted / resolved calls come off the board
+
+**Ask (Zach):** once a call is accepted or resolved it should come off the
+board — handled calls were cluttering the map.
+
+**What changed (PR `fix/hide-handled-calls` → `main`):**
+- `pages/dispatch.tsx`: new `showHandled` state (default off). Map markers
+  skip `accepted` / `resolved` events unless it's on. If the selected call
+  becomes handled (detail-panel Accept/Resolve, card Accept, or a Telegram
+  accept arriving over SSE), the selection clears so the detail panel closes.
+- `components/event-log.tsx`: accepted / resolved sections hidden unless
+  `showHandled`; a "Show handled (N)" pill in the filter row toggles it (same
+  switch drives the map). Stats, CSV/JSON export unchanged (export still
+  includes everything).
+
+**Verified:** Playwright vs a stateful mock API: Accept from detail → pin
+5→4, card gone, panel closed; Resolve → 4→3; card quick-Accept → 3→2;
+"Show handled" brings all back (7 pins), off again → 3.
+
+**Not changed:** server statuses / Telegram. "Unaccepted" filter pill is now
+mostly redundant with the default view; left in place.
+
+---
+
 ## 2026-10-26 (later) — Manual / Review / Setup rendered halfway down; Roads on by default
 
 **What was broken (on release after #90/#91):** clicking Manual or Review in

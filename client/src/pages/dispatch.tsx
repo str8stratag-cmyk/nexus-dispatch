@@ -55,6 +55,8 @@ export default function DispatchPage() {
   const [transcriptEntries, setTranscriptEntries] = useState<TranscriptEntry[]>([]);
   // Selected call — shared by the queue, map, and incident detail panel.
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  // Accepted / resolved calls come off the queue and map unless this is on.
+  const [showHandled, setShowHandled] = useState(false);
 
   // Manual entries persist across restarts and always win over the
   // machine-derived defaults below.
@@ -149,10 +151,19 @@ export default function DispatchPage() {
     refetchInterval: 120_000,
   });
 
+  const isHandled = (status?: string) => status === "accepted" || status === "resolved";
   const mapMarkers = mapEvents.filter(
-    (e) => Number.isFinite(e.lat) && Number.isFinite(e.lng)
+    (e) => Number.isFinite(e.lat) && Number.isFinite(e.lng) && (showHandled || !isHandled(e.status))
   );
   const selectedEvent = mapEvents.find((e) => e.id === selectedId) ?? null;
+
+  // Accepting or resolving the selected call (from its card, the detail
+  // panel, or Telegram via SSE) takes it off the board, so close its detail.
+  useEffect(() => {
+    if (!showHandled && selectedEvent && isHandled(selectedEvent.status)) {
+      setSelectedId(null);
+    }
+  }, [showHandled, selectedEvent?.id, selectedEvent?.status]);
 
   const dispatchMutation = useMutation({
     mutationFn: async (data: any) => {
@@ -262,7 +273,12 @@ export default function DispatchPage() {
           <div className="min-h-0 flex-1 grid grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[360px_minmax(0,1fr)_340px] lg:gap-px lg:overflow-hidden lg:bg-border lg:p-0">
             {/* Left: call queue (API newest-first) */}
             <section className="min-h-[360px] overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
-              <EventLog selectedId={selectedId} onSelect={setSelectedId} />
+              <EventLog
+                selectedId={selectedId}
+                onSelect={setSelectedId}
+                showHandled={showHandled}
+                onShowHandledChange={setShowHandled}
+              />
             </section>
 
             {/* Center: Hillsborough County / Tampa map — hero, fills the
