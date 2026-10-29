@@ -55,13 +55,13 @@ export default function TranscriptFeed({ entries }: TranscriptFeedProps) {
   return (
     <div className="flex h-full flex-col" data-testid="transcript-feed">
       <div className="flex shrink-0 items-center justify-between border-b border-border px-2.5 py-1.5">
-        <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+        <span className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
           Live transcripts · newest first
         </span>
         <button
           type="button"
           onClick={() => setDetectionsOnly((v) => !v)}
-          className={`rounded-md border px-2 py-0.5 text-[10px] font-medium transition-colors ${
+          className={`rounded-md border px-2 py-0.5 text-xs font-medium transition-colors ${
             detectionsOnly
               ? "border-primary bg-primary text-primary-foreground"
               : "border-border text-muted-foreground hover:text-foreground"
@@ -71,9 +71,9 @@ export default function TranscriptFeed({ entries }: TranscriptFeedProps) {
           Detections only
         </button>
       </div>
-      <div ref={containerRef} className="flex-1 overflow-y-auto space-y-1.5 p-2 font-mono text-xs">
+      <div ref={containerRef} className="flex-1 overflow-y-auto space-y-2 p-3 font-mono text-sm lg:text-[15px]">
         {rows.length === 0 && (
-          <div className="text-muted-foreground text-xs italic p-4 text-center">
+          <div className="text-muted-foreground text-sm italic p-4 text-center">
             {detectionsOnly ? "No detections yet" : "Waiting for transcription..."}
           </div>
         )}
@@ -106,7 +106,7 @@ export default function TranscriptFeed({ entries }: TranscriptFeedProps) {
           return (
             <div
               key={entry.id}
-              className={`rounded border-l-[3px] bg-muted/20 px-2 py-1.5 leading-relaxed ${
+              className={`rounded border-l-[3px] bg-muted/20 px-3 py-2 leading-relaxed ${
                 hasKeywords && sev
                   ? `${SEVERITY_BORDER[sev]} bg-orange-950/20`
                   : entry.isFinal
@@ -115,7 +115,7 @@ export default function TranscriptFeed({ entries }: TranscriptFeedProps) {
               }`}
               data-testid={`transcript-entry-${entry.id}`}
             >
-              <div className="mb-0.5 text-[10px] text-muted-foreground">
+              <div className="mb-1 text-xs text-muted-foreground">
                 {new Date(entry.timestamp).toLocaleTimeString("en-US", {
                   hour: "2-digit",
                   minute: "2-digit",
@@ -132,7 +132,7 @@ export default function TranscriptFeed({ entries }: TranscriptFeedProps) {
                   {keywords.map((kw, i) => (
                     <span
                       key={i}
-                      className="inline-flex items-center rounded bg-orange-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-orange-400"
+                      className="inline-flex items-center rounded bg-orange-500/20 px-1.5 py-0.5 text-xs font-semibold text-orange-400"
                     >
                       {kw.signalType}
                     </span>

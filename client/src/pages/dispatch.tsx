@@ -270,7 +270,7 @@ export default function DispatchPage() {
             panel kept taking a flex-1 share and pushed Manual / Review /
             Setup halfway down the screen (2026-10-26). */}
         <TabsContent value="monitor" className="flex-1 min-h-0 mt-2 lg:mt-0 flex flex-col data-[state=inactive]:hidden">
-          <div className="min-h-0 flex-1 grid grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[360px_minmax(0,1fr)_340px] lg:gap-px lg:overflow-hidden lg:bg-border lg:p-0">
+          <div className="min-h-0 flex-1 grid grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[340px_minmax(0,1fr)_440px] xl:grid-cols-[360px_minmax(0,1fr)_520px] lg:gap-px lg:overflow-hidden lg:bg-border lg:p-0">
             {/* Left: call queue (API newest-first) */}
             <section className="min-h-[360px] overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
               <EventLog
@@ -289,12 +289,12 @@ export default function DispatchPage() {
             </section>
 
             {/* Right: live transcripts (top) + selected incident (bottom) */}
-            <section className="min-h-[360px] flex flex-col overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
-              <div className={selectedId != null ? "min-h-0 flex-1 basis-1/2" : "min-h-0 flex-1"}>
+            <section className="min-h-[520px] flex flex-col overflow-hidden rounded-lg border border-border bg-card shadow-sm lg:min-h-0 lg:rounded-none lg:border-0 lg:shadow-none">
+              <div className={selectedId != null ? "min-h-0 flex-[3_1_0%]" : "min-h-0 flex-1"}>
                 <TranscriptFeed entries={transcriptEntries} />
               </div>
               {selectedId != null && (
-                <div className="min-h-0 flex-1 basis-1/2 border-t border-border">
+                <div className="min-h-0 flex-[2_1_0%] border-t border-border">
                   <IncidentDetail event={selectedEvent} onClose={() => setSelectedId(null)} />
                 </div>
               )}
