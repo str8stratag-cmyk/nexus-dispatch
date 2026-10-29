@@ -108,6 +108,7 @@ export type AcceptBranch =
   | "already_accepted"
   | "not_available"
   | "claim_lost"
+  | "ineligible"
   | "claimed"
   | "error";
 
