@@ -22,6 +22,8 @@ export interface DriverLocationPoint {
   horizontalAccuracy: number | null;
   isLive: boolean;
   chatId: string | null;
+  /** Original send time of the live-location message (ms); live_period counts from here. */
+  liveStartedAt?: number | null;
 }
 
 export type ArrivalStatus = "pending" | "arrived" | "not_arrived" | "no_location";
@@ -81,6 +83,7 @@ export function parseLocationUpdate(update: any): DriverLocationPoint | null {
     horizontalAccuracy: num(loc.horizontal_accuracy),
     isLive: livePeriod != null,
     chatId: msg.chat?.id != null ? String(msg.chat.id) : null,
+    liveStartedAt: livePeriod != null && num(msg.date) != null ? num(msg.date)! * 1000 : null,
   };
 }
 

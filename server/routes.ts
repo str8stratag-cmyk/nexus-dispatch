@@ -75,6 +75,42 @@ import {
   WHERE_MAX_PINS,
 } from "./telegram-where-helpers";
 import { recordDriverLocation, recordAcceptedCall, getLastDriverLocation, driverBoard } from "./driver-location";
+import {
+  readCheckinConfig,
+  shouldPostDailyCheckin,
+  dailyCheckinText,
+  dailyCheckinMarkup,
+  parseCheckinCallbackData,
+  checkinAckText,
+  ineligibleAcceptText,
+  isCheckinsCommand,
+  formatRoster,
+  localClock,
+  shouldRemind,
+  expiryReminderHtml,
+} from "./driver-checkin-helpers";
+import {
+  recordCheckin, driverEligibility, checkinRoster, getReminder, setReminder,
+  recordSeen, findSeenByUsername, seenSince, checkinsFor, claimRemoval, releaseRemoval, lastLiveFixAt,
+} from "./driver-checkin";
+import {
+  readRemovalConfig,
+  decideAutoRemoval,
+  kickMember,
+  parseRemoveCommand,
+  removeReplyText,
+  removalNoteText,
+  MISSING_RIGHTS_NOTE,
+  REMOVE_USAGE,
+  type RemovalReason,
+  type TgApi,
+} from "./driver-removal-helpers";
+import {
+  acceptsLocationChat,
+  readLiveGateConfig,
+  telegramAllowedUpdates,
+} from "./driver-live-gate-helpers";
+import { ingestJoinRequest, ingestLiveGateLocation, startLiveGateTicker } from "./driver-live-gate";
 
 
 const sseClients = new Set<Response>();
@@ -1281,7 +1317,11 @@ export async function registerRoutes(
   // Driver Live Location board: last fix per driver + accepted-call arrival status.
   app.get("/api/drivers/board", requireAuth, async (_req, res) => {
     try {
-      res.json(await driverBoard());
+      const board = await driverBoard();
+      // Eligibility (check-in + live location) per driver; informative even when the gate is off.
+      const cfg = readCheckinConfig();
+      const { date, rows } = await checkinRoster(cfg);
+      res.json({ ...board, checkin: { gateEnabled: cfg.enabled, date, freshMin: cfg.freshMs / 60_000, rows } });
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }
@@ -2170,17 +2210,41 @@ export {
 } from "./telegram-accept-helpers";
 
 export async function handleTelegramUpdate(update: any): Promise<void> {
+  // Remember who is active in the dispatch group (for check-in auto-removal and /remove @username).
+  void noteSeenMember(update).catch((err) => console.error("[driver-removal] seen tracking failed:", err?.message ?? err));
+  // Join-request gate (no-op unless DRIVER_LIVE_GATE=1). Always return so a
+  // join update is not mistaken for an Accept tap.
+  if (update?.chat_join_request) {
+    try {
+      const { botToken, chatId } = await getTelegramCredentials();
+      if (botToken) {
+        await ingestJoinRequest(update, { api: tgApi(botToken), dispatchChatId: chatId ?? null });
+      }
+    } catch (err: any) {
+      console.error("[driver-live-gate] join request failed:", err?.message ?? err);
+    }
+    return;
+  }
   // Driver Live Location fixes (message.location / edited_message.location).
   const point = parseLocationUpdate(update);
   if (point) {
     try {
-      const { chatId: dispatchChatId } = await getTelegramCredentials();
-      if (!isDispatchGroupChat(point.chatId, dispatchChatId)) {
+      const { botToken, chatId: dispatchChatId } = await getTelegramCredentials();
+      const gateOn = readLiveGateConfig().enabled;
+      // Group fixes stay on the existing board. Private live shares count
+      // as check-in only while the continuous gate is on.
+      if (!acceptsLocationChat(point.chatId, update, dispatchChatId, gateOn)) {
         console.log(`[driver-gps] dropped fix from non-dispatch chat user=${point.telegramUserId}`);
         return;
       }
       await recordDriverLocation(point);
       console.log(`[driver-gps] fix user=${point.telegramUserId} live=${point.isLive}`);
+      if (gateOn && botToken) {
+        await ingestLiveGateLocation(update, point, {
+          api: tgApi(botToken),
+          dispatchChatId: dispatchChatId ?? null,
+        }).catch((err) => console.error("[driver-live-gate] location update failed:", err?.message ?? err));
+      }
     } catch (err: any) {
       console.error("[driver-gps] failed to store location:", err?.message ?? err);
     }
@@ -2194,6 +2258,25 @@ export async function handleTelegramUpdate(update: any): Promise<void> {
       await handleWhereCommand(textMsg, whereCmd.query);
     } catch (err: any) {
       console.error("[driver-gps] /where failed:", err?.message ?? err);
+    }
+    return;
+  }
+  // /checkins — admin-only roster of who's checked in and sharing.
+  if (textMsg && isCheckinsCommand(textMsg.text)) {
+    try {
+      await handleCheckinsCommand(textMsg);
+    } catch (err: any) {
+      console.error("[driver-checkin] /checkins failed:", err?.message ?? err);
+    }
+    return;
+  }
+  // /remove — admin-only manual kick (ban + unban).
+  const removeCmd = textMsg ? parseRemoveCommand(textMsg.text, textMsg.reply_to_message) : null;
+  if (removeCmd) {
+    try {
+      await handleRemoveCommand(textMsg, removeCmd);
+    } catch (err: any) {
+      console.error("[driver-removal] /remove failed:", err?.message ?? err);
     }
     return;
   }
@@ -2217,6 +2300,14 @@ export async function handleTelegramUpdate(update: any): Promise<void> {
 
   const callback = update.callback_query;
   const data = typeof callback.data === "string" ? callback.data : null;
+  // Daily check-in button (✅ Check in for today).
+  const checkinDate = parseCheckinCallbackData(data);
+  if (checkinDate) {
+    await handleCheckinTap(callback, checkinDate).catch((err: any) =>
+      console.error("[driver-checkin] check-in tap failed:", err?.message ?? err),
+    );
+    return;
+  }
   const chatId = callback.message?.chat?.id;
   const messageId: number | null = callback.message?.message_id ?? null;
 
@@ -2295,6 +2386,24 @@ export async function handleTelegramUpdate(update: any): Promise<void> {
 
     const accepter = formatTelegramAccepterName(callback.from);
 
+    // Location gate (DRIVER_LOCATION_GATE=1): only checked-in drivers with a
+    // fresh, unexpired Live Location may accept. Owner rule: no location, no calls.
+    const gateCfg = readCheckinConfig();
+    if (gateCfg.enabled) {
+      const uid = typeof callback.from?.id === "number" ? callback.from.id : null;
+      const elig = uid == null ? "not_checked_in" : await driverEligibility(uid, gateCfg);
+      if (elig !== "eligible") {
+        log.error = `ineligible:${elig}`;
+        emit("ineligible");
+        await telegramApiCall(botToken, "answerCallbackQuery", {
+          callback_query_id: callback.id,
+          text: ineligibleAcceptText(elig, gateCfg.freshMs / 60_000),
+          show_alert: true,
+        });
+        return;
+      }
+    }
+
     // Atomic claim — if another tap (or desk) already accepted, treat as already taken.
     const updated = await storage.claimEventAccepted(eventId, accepter);
     if (!updated) {
@@ -2362,6 +2471,215 @@ async function trackAcceptedCall(
       reply_to_message_id: messageId,
     });
   }
+}
+
+async function handleCheckinTap(callback: any, date: string): Promise<void> {
+  const { botToken, chatId: dispatchChatId } = await getTelegramCredentials();
+  if (!botToken) return;
+  const cfg = readCheckinConfig();
+  const uid = typeof callback.from?.id === "number" ? callback.from.id : null;
+  const chatOk = isDispatchGroupChat(callback.message?.chat?.id != null ? String(callback.message.chat.id) : null, dispatchChatId);
+  const today = localClock(Date.now(), cfg.timeZone).date;
+  if (uid == null || !chatOk || date !== today) {
+    await telegramApiCall(botToken, "answerCallbackQuery", {
+      callback_query_id: callback.id,
+      text: date !== today ? "That check-in is from another day — use today's check-in message." : "Check-in only works in the dispatch group.",
+      show_alert: true,
+    });
+    return;
+  }
+  const name = formatTelegramAccepterName(callback.from);
+  const isNew = await recordCheckin(date, uid, name);
+  const elig = await driverEligibility(uid, cfg);
+  console.log(`[driver-checkin] ${JSON.stringify({ date, user: uid, isNew, eligibility: elig })}`);
+  await telegramApiCall(botToken, "answerCallbackQuery", {
+    callback_query_id: callback.id,
+    text: checkinAckText(!isNew, elig === "eligible"),
+    show_alert: elig !== "eligible",
+  });
+}
+
+async function handleCheckinsCommand(msg: any): Promise<void> {
+  const fromId = msg.from?.id;
+  if (!isWhereAllowed(fromId, parseAdminIds(process.env.TELEGRAM_ADMIN_IDS))) {
+    console.log(`[driver-checkin] /checkins ignored (not allowlisted) user=${fromId ?? "?"}`);
+    return;
+  }
+  const { botToken, chatId: dispatchChatId } = await getTelegramCredentials();
+  if (!botToken || !isWhereChatAllowed(msg.chat, dispatchChatId)) return;
+  const cfg = readCheckinConfig();
+  const now = Date.now();
+  const { date, rows } = await checkinRoster(cfg, now);
+  await telegramApiCall(botToken, "sendMessage", {
+    chat_id: msg.chat.id,
+    text: formatRoster(date, rows, now, cfg.enabled),
+    reply_to_message_id: msg.message_id,
+    disable_web_page_preview: true,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Daily check-in post + expiry reminders (poller desk only, DRIVER_LOCATION_GATE=1)
+// ---------------------------------------------------------------------------
+const DRIVER_CHECKIN_LAST_SENT_KEY = "driver_checkin_last_sent_date";
+const DRIVER_CHECKIN_POSTED_AT_KEY = "driver_checkin_posted_at";
+let checkinTickerStarted = false;
+let checkinTickBusy = false;
+
+function startDriverCheckinTicker(): void {
+  if (checkinTickerStarted) return;
+  checkinTickerStarted = true;
+  const t = setInterval(() => {
+    if (checkinTickBusy) return;
+    checkinTickBusy = true;
+    driverCheckinTick()
+      .catch((err) => console.error("[driver-checkin] tick failed:", err?.message ?? err))
+      .finally(() => { checkinTickBusy = false; });
+  }, 60_000);
+  (t as { unref?: () => void }).unref?.();
+}
+
+async function driverCheckinTick(now = Date.now()): Promise<void> {
+  const cfg = readCheckinConfig();
+  if (!cfg.enabled) return;
+  const { botToken, chatId } = await getTelegramCredentials();
+  if (!botToken || !chatId) return;
+
+  const lastSent = (await storage.getSetting(DRIVER_CHECKIN_LAST_SENT_KEY))?.value ?? null;
+  const postDate = shouldPostDailyCheckin(now, lastSent, cfg);
+  if (postDate) {
+    // Persist first so a crash/retry can never double-post the same day.
+    await storage.upsertSetting({ key: DRIVER_CHECKIN_LAST_SENT_KEY, value: postDate });
+    await storage.upsertSetting({ key: DRIVER_CHECKIN_POSTED_AT_KEY, value: String(now) });
+    const r = await telegramApiCall(botToken, "sendMessage", {
+      chat_id: chatId,
+      text: dailyCheckinText(postDate, cfg.freshMs / 60_000),
+      reply_markup: dailyCheckinMarkup(postDate),
+    });
+    console.log(`[driver-checkin] daily check-in posted date=${postDate} ok=${r?.ok}`);
+  }
+
+  // Expiry/stale reminders for drivers checked in today.
+  const { date, rows } = await checkinRoster(cfg, now);
+  for (const row of rows) {
+    if (!row.checkedIn) continue;
+    const prev = await getReminder(date, row.telegramUserId);
+    if (!shouldRemind(row.status, row.lastFixAt, prev, now, cfg.reminderCooldownMs)) continue;
+    await setReminder(date, row.telegramUserId, now, row.lastFixAt);
+    await telegramApiCall(botToken, "sendMessage", {
+      chat_id: chatId,
+      text: expiryReminderHtml(row.telegramUserId, row.driverName, row.status),
+      parse_mode: "HTML",
+    });
+    console.log(`[driver-checkin] reminder user=${row.telegramUserId} status=${row.status}`);
+  }
+
+  await autoRemovalSweep(botToken, chatId, cfg, date, now);
+}
+
+function tgApi(botToken: string): TgApi {
+  return (method, params) => telegramApiCall(botToken, method, params);
+}
+
+/** DM each TELEGRAM_ADMIN_IDS user (they must have /start-ed the bot once). Best effort. */
+async function notifyAdmins(botToken: string, text: string): Promise<void> {
+  for (const id of Array.from(parseAdminIds(process.env.TELEGRAM_ADMIN_IDS))) {
+    try {
+      const r = await telegramApiCall(botToken, "sendMessage", { chat_id: id, text, disable_web_page_preview: true });
+      if (!r?.ok) console.warn(`[driver-removal] admin DM to ${id} failed: ${r?.description}`);
+    } catch (err: any) {
+      console.warn(`[driver-removal] admin DM to ${id} failed: ${err?.message ?? err}`);
+    }
+  }
+}
+
+let lastRightsWarnAt = 0;
+async function warnMissingRights(botToken: string): Promise<void> {
+  if (Date.now() - lastRightsWarnAt < 6 * 3600_000) return; // don't spam admins every minute
+  lastRightsWarnAt = Date.now();
+  await notifyAdmins(botToken, MISSING_RIGHTS_NOTE);
+}
+
+/** DRIVER_LOCATION_GATE=1 + DRIVER_AUTO_REMOVE=1: kick no-share / no-check-in drivers (once per day each). */
+async function autoRemovalSweep(botToken: string, chatId: string, cfg: ReturnType<typeof readCheckinConfig>, date: string, now: number): Promise<void> {
+  const rcfg = readRemovalConfig();
+  if (!rcfg.autoRemove) return;
+  const lastSent = (await storage.getSetting(DRIVER_CHECKIN_LAST_SENT_KEY))?.value ?? null;
+  const postedRaw = (await storage.getSetting(DRIVER_CHECKIN_POSTED_AT_KEY))?.value;
+  const postedAt = lastSent === date && postedRaw ? Number(postedRaw) : null;
+  const checkins = await checkinsFor(date);
+  // Candidates: everyone checked in today + members active in the group in the 24h before the post or since.
+  const candidates = new Map<number, string>();
+  for (const id of Array.from(checkins.keys())) candidates.set(id, `User ${id}`);
+  if (postedAt != null) for (const m of await seenSince(postedAt - 86400_000)) candidates.set(m.telegramUserId, m.driverName);
+  const admins = parseAdminIds(process.env.TELEGRAM_ADMIN_IDS);
+  const removed: Array<{ name: string; id: number; reason: RemovalReason }> = [];
+  for (const [id, seenName] of Array.from(candidates.entries())) {
+    if (admins.has(id)) continue;
+    const reason = decideAutoRemoval({
+      checkinAt: checkins.get(id) ?? null,
+      lastLiveFixAt: await lastLiveFixAt(id),
+      postedAt,
+      now,
+      freshMs: cfg.freshMs,
+      cfg: rcfg,
+    });
+    if (!reason) continue;
+    if (!(await claimRemoval(date, id, reason))) continue; // already handled today
+    const r = await kickMember(tgApi(botToken), chatId, id, admins);
+    const name = (await getLastDriverLocation(id))?.driverName ?? seenName;
+    console.log(`[driver-removal] ${JSON.stringify({ date, user: id, reason, result: r.ok ? "removed" : r.why, exempt: (r as any).exempt ?? null })}`);
+    if (r.ok) {
+      removed.push({ name, id, reason });
+    } else if (r.why === "no_rights") {
+      await releaseRemoval(date, id); // retry once rights are granted
+      await warnMissingRights(botToken);
+      break;
+    } else if (r.why === "error") {
+      await releaseRemoval(date, id);
+    }
+    // exempt: keep the claim so we don't re-check them every minute today.
+  }
+  if (removed.length) await notifyAdmins(botToken, removalNoteText(removed));
+}
+
+async function noteSeenMember(update: any): Promise<void> {
+  const src = update?.message ?? update?.edited_message ?? update?.callback_query?.message;
+  const from = update?.callback_query?.from ?? update?.message?.from ?? update?.edited_message?.from;
+  if (!src?.chat || typeof from?.id !== "number") return;
+  if (from.is_bot) return;
+  const { chatId } = await getTelegramCredentials();
+  if (!isDispatchGroupChat(String(src.chat.id), chatId)) return;
+  await recordSeen(from.id, from.username ?? null, formatTelegramAccepterName(from), false);
+}
+
+async function handleRemoveCommand(msg: any, target: ReturnType<typeof parseRemoveCommand>): Promise<void> {
+  const fromId = msg.from?.id;
+  const admins = parseAdminIds(process.env.TELEGRAM_ADMIN_IDS);
+  if (!isWhereAllowed(fromId, admins)) {
+    console.log(`[driver-removal] /remove ignored (not allowlisted) user=${fromId ?? "?"}`);
+    return;
+  }
+  const { botToken, chatId: dispatchChatId } = await getTelegramCredentials();
+  if (!botToken || !dispatchChatId || !isWhereChatAllowed(msg.chat, dispatchChatId)) return;
+  const reply = (text: string) =>
+    telegramApiCall(botToken, "sendMessage", { chat_id: msg.chat.id, text, reply_to_message_id: msg.message_id });
+  if (!target || target === "usage") return void (await reply(REMOVE_USAGE));
+  let id: number;
+  let name: string;
+  if (target.kind === "username") {
+    const seen = await findSeenByUsername(target.username);
+    if (!seen) return void (await reply(`I haven't seen @${target.username} in the group, so I don't know their user id. Reply to one of their messages with /remove instead.`));
+    id = seen.telegramUserId;
+    name = seen.driverName;
+  } else {
+    id = target.id;
+    name = target.kind === "reply" ? target.name : `User ${id}`;
+  }
+  const r = await kickMember(tgApi(botToken), dispatchChatId, id, admins);
+  console.log(`[driver-removal] ${JSON.stringify({ manual: true, by: fromId, user: id, result: r.ok ? "removed" : r.why })}`);
+  await reply(removeReplyText(name, r));
+  if (r.ok) await notifyAdmins(botToken, removalNoteText([{ name, id, reason: "manual" }]));
 }
 
 async function handleWhereCommand(msg: any, query: string): Promise<void> {
@@ -2446,7 +2764,7 @@ export async function setTelegramWebhook(url?: string): Promise<{ success: boole
   console.log(`[telegram] Setting webhook to ${webhookUrl}`);
   const data = await telegramApiCall(botToken, "setWebhook", {
     url: webhookUrl,
-    allowed_updates: ["callback_query", "message", "edited_message"],
+    allowed_updates: telegramAllowedUpdates(readLiveGateConfig().enabled),
   });
 
   if (data.ok) {
@@ -2493,10 +2811,24 @@ export async function deleteTelegramWebhook(): Promise<{ success: boolean; descr
 const TELEGRAM_POLL_OFFSET_KEY = "telegram_poll_offset";
 let telegramPollingStarted = false;
 
+function ensureLiveGateTicker(): void {
+  // Same single receiver as Accept (poller desk, or the webhook host). Other
+  // desks never start this, so they can't double-approve or double-remove.
+  startLiveGateTicker(async () => {
+    if (!readLiveGateConfig().enabled) return null;
+    const { botToken, chatId } = await getTelegramCredentials();
+    if (!botToken || !chatId) return null;
+    return { api: tgApi(botToken), dispatchChatId: chatId };
+  });
+}
+
 export function startTelegramPolling(): void {
   if (telegramPollingStarted) return;
   telegramPollingStarted = true;
   void telegramPollLoop();
+  // Only the polling desk posts the daily check-in / reminders (no-op unless DRIVER_LOCATION_GATE=1).
+  startDriverCheckinTicker();
+  ensureLiveGateTicker();
 }
 
 async function telegramPollLoop(): Promise<void> {
@@ -2520,11 +2852,13 @@ async function telegramPollLoop(): Promise<void> {
         const storedRaw = (await storage.getSetting(TELEGRAM_POLL_OFFSET_KEY))?.value ?? "0";
         const stored = parseInt(storedRaw, 10);
         const offset = Number.isFinite(stored) && stored > 0 ? stored : undefined;
-        // Long-poll ~25s. Node fetch waits; allowed_updates keeps the queue to Accept taps.
+        // Long-poll ~25s. Node fetch waits. chat_join_request is included only
+        // while DRIVER_LIVE_GATE=1 so a disabled gate does not consume join
+        // requests that nobody is approving.
         data = await telegramApiCall(botToken, "getUpdates", {
           offset,
           timeout: 25,
-          allowed_updates: ["callback_query", "message", "edited_message"],
+          allowed_updates: telegramAllowedUpdates(readLiveGateConfig().enabled),
         });
       } catch (err: any) {
         console.error(
@@ -2591,6 +2925,7 @@ async function setupTelegramAcceptTransportOnce(): Promise<void> {
       );
     }
     await setTelegramWebhook(webhookUrl);
+    ensureLiveGateTicker();
     return;
   }
 
@@ -2611,7 +2946,7 @@ async function setupTelegramAcceptTransportOnce(): Promise<void> {
   // Do NOT call this on every desk or as the default "no webhook URL" path.
   const cleared = await deleteTelegramWebhook();
   console.log(
-    `[telegram] TELEGRAM_ACCEPT_POLL enabled — long-polling Accept callbacks (webhook cleared: ${cleared.success})`,
+    `[telegram] TELEGRAM_ACCEPT_POLL enabled — long-polling Accept callbacks (webhook cleared: ${cleared.success}, live-gate: ${readLiveGateConfig().enabled})`,
   );
   startTelegramPolling();
 }
