@@ -12,6 +12,29 @@ they're incident history, not a TODO list.
 
 ---
 
+## 2026-10-29 — Live-location check-in + continuous membership gate
+
+**Ask (Zach):** check-in is sharing Telegram Live Location. Continuous gate:
+approve join requests, 10 min to share or be removed (ban+unban), warn once
+then remove if a live share stops/expires/goes stale. Exempt list, timings
+configurable, flag off by default, single poller desk. Nearest-driver DM
+routing and private `/start` handling were dropped from scope. Calls keep
+posting to the group as before.
+
+**What changed (branch `cursor/live-location-gate-8ea7`, PR, not merged):**
+- `server/driver-live-gate-helpers.ts` + `server/driver-live-gate.ts`: state
+  machine and Mongo `driverLiveGate`. Wired through `handleTelegramUpdate`
+  and the existing Accept poller / webhook receiver only.
+- Flag `DRIVER_LIVE_GATE` (default off). Not the daily `DRIVER_LOCATION_GATE`.
+- Tests: `trial/test-driver-live-gate.ts`. Env notes in `README.md` and
+  `.env.example`.
+
+**Rollout:** Disp-1 only (the `TELEGRAM_ACCEPT_POLL=1` desk), after review.
+Bot needs invite-via-link + ban rights. Group invite must be a join-request
+link. Restart that app after turning the flag on.
+
+**Still open:** owner review. Do not promote to `release` from this branch.
+
 ## 2026-10-27 — Accepted / resolved calls come off the board
 
 **Ask (Zach):** once a call is accepted or resolved it should come off the

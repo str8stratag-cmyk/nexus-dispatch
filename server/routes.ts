@@ -104,6 +104,12 @@ import {
   type RemovalReason,
   type TgApi,
 } from "./driver-removal-helpers";
+import {
+  acceptsLocationChat,
+  readLiveGateConfig,
+  telegramAllowedUpdates,
+} from "./driver-live-gate-helpers";
+import { ingestJoinRequest, ingestLiveGateLocation, startLiveGateTicker } from "./driver-live-gate";
 
 
 const sseClients = new Set<Response>();
@@ -2202,17 +2208,39 @@ export {
 export async function handleTelegramUpdate(update: any): Promise<void> {
   // Remember who is active in the dispatch group (for check-in auto-removal and /remove @username).
   void noteSeenMember(update).catch((err) => console.error("[driver-removal] seen tracking failed:", err?.message ?? err));
+  // Join-request gate (no-op unless DRIVER_LIVE_GATE=1). Always return so a
+  // join update is not mistaken for an Accept tap.
+  if (update?.chat_join_request) {
+    try {
+      const { botToken, chatId } = await getTelegramCredentials();
+      if (botToken) {
+        await ingestJoinRequest(update, { api: tgApi(botToken), dispatchChatId: chatId ?? null });
+      }
+    } catch (err: any) {
+      console.error("[driver-live-gate] join request failed:", err?.message ?? err);
+    }
+    return;
+  }
   // Driver Live Location fixes (message.location / edited_message.location).
   const point = parseLocationUpdate(update);
   if (point) {
     try {
-      const { chatId: dispatchChatId } = await getTelegramCredentials();
-      if (!isDispatchGroupChat(point.chatId, dispatchChatId)) {
+      const { botToken, chatId: dispatchChatId } = await getTelegramCredentials();
+      const gateOn = readLiveGateConfig().enabled;
+      // Group fixes stay on the existing board. Private live shares count
+      // as check-in only while the continuous gate is on.
+      if (!acceptsLocationChat(point.chatId, update, dispatchChatId, gateOn)) {
         console.log(`[driver-gps] dropped fix from non-dispatch chat user=${point.telegramUserId}`);
         return;
       }
       await recordDriverLocation(point);
       console.log(`[driver-gps] fix user=${point.telegramUserId} live=${point.isLive}`);
+      if (gateOn && botToken) {
+        await ingestLiveGateLocation(update, point, {
+          api: tgApi(botToken),
+          dispatchChatId: dispatchChatId ?? null,
+        }).catch((err) => console.error("[driver-live-gate] location update failed:", err?.message ?? err));
+      }
     } catch (err: any) {
       console.error("[driver-gps] failed to store location:", err?.message ?? err);
     }
@@ -2732,7 +2760,7 @@ export async function setTelegramWebhook(url?: string): Promise<{ success: boole
   console.log(`[telegram] Setting webhook to ${webhookUrl}`);
   const data = await telegramApiCall(botToken, "setWebhook", {
     url: webhookUrl,
-    allowed_updates: ["callback_query", "message", "edited_message"],
+    allowed_updates: telegramAllowedUpdates(readLiveGateConfig().enabled),
   });
 
   if (data.ok) {
@@ -2779,12 +2807,24 @@ export async function deleteTelegramWebhook(): Promise<{ success: boolean; descr
 const TELEGRAM_POLL_OFFSET_KEY = "telegram_poll_offset";
 let telegramPollingStarted = false;
 
+function ensureLiveGateTicker(): void {
+  // Same single receiver as Accept (poller desk, or the webhook host). Other
+  // desks never start this, so they can't double-approve or double-remove.
+  startLiveGateTicker(async () => {
+    if (!readLiveGateConfig().enabled) return null;
+    const { botToken, chatId } = await getTelegramCredentials();
+    if (!botToken || !chatId) return null;
+    return { api: tgApi(botToken), dispatchChatId: chatId };
+  });
+}
+
 export function startTelegramPolling(): void {
   if (telegramPollingStarted) return;
   telegramPollingStarted = true;
   void telegramPollLoop();
   // Only the polling desk posts the daily check-in / reminders (no-op unless DRIVER_LOCATION_GATE=1).
   startDriverCheckinTicker();
+  ensureLiveGateTicker();
 }
 
 async function telegramPollLoop(): Promise<void> {
@@ -2808,11 +2848,13 @@ async function telegramPollLoop(): Promise<void> {
         const storedRaw = (await storage.getSetting(TELEGRAM_POLL_OFFSET_KEY))?.value ?? "0";
         const stored = parseInt(storedRaw, 10);
         const offset = Number.isFinite(stored) && stored > 0 ? stored : undefined;
-        // Long-poll ~25s. Node fetch waits; allowed_updates keeps the queue to Accept taps.
+        // Long-poll ~25s. Node fetch waits. chat_join_request is included only
+        // while DRIVER_LIVE_GATE=1 so a disabled gate does not consume join
+        // requests that nobody is approving.
         data = await telegramApiCall(botToken, "getUpdates", {
           offset,
           timeout: 25,
-          allowed_updates: ["callback_query", "message", "edited_message"],
+          allowed_updates: telegramAllowedUpdates(readLiveGateConfig().enabled),
         });
       } catch (err: any) {
         console.error(
@@ -2879,6 +2921,7 @@ async function setupTelegramAcceptTransportOnce(): Promise<void> {
       );
     }
     await setTelegramWebhook(webhookUrl);
+    ensureLiveGateTicker();
     return;
   }
 
@@ -2899,7 +2942,7 @@ async function setupTelegramAcceptTransportOnce(): Promise<void> {
   // Do NOT call this on every desk or as the default "no webhook URL" path.
   const cleared = await deleteTelegramWebhook();
   console.log(
-    `[telegram] TELEGRAM_ACCEPT_POLL enabled — long-polling Accept callbacks (webhook cleared: ${cleared.success})`,
+    `[telegram] TELEGRAM_ACCEPT_POLL enabled — long-polling Accept callbacks (webhook cleared: ${cleared.success}, live-gate: ${readLiveGateConfig().enabled})`,
   );
   startTelegramPolling();
 }
