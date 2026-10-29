@@ -96,9 +96,12 @@ export default function DispatchMap({ markers, selectedId = null, onSelectMarker
     const map = L.map(containerRef.current, {
       center: HOME_CENTER,
       zoom: HOME_ZOOM,
-      zoomControl: true,
+      // Built-in zoom control lives top-left, under the map-tools overlay
+      // (Incidents / Fit all / home). Add it bottom-right instead.
+      zoomControl: false,
       attributionControl: true,
     });
+    L.control.zoom({ position: "bottomright" }).addTo(map);
 
     // Carto dark_all now returns watermark tiles ("API KEY REQUIRED" /
     // carto.com/basemaps/apikey). Use keyless Esri canvas — no Vite secrets.
