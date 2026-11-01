@@ -1,5 +1,7 @@
 # Dispatch Monitor — Project Context
 
+> **CLI agents:** read `GRAPHIFY.md` before editing code.
+
 > **Also read `CLAUDE.md`** — a separate, Claude-Code-auto-loaded running log
 > of session-by-session changes (what broke, what changed, why). This file
 > (`AGENTS.md`) stays focused on fleet/device/ops context; `CLAUDE.md` is the
